@@ -6,6 +6,8 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 recipes:
     @just --choose
 
+setup:
+    brew bundle --no-upgrade
 
 fmt: 
     cargo fmt
