@@ -195,9 +195,9 @@ impl Ui {
     /// Returns [`Error::NonInteractive`] when prompting is disabled.
     pub fn select(&self, prompt: &str, flag: &str, options: Vec<String>) -> Result<String> {
         self.ensure_interactive(prompt, flag)?;
-        Select::new(prompt, options)
-            .prompt()
-            .map_err(|e| Error::Other(anyhow::anyhow!(e)))
+        // Irreducible interactive tail: requires a real TTY, so it stays thin and
+        // untested while all guarding logic above is unit-tested.
+        Select::new(prompt, options).prompt().map_err(into_other)
     }
 
     /// Ask the user to pick zero or more options from `options`.
@@ -212,7 +212,7 @@ impl Ui {
         self.ensure_interactive(prompt, flag)?;
         MultiSelect::new(prompt, options)
             .prompt()
-            .map_err(|e| Error::Other(anyhow::anyhow!(e)))
+            .map_err(into_other)
     }
 
     /// Ask the user a yes/no question with a default.
@@ -223,7 +223,7 @@ impl Ui {
         Confirm::new(prompt)
             .with_default(default)
             .prompt()
-            .map_err(|e| Error::Other(anyhow::anyhow!(e)))
+            .map_err(into_other)
     }
 
     /// Ask the user for a free-form text value.
@@ -231,9 +231,7 @@ impl Ui {
     /// Returns [`Error::NonInteractive`] when prompting is disabled.
     pub fn text(&self, prompt: &str, flag: &str) -> Result<String> {
         self.ensure_interactive(prompt, flag)?;
-        Text::new(prompt)
-            .prompt()
-            .map_err(|e| Error::Other(anyhow::anyhow!(e)))
+        Text::new(prompt).prompt().map_err(into_other)
     }
 
     /// Guard that converts a disallowed prompt into a clear error.
@@ -247,6 +245,19 @@ impl Ui {
             })
         }
     }
+}
+
+/// Convert an `inquire` (or any standard) error into our catch-all
+/// [`Error::Other`] variant.
+///
+/// Extracted from the prompt wrappers so the error-mapping is a named, directly
+/// testable function rather than an inline closure buried behind the
+/// TTY-requiring `inquire` call.
+fn into_other<E>(error: E) -> Error
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    Error::Other(error.into())
 }
 
 #[cfg(test)]
