@@ -6,6 +6,16 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 recipes:
     @just --choose
 
+setup:
+    brew bundle --no-upgrade
+    lefthook install
+
+secrets-scan:
+    @echo "Scanning the full working tree"
+    @gitleaks dir \
+      --config .gitleaks.toml \
+      --redact --no-banner --verbose \
+      .
 
 fmt: 
     cargo fmt

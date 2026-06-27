@@ -1,0 +1,343 @@
+//! Integration tests for the `sopsy init` command, exercised through the real
+//! compiled binary against **real files**.
+//!
+//! The happy path uses the real `sops` + `age` toolchain: a genuine age keypair
+//! (`age-keygen`) is registered as the recipient, the binary encrypts a real
+//! `.env.encrypted`, and we decrypt it back with `SOPS_AGE_KEY_FILE`. The Secure
+//! Enclave *generate* path cannot run in CI (it needs Apple hardware), so it is
+//! driven through a **fake** `age-plugin-se` and a **fake** `sops` injected via
+//! `SOPSY_AGE_PLUGIN_SE_BIN` / `SOPSY_SOPS_BIN`. Env-mutating tests are
+//! `#[serial]` because those variables are process-wide.
+
+use std::path::{Path, PathBuf};
+use std::process::Command as StdCommand;
+
+use assert_cmd::Command;
+use assert_fs::TempDir;
+use predicates::prelude::*;
+use serial_test::serial;
+
+// ----------------------------------------------------------------------------
+// Fixtures (local to this test file)
+// ----------------------------------------------------------------------------
+
+/// Initialise a real git repository inside `dir` (config set so commits/ignore
+/// checks work deterministically).
+fn init_git_repo(dir: &Path) {
+    run_git(dir, &["init", "-q"]);
+    run_git(dir, &["config", "user.email", "test@example.com"]);
+    run_git(dir, &["config", "user.name", "Sopsy Test"]);
+}
+
+/// Run a `git` subcommand in `dir`, asserting success.
+fn run_git(dir: &Path, args: &[&str]) {
+    let status = StdCommand::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .status()
+        .expect("git should be installed");
+    assert!(status.success(), "git {args:?} failed");
+}
+
+/// Generate a real age keypair, returning `(public_key, key_file_path)`.
+fn generate_age_key(dir: &Path) -> (String, PathBuf) {
+    let key_file = dir.join("age-key.txt");
+    let output = StdCommand::new("age-keygen")
+        .arg("-o")
+        .arg(&key_file)
+        .output()
+        .expect("age-keygen should be installed");
+    assert!(
+        output.status.success(),
+        "age-keygen failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let public_key = stderr
+        .lines()
+        .find_map(|line| line.split("Public key:").nth(1))
+        .map(|s| s.trim().to_string())
+        .expect("age-keygen should print the public key");
+    (public_key, key_file)
+}
+
+/// Build a `Command` for the compiled `sopsy` binary rooted at `dir`.
+fn sopsy_in(dir: &Path) -> Command {
+    let mut cmd = Command::cargo_bin("sopsy").expect("binary `sopsy` should build");
+    cmd.current_dir(dir);
+    cmd
+}
+
+/// Write an executable shell script to `path` with the given body.
+fn write_script(path: &Path, body: &str) {
+    std::fs::write(path, format!("#!/bin/sh\n{body}")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Real end-to-end happy path (real sops + age)
+// ----------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn init_with_public_key_encrypts_real_env() {
+    let dir = TempDir::new().unwrap();
+    init_git_repo(dir.path());
+    let (public_key, key_file) = generate_age_key(dir.path());
+
+    // Seed a real `.env` so we can assert an exact decrypt round-trip.
+    let plaintext = "PASSWORD=hunter2\nAPI_KEY=abc123\n";
+    std::fs::write(dir.path().join(".env"), plaintext).unwrap();
+
+    sopsy_in(dir.path())
+        .args([
+            "--non-interactive",
+            "init",
+            "--no-generate",
+            "--public-key",
+            &public_key,
+            "--recipient-name",
+            "primary",
+        ])
+        .assert()
+        .success();
+
+    // All four bootstrap files were created.
+    for name in [".sops.yaml", ".env.example", ".env.encrypted", ".sopsy.yml"] {
+        assert!(
+            dir.path().join(name).exists(),
+            "{name} should have been created"
+        );
+    }
+
+    // `.env.encrypted` carries real sops/age ciphertext.
+    let encrypted = std::fs::read_to_string(dir.path().join(".env.encrypted")).unwrap();
+    assert!(encrypted.contains("ENC["), "missing ENC[ markers");
+    assert!(encrypted.contains("sops"), "missing sops metadata");
+    assert_ne!(encrypted, plaintext, "file was not encrypted");
+
+    // It decrypts back to exactly the seed using the private key.
+    let decrypted = StdCommand::new("sops")
+        .env("SOPS_AGE_KEY_FILE", &key_file)
+        .args([
+            "--decrypt",
+            "--input-type",
+            "dotenv",
+            "--output-type",
+            "dotenv",
+        ])
+        .arg(dir.path().join(".env.encrypted"))
+        .output()
+        .unwrap();
+    assert!(
+        decrypted.status.success(),
+        "decrypt failed: {}",
+        String::from_utf8_lossy(&decrypted.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&decrypted.stdout), plaintext);
+
+    // `.gitignore` protects plaintext `.env` but the recipient key is recorded.
+    let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+    assert!(gitignore.lines().any(|l| l == ".env"), "{gitignore}");
+    let config = std::fs::read_to_string(dir.path().join(".sopsy.yml")).unwrap();
+    assert!(config.contains(&public_key), "recipient key not recorded");
+    assert!(config.contains("primary"), "recipient name not recorded");
+}
+
+#[test]
+#[serial]
+fn init_seeds_from_env_example_when_no_dotenv() {
+    let dir = TempDir::new().unwrap();
+    init_git_repo(dir.path());
+    let (public_key, key_file) = generate_age_key(dir.path());
+
+    // Pre-create a custom `.env.example` and provide NO `.env`, so the seed for
+    // `.env.encrypted` must come from `.env.example`.
+    let example = "FROM_EXAMPLE=yes\nTOKEN=seed-me\n";
+    std::fs::write(dir.path().join(".env.example"), example).unwrap();
+
+    sopsy_in(dir.path())
+        .args([
+            "--non-interactive",
+            "init",
+            "--no-generate",
+            "--public-key",
+            &public_key,
+        ])
+        .assert()
+        .success()
+        // Confirms init kept the existing `.env.example` (info branch).
+        .stdout(predicate::str::contains(".env.example already present"));
+
+    // Decrypting `.env.encrypted` yields exactly the `.env.example` contents.
+    let decrypted = StdCommand::new("sops")
+        .env("SOPS_AGE_KEY_FILE", &key_file)
+        .args([
+            "--decrypt",
+            "--input-type",
+            "dotenv",
+            "--output-type",
+            "dotenv",
+        ])
+        .arg(dir.path().join(".env.encrypted"))
+        .output()
+        .unwrap();
+    assert!(
+        decrypted.status.success(),
+        "decrypt failed: {}",
+        String::from_utf8_lossy(&decrypted.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&decrypted.stdout), example);
+}
+
+// ----------------------------------------------------------------------------
+// Idempotency
+// ----------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn rerun_preserves_sops_yaml_unless_forced() {
+    let dir = TempDir::new().unwrap();
+    init_git_repo(dir.path());
+    let (public_key, _key_file) = generate_age_key(dir.path());
+
+    let args = [
+        "--non-interactive",
+        "init",
+        "--no-generate",
+        "--public-key",
+        public_key.as_str(),
+    ];
+
+    sopsy_in(dir.path()).args(args).assert().success();
+
+    // Tag `.sops.yaml` with a sentinel an idempotent re-run must preserve.
+    let sops_yaml = dir.path().join(".sops.yaml");
+    let original = std::fs::read_to_string(&sops_yaml).unwrap();
+    std::fs::write(&sops_yaml, format!("{original}# SENTINEL\n")).unwrap();
+
+    // Re-run without --force: sentinel survives (file left untouched).
+    sopsy_in(dir.path()).args(args).assert().success();
+    assert!(
+        std::fs::read_to_string(&sops_yaml)
+            .unwrap()
+            .contains("# SENTINEL"),
+        "non-forced re-run must not clobber .sops.yaml"
+    );
+
+    // Re-run with --force: file is rewritten and the sentinel is gone.
+    sopsy_in(dir.path())
+        .args(args)
+        .arg("--force")
+        .assert()
+        .success();
+    assert!(
+        !std::fs::read_to_string(&sops_yaml)
+            .unwrap()
+            .contains("# SENTINEL"),
+        "--force must rewrite .sops.yaml"
+    );
+}
+
+// ----------------------------------------------------------------------------
+// Secure Enclave generate path (fake age-plugin-se + fake sops)
+// ----------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn init_generates_enclave_identity_with_fakes() {
+    let dir = TempDir::new().unwrap();
+    init_git_repo(dir.path());
+
+    let fake_pubkey = "age1se1qg8vwwqhztnh3vpt2nf2xwn7famktxlmp0nmkfltp8lkvzp8nafkqleh258";
+
+    // Fake `age-plugin-se keygen` emitting a canned identity file.
+    let plugin = dir.path().join("age-plugin-se");
+    write_script(
+        &plugin,
+        &format!("cat <<'EOF'\n# public key: {fake_pubkey}\nAGE-PLUGIN-SE-1QFAKEIDENTITY\nEOF\n"),
+    );
+
+    // Fake `sops`: answers --version, otherwise records the invocation and
+    // writes a marker into the (last-arg) target file to simulate encryption.
+    let record = dir.path().join("sops-invocations.log");
+    let sops = dir.path().join("sops");
+    write_script(
+        &sops,
+        &format!(
+            "case \"$1\" in\n  --version) echo 'sops 9.9.9 (fake)'; exit 0;;\nesac\n\
+             echo \"$@\" >> '{record}'\n\
+             for a in \"$@\"; do f=\"$a\"; done\n\
+             echo 'ENC[fake-sops]' > \"$f\"\n",
+            record = record.display()
+        ),
+    );
+
+    sopsy_in(dir.path())
+        .env("SOPSY_AGE_PLUGIN_SE_BIN", &plugin)
+        .env("SOPSY_SOPS_BIN", &sops)
+        .args(["--non-interactive", "init"])
+        .assert()
+        .success();
+
+    // The generated enclave public key is recorded in `.sopsy.yml`.
+    let config = std::fs::read_to_string(dir.path().join(".sopsy.yml")).unwrap();
+    assert!(
+        config.contains(fake_pubkey),
+        "enclave identity not recorded in .sopsy.yml:\n{config}"
+    );
+
+    // sops was actually invoked to encrypt `.env.encrypted`.
+    let log = std::fs::read_to_string(&record).unwrap();
+    assert!(log.contains("--encrypt"), "sops encrypt not invoked: {log}");
+    assert!(log.contains("--in-place"), "sops not run in place: {log}");
+    let encrypted = std::fs::read_to_string(dir.path().join(".env.encrypted")).unwrap();
+    assert!(
+        encrypted.contains("ENC[fake-sops]"),
+        "fake sops did not encrypt"
+    );
+}
+
+// ----------------------------------------------------------------------------
+// Friendly errors
+// ----------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn non_interactive_without_key_or_generation_fails_friendly() {
+    let dir = TempDir::new().unwrap();
+    init_git_repo(dir.path());
+
+    sopsy_in(dir.path())
+        .args(["--non-interactive", "init", "--no-generate"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--public-key"));
+
+    // Nothing destructive was written when init bailed out early.
+    assert!(!dir.path().join(".sops.yaml").exists());
+}
+
+#[test]
+fn init_outside_git_repo_fails_friendly() {
+    let dir = TempDir::new().unwrap();
+    // No `git init`: must produce a clear, friendly error.
+    sopsy_in(dir.path())
+        .args([
+            "--non-interactive",
+            "init",
+            "--no-generate",
+            "--public-key",
+            "age1abc",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("git repository"));
+}

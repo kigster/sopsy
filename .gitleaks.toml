@@ -1,0 +1,47 @@
+# Gitleaks configuration — EXTENDS the built-in ruleset (does not replace it).
+# Docs: https://github.com/gitleaks/gitleaks
+#
+# Used by both the local pre-commit hook (lefthook.yml) and the gitleaks CI job,
+# so local and CI behavior match.
+
+title = "Sopsy gitleaks config"
+
+[extend]
+# Inherit gitleaks' default rules (AWS, OpenAI, Stripe, generic high-entropy, etc.)
+# and only ADD the allowlists below. Do not set a custom `path` alongside useDefault.
+useDefault = true
+
+# Global allowlists apply to every rule. Array-of-tables syntax (gitleaks v8.25+).
+[[allowlists]]
+description = "Example/sample env files and committed fixtures (never real secrets)"
+paths = [
+  '''(^|/)\.env\.example$''',
+  '''(^|/)\.env\.sample$''',
+  '''.*\.example\.(env|yml|yaml|json|toml)$''',
+  '''(^|/)spec/fixtures/.*''',
+  '''(^|/)spec/.*/fixtures/.*''',
+  '''(^|/)__fixtures__/.*''',
+  # detect-secrets baseline: stores only one-way `hashed_secret` digests + metadata,
+  # never cleartext. gitleaks' generic-high-entropy rule otherwise flags every hash
+  # as a secret. The two scanners share no config, so gitleaks needs this explicitly.
+  '''(^|/)\.secrets\.baseline$''',
+]
+
+[[allowlists]]
+description = "Obvious non-secret placeholders"
+regexes = [
+  '''(?i)\b(localhost|example\.com|changeme|placeholder|your[-_ ]?(api[-_ ]?)?key[-_ ]?here|dummy|xxxx+|\.\.\.\.)\b''',
+]
+
+[[allowlists]]
+# An age PUBLIC key (age1.../age1se1...) is the value teammates and admins
+# exchange to grant decryption access — it is meant to be shared and is not a
+# secret. The flagged matches are example/fake public keys in the enclave unit
+# tests (src/enclave/mod.rs) and the fake age-plugin-se script (tests/enclave.rs).
+# This matches only the lowercase age1 PUBLIC form; it does NOT allowlist age
+# PRIVATE material (AGE-SECRET-KEY-... keys or AGE-PLUGIN-SE-... identities), so a
+# real private-key leak is still caught.
+description = "age public recipients (age1.../age1se1...) are not secrets"
+regexes = [
+  '''age1[0-9a-z]{8,}''',
+]
