@@ -67,6 +67,36 @@ fn sopsy() -> AssertCommand {
     AssertCommand::cargo_bin("sopsy").expect("binary `sopsy` should build")
 }
 
+/// Mark `path` executable (no-op on non-unix).
+fn make_executable(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+}
+
+/// Write a fake `sops` that records the `EDITOR` it received plus its argv to
+/// `log`, then exits successfully.
+fn write_recording_sops(path: &Path, log: &Path) {
+    let script = format!(
+        "#!/bin/sh\n{{ echo \"EDITOR=$EDITOR\"; echo \"ARGS=$*\"; }} > '{}'\n",
+        log.display()
+    );
+    std::fs::write(path, script).unwrap();
+    make_executable(path);
+}
+
+/// Write a fake `sops` that prints to stderr and exits non-zero, simulating a
+/// failed edit (e.g. handed a file that isn't sops-encrypted).
+fn write_failing_sops(path: &Path) {
+    let script = "#!/bin/sh\necho 'boom: not a sops file' >&2\nexit 7\n";
+    std::fs::write(path, script).unwrap();
+    make_executable(path);
+}
+
 #[test]
 #[serial]
 fn edit_roundtrips_an_encrypted_dotenv() {
@@ -205,5 +235,95 @@ fn edit_forwards_editor_and_sops_args_to_fake_sops() {
     assert!(
         recorded.contains("secrets.env"),
         "target file not passed to sops; got:\n{recorded}"
+    );
+}
+
+#[test]
+#[serial]
+fn edit_wraps_sops_failure_in_friendly_message() {
+    let dir = TempDir::new().unwrap();
+
+    let fake_sops = dir.path().join("failing-sops.sh");
+    write_failing_sops(&fake_sops);
+
+    let target = dir.path().join("secrets.env");
+    std::fs::write(&target, "FOO=bar\n").unwrap();
+
+    sopsy()
+        .arg("--non-interactive")
+        .arg("edit")
+        .arg("secrets.env")
+        .arg("--editor")
+        .arg("my-editor")
+        .current_dir(dir.path())
+        .env("SOPSY_SOPS_BIN", &fake_sops)
+        .assert()
+        .failure()
+        // The sopsy-flavored wrapper text from `commands::edit::run`.
+        .stderr(predicate::str::contains(
+            "is it a valid sops-encrypted file?",
+        ))
+        .stderr(predicate::str::contains("secrets.env"));
+}
+
+#[test]
+#[serial]
+fn edit_resolves_editor_from_visual_env() {
+    let dir = TempDir::new().unwrap();
+
+    let log = dir.path().join("sops-invocation.log");
+    let fake_sops = dir.path().join("recording-sops.sh");
+    write_recording_sops(&fake_sops, &log);
+
+    let target = dir.path().join("secrets.env");
+    std::fs::write(&target, "FOO=bar\n").unwrap();
+
+    // No `--editor`, no `EDITOR`: resolution must fall through to `$VISUAL`.
+    sopsy()
+        .arg("--non-interactive")
+        .arg("edit")
+        .arg("secrets.env")
+        .current_dir(dir.path())
+        .env("SOPSY_SOPS_BIN", &fake_sops)
+        .env_remove("EDITOR")
+        .env("VISUAL", "visual-editor")
+        .assert()
+        .success();
+
+    let recorded = std::fs::read_to_string(&log).expect("fake sops should have logged");
+    assert!(
+        recorded.contains("EDITOR=visual-editor"),
+        "VISUAL not used as the editor; got:\n{recorded}"
+    );
+}
+
+#[test]
+#[serial]
+fn edit_falls_back_to_default_editor() {
+    let dir = TempDir::new().unwrap();
+
+    let log = dir.path().join("sops-invocation.log");
+    let fake_sops = dir.path().join("recording-sops.sh");
+    write_recording_sops(&fake_sops, &log);
+
+    let target = dir.path().join("secrets.env");
+    std::fs::write(&target, "FOO=bar\n").unwrap();
+
+    // Neither `--editor`, `$EDITOR`, nor `$VISUAL`: must fall back to `vi`.
+    sopsy()
+        .arg("--non-interactive")
+        .arg("edit")
+        .arg("secrets.env")
+        .current_dir(dir.path())
+        .env("SOPSY_SOPS_BIN", &fake_sops)
+        .env_remove("EDITOR")
+        .env_remove("VISUAL")
+        .assert()
+        .success();
+
+    let recorded = std::fs::read_to_string(&log).expect("fake sops should have logged");
+    assert!(
+        recorded.contains("EDITOR=vi"),
+        "default editor `vi` not used; got:\n{recorded}"
     );
 }
