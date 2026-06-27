@@ -59,8 +59,7 @@ fn dispatch(ui: &Ui, command: Command) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{EditArgs, InitArgs};
-    use std::path::PathBuf;
+    use crate::cli::InitArgs;
 
     fn test_ui() -> Ui {
         Ui::new(false, false, false)
@@ -90,16 +89,7 @@ mod tests {
             )
             .is_err()
         );
-        assert!(
-            dispatch(
-                &ui,
-                Command::Edit(EditArgs {
-                    file: PathBuf::from("secrets.env"),
-                    editor: None,
-                    sops_args: vec![],
-                })
-            )
-            .is_ok()
-        );
+        // `Command::Edit` is no longer a stub; its behavior (file existence,
+        // sops invocation) is covered by `tests/edit.rs` against real `sops`.
     }
 }
