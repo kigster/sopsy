@@ -102,19 +102,14 @@ pub fn run(ui: &Ui) -> Result<()> {
     // 3. `.sops.yaml` must exist and parse with at least one creation rule.
     let sops_rules = load_sops_rules(ui, &repo, &mut failures);
 
-    // Gather the set of tracked files sopsy considers encrypted artifacts.
+    // Gather the set of files sopsy considers encrypted artifacts. We look at
+    // BOTH the git-tracked files AND the files present on disk that match the
+    // configured `encrypted_globs`. The on-disk pass matters immediately after
+    // `sopsy init`: the freshly created `.env.encrypted` is not committed yet,
+    // so without it invariants 4 and 6 would pass vacuously ("no encrypted
+    // files to verify") even when the real artifact is broken.
     let tracked = git::tracked_files(&repo)?;
-    let encrypted_files: Vec<PathBuf> = tracked
-        .iter()
-        .filter(|p| {
-            let s = p.to_string_lossy();
-            config
-                .encrypted_globs
-                .iter()
-                .any(|glob| glob_is_match(glob, &s))
-        })
-        .cloned()
-        .collect();
+    let encrypted_files = gather_encrypted_files(&repo, &config, &tracked)?;
 
     // 4. Every encrypted file must match at least one creation-rule path_regex.
     if encrypted_files.is_empty() {
@@ -176,6 +171,63 @@ pub fn run(ui: &Ui) -> Result<()> {
             failures.join(", ")
         )))
     }
+}
+
+/// Collect every file sopsy treats as an encrypted artifact: the union of
+/// git-tracked files and on-disk files (anywhere under `repo`, excluding
+/// `.git/`) whose repo-relative path matches one of `config.encrypted_globs`.
+///
+/// Tracked and on-disk paths are both repo-relative, so storing them in a
+/// [`BTreeSet`] both deduplicates the two sources and yields a deterministic
+/// order for the printed checklist.
+fn gather_encrypted_files(
+    repo: &Path,
+    config: &Config,
+    tracked: &[PathBuf],
+) -> Result<Vec<PathBuf>> {
+    use std::collections::BTreeSet;
+
+    let matches_glob = |rel: &Path| {
+        let s = rel.to_string_lossy();
+        config
+            .encrypted_globs
+            .iter()
+            .any(|glob| glob_is_match(glob, &s))
+    };
+
+    let mut found: BTreeSet<PathBuf> = BTreeSet::new();
+
+    // Source 1: committed files matching an encrypted glob.
+    for path in tracked {
+        if matches_glob(path) {
+            found.insert(path.clone());
+        }
+    }
+
+    // Source 2: on-disk files matching an encrypted glob (skip the `.git`
+    // directory; the plaintext secrets we care about are gitignored and never
+    // match the encrypted globs anyway).
+    let mut stack = vec![repo.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                if path.file_name().is_some_and(|n| n == ".git") {
+                    continue;
+                }
+                stack.push(path);
+            } else if file_type.is_file()
+                && let Ok(rel) = path.strip_prefix(repo)
+                && matches_glob(rel)
+            {
+                found.insert(rel.to_path_buf());
+            }
+        }
+    }
+
+    Ok(found.into_iter().collect())
 }
 
 /// Invariant 3: load `.sops.yaml`, print its pass/fail line, and return the list
@@ -376,6 +428,15 @@ mod tests {
     }
 
     #[test]
+    fn glob_question_mark_matches_single_non_slash() {
+        // `?` matches exactly one non-`/` character.
+        assert!(glob_is_match("a?c", "abc"));
+        assert!(!glob_is_match("a?c", "ac")); // too short
+        assert!(!glob_is_match("a?c", "a/c")); // `?` never crosses `/`
+        assert!(!glob_is_match("a?c", "abbc")); // too long
+    }
+
+    #[test]
     fn regex_matches_sops_path_regexes() {
         assert!(regex_is_match(".*", ".env.encrypted"));
         assert!(regex_is_match(r"\.encrypted$", ".env.encrypted"));
@@ -387,5 +448,52 @@ mod tests {
         ));
         assert!(regex_is_match("^secret", "secret.encrypted"));
         assert!(!regex_is_match("^secret", "a-secret"));
+    }
+
+    #[test]
+    fn regex_literal_star_repeats_and_backtracks() {
+        // `b*` with a literal `b` must repeat and then match the rest.
+        assert!(regex_is_match("ab*c", "abbbc"));
+        assert!(regex_is_match("ab*c", "ac")); // zero repetitions
+        assert!(!regex_is_match("ab*c", "axc")); // cannot reach the trailing `c`
+    }
+
+    #[test]
+    fn regex_escaped_literal_star_repeats() {
+        // `\.*` is a repeated literal dot (the escaped form exercised by the
+        // `match_star` branch reached through a `\`-escape).
+        assert!(regex_is_match(r"x\.*y", "x..y"));
+        assert!(regex_is_match(r"x\.*y", "xy")); // zero dots
+        assert!(!regex_is_match(r"x\.*y", "xay"));
+    }
+
+    #[test]
+    fn gather_unions_tracked_and_on_disk_files() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let repo = dir.path();
+
+        // A tracked, on-disk artifact (present in both sources → deduped).
+        std::fs::write(repo.join(".env.encrypted"), "x: ENC[v]\n").unwrap();
+        // A nested, *untracked* artifact only on disk.
+        std::fs::create_dir(repo.join("config")).unwrap();
+        std::fs::write(repo.join("config/db.encrypted.yaml"), "y: ENC[v]\n").unwrap();
+        // A non-matching file is ignored.
+        std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+        // `.git/` is skipped even if it contains a matching name.
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD.encrypted"), "z: ENC[v]\n").unwrap();
+
+        let config = Config::default();
+        let tracked = vec![PathBuf::from(".env.encrypted")];
+        let found = gather_encrypted_files(repo, &config, &tracked).unwrap();
+
+        assert_eq!(
+            found,
+            vec![
+                PathBuf::from(".env.encrypted"),
+                PathBuf::from("config/db.encrypted.yaml"),
+            ],
+            "expected the deduped union of tracked + on-disk artifacts, .git skipped"
+        );
     }
 }
