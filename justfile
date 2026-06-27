@@ -22,6 +22,8 @@ run:
 package:
     cargo package --list
 
-publish:
+publish-dry-run:
     cargo publish --dry-run
 
+publish: fmt warnings test package publish-dry-run
+    cargo publish
