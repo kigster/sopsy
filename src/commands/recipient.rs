@@ -462,9 +462,13 @@ fn parse_age_keys(value: &Value) -> Vec<String> {
     }
 }
 
-/// Render a list of age keys as a YAML sequence value.
+/// Render a list of age keys as the canonical sops `age:` value: a single
+/// comma-separated string. sops accepts both a string and a YAML sequence here,
+/// but only the string form is portable across sops versions (older releases
+/// reject a sequence with "cannot unmarshal !!seq into string"), so sopsy always
+/// writes the string form — matching what `sopsy init` generates.
 fn age_keys_to_value(keys: &[String]) -> Value {
-    Value::Sequence(keys.iter().cloned().map(Value::String).collect())
+    Value::String(keys.join(","))
 }
 
 #[cfg(test)]

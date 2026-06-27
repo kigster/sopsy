@@ -71,11 +71,10 @@ fn git_init(dir: &Path) {
 }
 
 /// Write a `.sops.yaml` with a single creation rule encrypting
-/// `\.env\.encrypted$` to `public_key` (as a YAML list).
+/// `\.env\.encrypted$` to `public_key` (canonical comma-separated string form).
 fn write_sops_yaml(dir: &Path, public_key: &str) {
-    let config = format!(
-        "creation_rules:\n  - path_regex: \\.env\\.encrypted$\n    age:\n      - {public_key}\n"
-    );
+    let config =
+        format!("creation_rules:\n  - path_regex: \\.env\\.encrypted$\n    age: {public_key}\n");
     std::fs::write(dir.join(".sops.yaml"), config).unwrap();
 }
 
@@ -390,9 +389,9 @@ const SOPSY_TWO: &str = "recipients:\n  \
     - name: alice\n    public_key: age1alice\n    break_glass: true\n  \
     - name: bob\n    public_key: age1bob\n    break_glass: false\n";
 
-/// A `.sops.yaml` whose single rule's `age:` list contains only alice's key.
-const SOPS_ALICE_ONLY: &str =
-    "creation_rules:\n  - path_regex: \\.enc$\n    age:\n      - age1alice\n";
+/// A `.sops.yaml` whose single rule's `age:` value contains only alice's key
+/// (canonical comma-separated string form).
+const SOPS_ALICE_ONLY: &str = "creation_rules:\n  - path_regex: \\.enc$\n    age: age1alice\n";
 
 /// Build a git repo in `dir`, optionally writing `.sopsy.yml`/`.sops.yaml`,
 /// and switch the process cwd into it.
