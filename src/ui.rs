@@ -264,6 +264,7 @@ where
 mod tests {
     use super::*;
 
+    /// A `Ui` with everything off (the typical CI / `--non-interactive` shape).
     fn noninteractive_ui() -> Ui {
         Ui {
             color: false,
@@ -272,13 +273,96 @@ mod tests {
         }
     }
 
+    /// A `Ui` with color, verbosity, and interactivity all forced on.
+    ///
+    /// Constructed directly (bypassing [`Ui::new`], which downgrades these based
+    /// on TTY detection) so the color-on rendering paths are exercised even when
+    /// tests run with stdout redirected to a pipe.
+    fn color_ui() -> Ui {
+        Ui {
+            color: true,
+            verbose: true,
+            interactive: true,
+        }
+    }
+
     #[test]
-    fn prompts_error_in_non_interactive_mode() {
+    fn new_downgrades_color_and_interactivity_without_tty() {
+        // Under `cargo test` stdout is not a terminal, so even when the caller
+        // asks for color + interactivity both must be disabled.
+        let ui = Ui::new(true, true, true);
+        assert!(!ui.color_enabled());
+        assert!(!ui.is_interactive());
+        // Verbosity is independent of the terminal and must be preserved.
+        assert!(ui.is_verbose());
+    }
+
+    #[test]
+    fn accessors_reflect_constructed_flags() {
+        let ui = color_ui();
+        assert!(ui.color_enabled());
+        assert!(ui.is_verbose());
+        assert!(ui.is_interactive());
+    }
+
+    #[test]
+    fn all_prompts_error_in_non_interactive_mode() {
         let ui = noninteractive_ui();
-        let err = ui
-            .confirm("Proceed?", "--yes", true)
-            .expect_err("should refuse to prompt");
-        assert!(matches!(err, Error::NonInteractive { .. }));
+        assert!(matches!(
+            ui.select("Pick one", "--choice", vec!["a".into(), "b".into()])
+                .expect_err("select should refuse to prompt"),
+            Error::NonInteractive { .. }
+        ));
+        assert!(matches!(
+            ui.multi_select("Pick some", "--choices", vec!["a".into()])
+                .expect_err("multi_select should refuse to prompt"),
+            Error::NonInteractive { .. }
+        ));
+        assert!(matches!(
+            ui.confirm("Proceed?", "--yes", true)
+                .expect_err("confirm should refuse to prompt"),
+            Error::NonInteractive { .. }
+        ));
+        assert!(matches!(
+            ui.text("Name?", "--name")
+                .expect_err("text should refuse to prompt"),
+            Error::NonInteractive { .. }
+        ));
+    }
+
+    #[test]
+    fn ensure_interactive_is_ok_when_interactive() {
+        let ui = color_ui();
+        assert!(ui.ensure_interactive("Proceed?", "--yes").is_ok());
+    }
+
+    #[test]
+    fn formatters_render_plainly_without_color() {
+        let ui = noninteractive_ui();
+        ui.success("done");
+        ui.failure("nope");
+        ui.warn("careful");
+        ui.info("fyi");
+        ui.header("Section");
+        // `debug` is a no-op when verbose is off; assert it stays silent-safe.
+        ui.debug("hidden");
+        assert_eq!(ui.paint("plain", Style::new().red()), "plain");
+    }
+
+    #[test]
+    fn formatters_render_with_color() {
+        let ui = color_ui();
+        ui.success("done");
+        ui.failure("nope");
+        ui.warn("careful");
+        ui.info("fyi");
+        ui.header("Section");
+        // With verbose on, `debug` actually prints (covering its body).
+        ui.debug("verbose detail");
+        // The colored `paint` branch must wrap the text in ANSI escapes.
+        let painted = ui.paint("plain", Style::new().red());
+        assert!(painted.contains("plain"));
+        assert_ne!(painted, "plain");
     }
 
     #[test]
@@ -290,9 +374,37 @@ mod tests {
     }
 
     #[test]
+    fn animated_line_colorizes_each_character() {
+        // Covers the per-character palette loop; with more than the palette's
+        // length of characters it also exercises the wrap-around indexing.
+        let ui = color_ui();
+        ui.animated_line("");
+        ui.animated_line("the quick brown fox jumps");
+    }
+
+    #[test]
     fn hidden_spinner_when_no_color() {
         let ui = noninteractive_ui();
         let pb = ui.spinner("working");
         pb.finish_and_clear();
+    }
+
+    #[test]
+    fn real_spinner_when_color_enabled() {
+        let ui = color_ui();
+        let pb = ui.spinner("working");
+        pb.finish_and_clear();
+    }
+
+    #[test]
+    fn flush_does_not_panic() {
+        noninteractive_ui().flush();
+    }
+
+    #[test]
+    fn into_other_wraps_standard_errors() {
+        let err = into_other(std::io::Error::other("boom"));
+        assert!(matches!(err, Error::Other(_)));
+        assert!(err.to_string().contains("boom"));
     }
 }
