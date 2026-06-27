@@ -19,6 +19,11 @@ secrets-scan:
       --config .gitleaks.toml \
       --redact --no-banner --verbose \
       .
+build:
+    cargo build --release
+
+install: build
+    cargo install --path .
 
 fmt: 
     cargo fmt
@@ -41,6 +46,7 @@ publish-dry-run:
 publish: fmt warnings test package publish-dry-run
     cargo publish
 
+<<<<<<< HEAD
 build: fmt warnings 
     cargo build --release
 
