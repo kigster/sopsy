@@ -19,7 +19,7 @@ secrets-scan:
       --config .gitleaks.toml \
       --redact --no-banner --verbose \
       .
-build:
+build: fmt warnings 
     cargo build --release
 
 install: build
@@ -45,12 +45,6 @@ publish-dry-run:
 
 publish: fmt warnings test package publish-dry-run
     cargo publish
-
-build: fmt warnings 
-    cargo build --release
-
-install: test build
-    cargo install sopsy        
 
 release:
     git tag -f "v{{version}}"
