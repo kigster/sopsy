@@ -18,7 +18,13 @@ use sopsy::sops::{self, FileType};
 
 /// Generate an age keypair, returning `(public_key, key_file_path)`.
 fn generate_age_key(dir: &Path) -> (String, std::path::PathBuf) {
-    let key_file = dir.join("age-key.txt");
+    generate_age_key_named(dir, "age-key.txt")
+}
+
+/// Generate an age keypair written to `dir/<file_name>`, returning
+/// `(public_key, key_file_path)`.
+fn generate_age_key_named(dir: &Path, file_name: &str) -> (String, std::path::PathBuf) {
+    let key_file = dir.join(file_name);
     let output = Command::new("age-keygen")
         .arg("-o")
         .arg(&key_file)
@@ -134,4 +140,232 @@ fn roundtrips_all_file_types() {
         std::env::remove_var("SOPS_AGE_KEY_FILE");
     }
     std::env::set_current_dir(original_cwd).unwrap();
+}
+
+/// Decrypt `file` (dotenv) using `key_file` as the only age key, returning
+/// whether decryption succeeded. The `SOPS_AGE_KEY_FILE` override is set on the
+/// child only, so the ambient (process-wide) key does not interfere.
+fn decrypts_with(file: &Path, key_file: &Path) -> bool {
+    Command::new("sops")
+        .env("SOPS_AGE_KEY_FILE", key_file)
+        .args([
+            "--decrypt",
+            "--input-type",
+            "dotenv",
+            "--output-type",
+            "dotenv",
+        ])
+        .arg(file)
+        .output()
+        .expect("sops should be installed")
+        .status
+        .success()
+}
+
+/// The headline `updatekeys` test: a real sops-encrypted dotenv file in a
+/// directory is re-wrapped for a newly added recipient when `.sops.yaml` gains
+/// a second key. Proves the directory walk + per-file `updatekeys` works with
+/// the real sops 3.13.x CLI (which refuses directories and needs `--input-type`).
+#[test]
+#[serial]
+fn updatekeys_rewraps_directory_for_added_recipient() {
+    let dir = TempDir::new().unwrap();
+    let (pubkey_a, key_file_a) = generate_age_key_named(dir.path(), "key-a.txt");
+    let (pubkey_b, key_file_b) = generate_age_key_named(dir.path(), "key-b.txt");
+
+    // Start with only recipient A in the creation rules.
+    write_sops_config(dir.path(), &pubkey_a);
+
+    let original_cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+    // updatekeys must decrypt the existing data key with A's private key, so the
+    // ambient key file is A. SAFETY: serialized via `#[serial]`.
+    unsafe {
+        std::env::set_var("SOPS_AGE_KEY_FILE", &key_file_a);
+    }
+
+    // A real sops-encrypted dotenv file (the primary sopsy artifact).
+    let env_path = dir.path().join(".env.encrypted");
+    std::fs::write(&env_path, "PASSWORD=hunter2\nAPI_KEY=abc123\n").unwrap();
+    sops::encrypt_in_place(&env_path, FileType::Dotenv).unwrap();
+
+    // Before adding B: A can decrypt, B cannot.
+    assert!(decrypts_with(&env_path, &key_file_a), "A should decrypt");
+    assert!(
+        !decrypts_with(&env_path, &key_file_b),
+        "B must not decrypt yet"
+    );
+
+    // Add recipient B to `.sops.yaml`, then update keys across the directory.
+    write_sops_config(dir.path(), &format!("{pubkey_a},{pubkey_b}"));
+    sops::updatekeys(dir.path(), true).unwrap();
+
+    // After: both A and B can decrypt the re-wrapped file.
+    assert!(
+        decrypts_with(&env_path, &key_file_a),
+        "A should still decrypt"
+    );
+    assert!(
+        decrypts_with(&env_path, &key_file_b),
+        "B should decrypt after updatekeys"
+    );
+
+    // The single-file branch is also valid (idempotent re-wrap of one file).
+    sops::updatekeys(&env_path, true).unwrap();
+    assert!(decrypts_with(&env_path, &key_file_b));
+
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var("SOPS_AGE_KEY_FILE");
+    }
+    std::env::set_current_dir(original_cwd).unwrap();
+}
+
+/// Write an executable fake `sops` script to `dir` and return its path.
+fn write_fake_sops(dir: &Path, body: &str) -> std::path::PathBuf {
+    let script = dir.join("fake-sops");
+    std::fs::write(&script, format!("#!/bin/sh\n{body}")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+    }
+    script
+}
+
+#[test]
+#[serial]
+fn ensure_available_fails_for_missing_binary() {
+    // SAFETY: serialized via `#[serial]`.
+    unsafe {
+        std::env::set_var(sops::SOPS_BIN_ENV, "/nonexistent/sops-does-not-exist");
+    }
+    let err = sops::ensure_available().unwrap_err();
+    assert!(matches!(err, sopsy::error::Error::ToolNotFound(_)));
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var(sops::SOPS_BIN_ENV);
+    }
+}
+
+#[test]
+#[serial]
+fn encrypt_maps_nonzero_exit_to_process_failed() {
+    let dir = TempDir::new().unwrap();
+    let fake = write_fake_sops(dir.path(), "echo 'encrypt boom' 1>&2\nexit 7\n");
+    // SAFETY: serialized via `#[serial]`.
+    unsafe {
+        std::env::set_var(sops::SOPS_BIN_ENV, &fake);
+    }
+
+    let file = dir.path().join("secrets.yaml");
+    std::fs::write(&file, "k: v\n").unwrap();
+    let err = sops::encrypt_in_place(&file, FileType::Yaml).unwrap_err();
+    match err {
+        sopsy::error::Error::ProcessFailed {
+            tool,
+            code,
+            message,
+        } => {
+            assert_eq!(tool, "sops");
+            assert_eq!(code, 7);
+            assert!(message.contains("encrypt boom"), "got: {message}");
+        }
+        other => panic!("expected ProcessFailed, got {other:?}"),
+    }
+
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var(sops::SOPS_BIN_ENV);
+    }
+}
+
+#[test]
+#[serial]
+fn decrypt_maps_nonzero_exit_to_process_failed() {
+    let dir = TempDir::new().unwrap();
+    let fake = write_fake_sops(dir.path(), "echo 'decrypt nope' 1>&2\nexit 5\n");
+    // SAFETY: serialized via `#[serial]`.
+    unsafe {
+        std::env::set_var(sops::SOPS_BIN_ENV, &fake);
+    }
+
+    let file = dir.path().join("secrets.json");
+    std::fs::write(&file, "{}").unwrap();
+    let err = sops::decrypt(&file, FileType::Json).unwrap_err();
+    match err {
+        sopsy::error::Error::ProcessFailed { code, message, .. } => {
+            assert_eq!(code, 5);
+            assert!(message.contains("decrypt nope"), "got: {message}");
+        }
+        other => panic!("expected ProcessFailed, got {other:?}"),
+    }
+
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var(sops::SOPS_BIN_ENV);
+    }
+}
+
+#[test]
+#[serial]
+fn edit_forwards_editor_and_args() {
+    let dir = TempDir::new().unwrap();
+    let record = dir.path().join("edit.log");
+    let fake = write_fake_sops(
+        dir.path(),
+        &format!(
+            "echo \"EDITOR=$EDITOR args=$*\" > '{}'\nexit 0\n",
+            record.display()
+        ),
+    );
+    // SAFETY: serialized via `#[serial]`.
+    unsafe {
+        std::env::set_var(sops::SOPS_BIN_ENV, &fake);
+    }
+
+    let file = dir.path().join("secrets.env");
+    std::fs::write(&file, "K=V\n").unwrap();
+    sops::edit(&file, Some("my-editor"), &["--idempotent".to_string()]).unwrap();
+
+    let log = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        log.contains("EDITOR=my-editor"),
+        "editor not forwarded: {log}"
+    );
+    assert!(log.contains("--idempotent"), "args not forwarded: {log}");
+
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var(sops::SOPS_BIN_ENV);
+    }
+}
+
+#[test]
+#[serial]
+fn edit_maps_nonzero_exit_to_process_failed() {
+    let dir = TempDir::new().unwrap();
+    let fake = write_fake_sops(dir.path(), "exit 4\n");
+    // SAFETY: serialized via `#[serial]`.
+    unsafe {
+        std::env::set_var(sops::SOPS_BIN_ENV, &fake);
+    }
+
+    let file = dir.path().join("secrets.env");
+    std::fs::write(&file, "K=V\n").unwrap();
+    let err = sops::edit(&file, None, &[]).unwrap_err();
+    match err {
+        sopsy::error::Error::ProcessFailed { code, message, .. } => {
+            assert_eq!(code, 4);
+            assert!(message.contains("editing"), "got: {message}");
+        }
+        other => panic!("expected ProcessFailed, got {other:?}"),
+    }
+
+    // SAFETY: see above.
+    unsafe {
+        std::env::remove_var(sops::SOPS_BIN_ENV);
+    }
 }
