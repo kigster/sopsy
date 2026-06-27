@@ -44,8 +44,8 @@ publish: fmt warnings test package publish-dry-run
 build: fmt warnings 
     cargo build --release
 
-install: test build
-    cargo install sopsy        
+install: build
+    cargo install --path . 
 
 release:
     git tag -f "v{{version}}"
