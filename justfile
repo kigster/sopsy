@@ -46,7 +46,6 @@ publish-dry-run:
 publish: fmt warnings test package publish-dry-run
     cargo publish
 
-<<<<<<< HEAD
 build: fmt warnings 
     cargo build --release
 
