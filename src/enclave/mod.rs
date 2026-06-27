@@ -173,4 +173,19 @@ mod tests {
         let err = parse_keygen_output("AGE-PLUGIN-SE-1QXYZ\n", "").unwrap_err();
         assert!(matches!(err, Error::Validation(_)));
     }
+
+    #[test]
+    fn skips_public_key_lines_without_an_age_token() {
+        // A `public key:` line whose token is not an `age1...` recipient must be
+        // ignored (the non-`age1` branch of `extract_public_key`), so parsing
+        // falls through to the next, valid line.
+        let stdout = "# public key: not-an-age-key\n\
+             # public key: age1se1qrealkey\n\
+             AGE-PLUGIN-SE-1QABC\n";
+        let id = parse_keygen_output(stdout, "").unwrap();
+        assert_eq!(id.public_key, "age1se1qrealkey");
+
+        // And a lone non-age token yields the "no public key" validation error.
+        assert!(extract_public_key("Public key: nope").is_none());
+    }
 }

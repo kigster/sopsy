@@ -151,6 +151,52 @@ fn init_with_public_key_encrypts_real_env() {
     assert!(config.contains("primary"), "recipient name not recorded");
 }
 
+#[test]
+#[serial]
+fn init_seeds_from_env_example_when_no_dotenv() {
+    let dir = TempDir::new().unwrap();
+    init_git_repo(dir.path());
+    let (public_key, key_file) = generate_age_key(dir.path());
+
+    // Pre-create a custom `.env.example` and provide NO `.env`, so the seed for
+    // `.env.encrypted` must come from `.env.example`.
+    let example = "FROM_EXAMPLE=yes\nTOKEN=seed-me\n";
+    std::fs::write(dir.path().join(".env.example"), example).unwrap();
+
+    sopsy_in(dir.path())
+        .args([
+            "--non-interactive",
+            "init",
+            "--no-generate",
+            "--public-key",
+            &public_key,
+        ])
+        .assert()
+        .success()
+        // Confirms init kept the existing `.env.example` (info branch).
+        .stdout(predicate::str::contains(".env.example already present"));
+
+    // Decrypting `.env.encrypted` yields exactly the `.env.example` contents.
+    let decrypted = StdCommand::new("sops")
+        .env("SOPS_AGE_KEY_FILE", &key_file)
+        .args([
+            "--decrypt",
+            "--input-type",
+            "dotenv",
+            "--output-type",
+            "dotenv",
+        ])
+        .arg(dir.path().join(".env.encrypted"))
+        .output()
+        .unwrap();
+    assert!(
+        decrypted.status.success(),
+        "decrypt failed: {}",
+        String::from_utf8_lossy(&decrypted.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&decrypted.stdout), example);
+}
+
 // ----------------------------------------------------------------------------
 // Idempotency
 // ----------------------------------------------------------------------------

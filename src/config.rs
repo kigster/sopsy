@@ -164,4 +164,40 @@ mod tests {
         let err = Config::load("/nonexistent/.sopsy.yml").unwrap_err();
         assert!(matches!(err, Error::FileNotFound(_)));
     }
+
+    #[test]
+    fn load_from_dir_reads_conventional_file() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let mut cfg = Config::default();
+        cfg.recipients.push(Recipient::new("alice", "age1alice"));
+        cfg.save_to_dir(dir.path()).unwrap();
+
+        let loaded = Config::load_from_dir(dir.path()).unwrap();
+        assert_eq!(loaded.recipient("alice").unwrap().public_key, "age1alice");
+    }
+
+    #[test]
+    fn load_from_dir_missing_file_is_reported() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let err = Config::load_from_dir(dir.path()).unwrap_err();
+        assert!(matches!(err, Error::FileNotFound(_)));
+    }
+
+    #[test]
+    fn malformed_yaml_is_a_parse_error() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+        // `recipients` must be a sequence; a scalar makes deserialization fail.
+        std::fs::write(&path, "recipients: not-a-list\n").unwrap();
+        let err = Config::load(&path).unwrap_err();
+        assert!(matches!(err, Error::Parse { .. }));
+    }
+
+    #[test]
+    fn recipient_lookup_misses_return_none() {
+        let mut cfg = Config::default();
+        cfg.recipients.push(Recipient::new("alice", "age1alice"));
+        assert!(cfg.recipient("nobody").is_none());
+        assert!(cfg.break_glass_recipient().is_none());
+    }
 }

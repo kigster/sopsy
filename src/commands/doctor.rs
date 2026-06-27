@@ -57,35 +57,99 @@ fn system_checks(ui: &Ui) {
     ui.info("System checks: n/a (macOS only)");
 }
 
-/// Probe macOS-specific properties, tolerating missing/again-changed tools.
+/// Severity of a single rendered diagnostic line, decoupling the *decision*
+/// (which is pure and unit-testable) from the *rendering* (which writes to the
+/// terminal via [`Ui`]).
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Severity {
+    /// Rendered as a green success line.
+    Success,
+    /// Rendered as a yellow warning line.
+    Warn,
+}
+
+/// Probe macOS-specific properties, tolerating missing/changed tools.
+///
+/// The actual probes ([`capture_stdout`] / [`capture_combined`]) are the only
+/// impure part; the interpretation of their results lives in the pure
+/// `*_line` helpers so every branch is exercisable without Apple hardware.
 #[cfg(target_os = "macos")]
 fn macos_system_checks(ui: &Ui) {
-    match capture_stdout("sw_vers", &["-productVersion"]) {
-        Some(version) => ui.success(format!("macOS {version}")),
-        None => ui.warn("could not determine macOS version (sw_vers unavailable)"),
+    emit(
+        ui,
+        macos_version_line(capture_stdout("sw_vers", &["-productVersion"])),
+    );
+    for line in arch_lines(capture_stdout("uname", &["-m"]).as_deref()) {
+        emit(ui, line);
     }
-
-    let arch = capture_stdout("uname", &["-m"]);
-    let apple_silicon = arch.as_deref() == Some("arm64");
-    if apple_silicon {
-        ui.success("Apple Silicon (arm64)");
-        // On Apple Silicon a Secure Enclave is always present, which is what
-        // `age-plugin-se` relies on.
-        ui.success("Secure Enclave available");
-    } else {
-        ui.warn(format!(
-            "not Apple Silicon (arch: {})",
-            arch.as_deref().unwrap_or("unknown")
-        ));
-        ui.warn("Secure Enclave unavailable (requires Apple Silicon)");
-    }
-
     // Touch ID detection is best-effort: `bioutil -r` is undocumented and its
     // output format varies, so we never fail on it.
-    match capture_combined("bioutil", &["-r"]) {
-        Some(out) if out.contains('1') => ui.success("Touch ID appears configured"),
-        Some(_) => ui.warn("Touch ID present but may not be enrolled"),
-        None => ui.warn("Touch ID status unknown (bioutil unavailable)"),
+    emit(
+        ui,
+        touch_id_line(capture_combined("bioutil", &["-r"]).as_deref()),
+    );
+}
+
+/// Render a `(Severity, message)` decision to the terminal.
+#[cfg(target_os = "macos")]
+fn emit(ui: &Ui, (severity, message): (Severity, String)) {
+    match severity {
+        Severity::Success => ui.success(message),
+        Severity::Warn => ui.warn(message),
+    }
+}
+
+/// Interpret the `sw_vers -productVersion` result.
+#[cfg(target_os = "macos")]
+fn macos_version_line(version: Option<String>) -> (Severity, String) {
+    match version {
+        Some(version) => (Severity::Success, format!("macOS {version}")),
+        None => (
+            Severity::Warn,
+            "could not determine macOS version (sw_vers unavailable)".to_string(),
+        ),
+    }
+}
+
+/// Interpret the `uname -m` architecture result. On Apple Silicon a Secure
+/// Enclave is always present, which is what `age-plugin-se` relies on.
+#[cfg(target_os = "macos")]
+fn arch_lines(arch: Option<&str>) -> Vec<(Severity, String)> {
+    if arch == Some("arm64") {
+        vec![
+            (Severity::Success, "Apple Silicon (arm64)".to_string()),
+            (Severity::Success, "Secure Enclave available".to_string()),
+        ]
+    } else {
+        vec![
+            (
+                Severity::Warn,
+                format!("not Apple Silicon (arch: {})", arch.unwrap_or("unknown")),
+            ),
+            (
+                Severity::Warn,
+                "Secure Enclave unavailable (requires Apple Silicon)".to_string(),
+            ),
+        ]
+    }
+}
+
+/// Interpret the combined `bioutil -r` output for Touch ID status.
+#[cfg(target_os = "macos")]
+fn touch_id_line(report: Option<&str>) -> (Severity, String) {
+    match report {
+        Some(out) if out.contains('1') => {
+            (Severity::Success, "Touch ID appears configured".to_string())
+        }
+        Some(_) => (
+            Severity::Warn,
+            "Touch ID present but may not be enrolled".to_string(),
+        ),
+        None => (
+            Severity::Warn,
+            "Touch ID status unknown (bioutil unavailable)".to_string(),
+        ),
     }
 }
 
@@ -219,5 +283,118 @@ fn recipient_checks(ui: &Ui, config: &Config) {
                  vault (e.g. 1Password) that only a few admins can access.",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Recipient;
+    use crate::ui::Ui;
+
+    /// A quiet, non-interactive `Ui` suitable for exercising the print paths.
+    fn ui() -> Ui {
+        Ui::new(false, false, false)
+    }
+
+    #[test]
+    fn run_is_always_ok() {
+        // The doctor is informational and must never fail, regardless of the
+        // surrounding environment.
+        run(&ui()).unwrap();
+    }
+
+    #[test]
+    fn parse_yaml_accepts_valid_and_rejects_invalid() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let good = dir.path().join("good.yaml");
+        std::fs::write(&good, "a: 1\nb: [1, 2, 3]\n").unwrap();
+        assert!(parse_yaml(&good).is_ok());
+
+        let bad = dir.path().join("bad.yaml");
+        // Unbalanced flow mapping is a YAML syntax error.
+        std::fs::write(&bad, "a: [1, 2\n").unwrap();
+        assert!(parse_yaml(&bad).is_err());
+
+        // A missing file surfaces an I/O error rather than panicking.
+        assert!(parse_yaml(&dir.path().join("missing.yaml")).is_err());
+    }
+
+    #[test]
+    fn recipient_checks_cover_all_branches() {
+        // Empty recipients + no break-glass.
+        recipient_checks(&ui(), &Config::default());
+
+        // Recipients present, but still no break-glass key.
+        let mut cfg = Config::default();
+        cfg.recipients.push(Recipient::new("alice", "age1alice"));
+        recipient_checks(&ui(), &cfg);
+
+        // A break-glass recipient is configured.
+        cfg.recipients.push(Recipient {
+            name: "break-glass".into(),
+            public_key: "age1emergency".into(),
+            break_glass: true,
+        });
+        recipient_checks(&ui(), &cfg);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_version_line_branches() {
+        assert_eq!(
+            macos_version_line(Some("15.0".to_string())),
+            (Severity::Success, "macOS 15.0".to_string())
+        );
+        assert_eq!(macos_version_line(None).0, Severity::Warn);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn arch_lines_branches() {
+        let arm = arch_lines(Some("arm64"));
+        assert!(arm.iter().all(|(s, _)| *s == Severity::Success));
+        assert!(arm.iter().any(|(_, m)| m.contains("Apple Silicon")));
+
+        let intel = arch_lines(Some("x86_64"));
+        assert!(intel.iter().all(|(s, _)| *s == Severity::Warn));
+        assert!(intel.iter().any(|(_, m)| m.contains("x86_64")));
+
+        // Unknown architecture falls back to "unknown".
+        let unknown = arch_lines(None);
+        assert!(unknown.iter().any(|(_, m)| m.contains("unknown")));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn touch_id_line_branches() {
+        assert_eq!(touch_id_line(Some("Biometrics: 1")).0, Severity::Success);
+        assert_eq!(touch_id_line(Some("no digits here")).0, Severity::Warn);
+        assert_eq!(touch_id_line(None).0, Severity::Warn);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn emit_renders_both_severities() {
+        emit(&ui(), (Severity::Success, "ok".to_string()));
+        emit(&ui(), (Severity::Warn, "careful".to_string()));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn capture_helpers_handle_success_failure_and_missing() {
+        // Success with output.
+        assert_eq!(capture_stdout("echo", &["hi"]).as_deref(), Some("hi"));
+        // Success but empty output → None.
+        assert!(capture_stdout("true", &[]).is_none());
+        // Non-zero exit → None.
+        assert!(capture_stdout("false", &[]).is_none());
+        // Missing binary → None.
+        assert!(capture_stdout("sopsy-no-such-bin-xyz", &[]).is_none());
+
+        // capture_combined returns Some even on failure, None only when the
+        // binary cannot be launched.
+        assert!(capture_combined("false", &[]).is_some());
+        assert!(capture_combined("sopsy-no-such-bin-xyz", &[]).is_none());
     }
 }

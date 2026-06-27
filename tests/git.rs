@@ -119,3 +119,70 @@ fn ensure_gitignored_preserves_existing_content() {
     assert!(contents.contains("node_modules/"));
     assert!(contents.contains(".env"));
 }
+
+#[test]
+fn ensure_gitignored_adds_newline_before_appending() {
+    let dir = init_repo();
+    // Existing content WITHOUT a trailing newline: the helper must insert one
+    // before appending the new pattern.
+    std::fs::write(dir.path().join(".gitignore"), "node_modules/").unwrap();
+
+    assert!(git::ensure_gitignored(dir.path(), ".env").unwrap());
+    let contents = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+    assert_eq!(contents, "node_modules/\n.env\n");
+}
+
+#[test]
+fn ensure_gitignored_creates_file_when_absent() {
+    let dir = init_repo();
+    // No `.gitignore` yet: the helper must create it and report a modification.
+    assert!(!dir.path().join(".gitignore").exists());
+    assert!(git::ensure_gitignored(dir.path(), "*.key").unwrap());
+    let contents = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+    assert_eq!(contents, "*.key\n");
+}
+
+#[test]
+fn ensure_gitignored_surfaces_read_errors() {
+    let dir = init_repo();
+    // Make `.gitignore` a directory so `read_to_string` fails with a non
+    // NotFound error, exercising the `Error::Io` mapping branch.
+    std::fs::create_dir(dir.path().join(".gitignore")).unwrap();
+    let err = git::ensure_gitignored(dir.path(), ".env").unwrap_err();
+    assert!(matches!(err, sopsy::error::Error::Io(_)));
+}
+
+#[test]
+fn tracked_files_errors_outside_repo() {
+    // `git ls-files` exits non-zero outside a repository → ProcessFailed.
+    let dir = TempDir::new().unwrap();
+    let err = git::tracked_files(dir.path()).unwrap_err();
+    match err {
+        sopsy::error::Error::ProcessFailed { tool, .. } => assert_eq!(tool, "git"),
+        other => panic!("expected ProcessFailed, got {other:?}"),
+    }
+}
+
+#[test]
+fn is_ignored_errors_outside_repo() {
+    // `git check-ignore` exits 128 (not 0/1) outside a repo → the catch-all
+    // ProcessFailed arm.
+    let dir = TempDir::new().unwrap();
+    let err = git::is_ignored(dir.path(), Path::new(".env")).unwrap_err();
+    match err {
+        sopsy::error::Error::ProcessFailed { tool, .. } => assert_eq!(tool, "git"),
+        other => panic!("expected ProcessFailed, got {other:?}"),
+    }
+}
+
+#[test]
+fn is_tracked_works_with_absolute_paths() {
+    let dir = init_repo();
+    std::fs::write(dir.path().join("tracked.txt"), "x").unwrap();
+    run_git(dir.path(), &["add", "tracked.txt"]);
+    run_git(dir.path(), &["commit", "-q", "-m", "init"]);
+
+    // Absolute path inside the repo resolves as tracked.
+    let abs = dir.path().join("tracked.txt");
+    assert!(git::is_tracked(dir.path(), &abs).unwrap());
+}

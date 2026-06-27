@@ -101,3 +101,49 @@ fn doctor_with_valid_config_has_no_break_glass_warning() {
         // The CAUTION reminder must NOT appear when a break-glass key exists.
         .stdout(predicate::str::contains("[!CAUTION]").not());
 }
+
+#[test]
+fn doctor_reports_unparseable_sops_yaml() {
+    let dir = init_repo();
+    // Invalid YAML (unbalanced flow sequence) must be reported, not fatal.
+    std::fs::write(dir.path().join(".sops.yaml"), "creation_rules: [1, 2\n").unwrap();
+
+    sopsy_in(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            ".sops.yaml present but failed to parse",
+        ));
+}
+
+#[test]
+fn doctor_reports_unparseable_sopsy_yml() {
+    let dir = init_repo();
+    std::fs::write(
+        dir.path().join(".sops.yaml"),
+        "creation_rules:\n  - path_regex: x\n    age: age1alice\n",
+    )
+    .unwrap();
+    // `recipients` must be a sequence; a scalar makes Config::load fail.
+    std::fs::write(dir.path().join(".sopsy.yml"), "recipients: not-a-list\n").unwrap();
+
+    sopsy_in(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            ".sopsy.yml present but failed to parse",
+        ));
+}
+
+#[test]
+fn doctor_warns_when_no_recipients_configured() {
+    let dir = init_repo();
+    // A valid but empty `.sopsy.yml` reaches the recipient checks with zero
+    // recipients, exercising the "no recipients configured" warning.
+    std::fs::write(dir.path().join(".sopsy.yml"), "recipients: []\n").unwrap();
+
+    sopsy_in(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no recipients configured"));
+}

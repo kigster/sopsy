@@ -229,3 +229,98 @@ fn print_summary(ui: &Ui, recipient: &Recipient) {
     ui.warn("> losing your Secure Enclave device means losing access to every secret.");
     ui.animated_line("Happy encrypting!");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serial_test::serial;
+
+    #[test]
+    fn render_sops_yaml_embeds_recipients() {
+        let yaml = render_sops_yaml("age1aaa,age1bbb");
+        assert!(yaml.contains("creation_rules:"));
+        assert!(yaml.contains("age1aaa,age1bbb"));
+        assert!(yaml.contains(r"\.env\.encrypted$"));
+    }
+
+    #[test]
+    fn read_seed_prefers_dotenv_then_example_then_template() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let root = dir.path();
+
+        // Neither file present → the built-in template.
+        assert_eq!(read_seed(root).unwrap(), ENV_EXAMPLE_TEMPLATE);
+
+        // `.env.example` present (no `.env`) → its contents.
+        std::fs::write(root.join(".env.example"), "EXAMPLE=1\n").unwrap();
+        assert_eq!(read_seed(root).unwrap(), "EXAMPLE=1\n");
+
+        // `.env` present → it wins over `.env.example`.
+        std::fs::write(root.join(".env"), "REAL=2\n").unwrap();
+        assert_eq!(read_seed(root).unwrap(), "REAL=2\n");
+    }
+
+    /// Write an executable fake `sops` script and return its path.
+    fn write_fake_sops(dir: &Path, body: &str) -> std::path::PathBuf {
+        let script = dir.join("fake-sops");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script, perms).unwrap();
+        }
+        script
+    }
+
+    #[test]
+    #[serial]
+    fn detect_sops_version_parses_real_output() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let fake = write_fake_sops(dir.path(), "echo 'sops 3.13.1 (latest)'\n");
+        // SAFETY: serialized via `#[serial]`.
+        unsafe {
+            std::env::set_var(sops::SOPS_BIN_ENV, &fake);
+        }
+        assert_eq!(detect_sops_version().as_deref(), Some("3.13.1"));
+        // SAFETY: see above.
+        unsafe {
+            std::env::remove_var(sops::SOPS_BIN_ENV);
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn detect_sops_version_handles_failures() {
+        let dir = assert_fs::TempDir::new().unwrap();
+
+        // Non-zero exit → None.
+        let failing = write_fake_sops(dir.path(), "exit 1\n");
+        // SAFETY: serialized via `#[serial]`.
+        unsafe {
+            std::env::set_var(sops::SOPS_BIN_ENV, &failing);
+        }
+        assert!(detect_sops_version().is_none());
+
+        // Success but no version token → None.
+        let blank = write_fake_sops(dir.path(), "echo ''\n");
+        // SAFETY: serialized via `#[serial]`.
+        unsafe {
+            std::env::set_var(sops::SOPS_BIN_ENV, &blank);
+        }
+        assert!(detect_sops_version().is_none());
+
+        // Missing binary → None.
+        // SAFETY: serialized via `#[serial]`.
+        unsafe {
+            std::env::set_var(sops::SOPS_BIN_ENV, "/nonexistent/sops-xyz");
+        }
+        assert!(detect_sops_version().is_none());
+
+        // SAFETY: see above.
+        unsafe {
+            std::env::remove_var(sops::SOPS_BIN_ENV);
+        }
+    }
+}
