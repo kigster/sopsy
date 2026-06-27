@@ -1,5 +1,8 @@
 # Sopsy
 
+[![CI](https://github.com/kigster/sopsy/actions/workflows/ci.yml/badge.svg)](https://github.com/kigster/sopsy/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/kigster/sopsy/graph/badge.svg)](https://codecov.io/gh/kigster/sopsy)
+
 > The missing developer experience for [SOPS](https://github.com/getsops/sops).
 
 `sopsy` is a small, fast, colorful Rust CLI that makes it delightful to keep

@@ -1,0 +1,23 @@
+# Codecov configuration for sopsy.
+# https://docs.codecov.com/docs/codecovyml-reference
+coverage:
+  # Round to one decimal and treat coverage as a percentage.
+  precision: 2
+  round: down
+  range: "90...100"
+  status:
+    # Fail the Codecov "project" check if total line coverage drops below 95%
+    # (with a small tolerance so trivial noise does not block PRs).
+    project:
+      default:
+        target: 95%
+        threshold: 1%
+    # New/changed lines in a PR should be well covered too.
+    patch:
+      default:
+        target: 90%
+
+# Keep the PR comment concise.
+comment:
+  layout: "reach, diff, flags, files"
+  require_changes: false
