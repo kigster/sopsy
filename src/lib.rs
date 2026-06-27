@@ -75,17 +75,20 @@ mod tests {
     fn dispatch_stub_commands_are_ok() {
         let ui = test_ui();
         assert!(dispatch(&ui, Command::Check).is_ok());
+        // `init` is a real command now: with no key and `--no-generate` it
+        // errors *before* touching the filesystem, which is what we assert
+        // here (a full happy-path init lives in `tests/init.rs`).
         assert!(
             dispatch(
                 &ui,
                 Command::Init(InitArgs {
                     recipient_name: None,
                     public_key: None,
-                    no_generate: false,
+                    no_generate: true,
                     force: false,
                 })
             )
-            .is_ok()
+            .is_err()
         );
         assert!(
             dispatch(
