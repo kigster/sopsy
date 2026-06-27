@@ -19,12 +19,18 @@ use serial_test::serial;
 use sopsy::cli::{RecipientAddArgs, RecipientCommand, RecipientRemoveArgs};
 use sopsy::commands::recipient;
 use sopsy::config::Config;
+use sopsy::error::Error;
 use sopsy::sops::{self, FileType};
 use sopsy::ui::Ui;
 
 /// A non-interactive, color-free UI for driving commands in tests.
 fn test_ui() -> Ui {
     Ui::new(false, false, false)
+}
+
+/// A non-interactive, color-enabled UI (exercises the colored `list` output).
+fn color_ui() -> Ui {
+    Ui::new(true, false, false)
 }
 
 /// Generate an age keypair into `dir/<file>`, returning `(public_key, path)`.
@@ -370,4 +376,390 @@ fn no_updatekeys_skips_reencryption() {
         std::env::remove_var("SOPSY_SOPS_BIN");
     }
     restore_cwd(&original_cwd);
+}
+
+// ---------------------------------------------------------------------------
+// Config-driven flow tests. These do not need real `sops`: they either pass
+// `--no-updatekeys`, exercise pure-config validation that returns before any
+// re-encryption, or use a fake `sops` binary. Each builds a tiny git repo and
+// drives `recipient::run` in-process so command logic counts toward coverage.
+// ---------------------------------------------------------------------------
+
+/// A `.sopsy.yml` with two recipients: `alice` (break-glass) and `bob`.
+const SOPSY_TWO: &str = "recipients:\n  \
+    - name: alice\n    public_key: age1alice\n    break_glass: true\n  \
+    - name: bob\n    public_key: age1bob\n    break_glass: false\n";
+
+/// A `.sops.yaml` whose single rule's `age:` list contains only alice's key.
+const SOPS_ALICE_ONLY: &str =
+    "creation_rules:\n  - path_regex: \\.enc$\n    age:\n      - age1alice\n";
+
+/// Build a git repo in `dir`, optionally writing `.sopsy.yml`/`.sops.yaml`,
+/// and switch the process cwd into it.
+fn flow_repo(dir: &Path, sopsy_yml: Option<&str>, sops_yaml: Option<&str>) {
+    git_init(dir);
+    if let Some(body) = sopsy_yml {
+        std::fs::write(dir.join(".sopsy.yml"), body).unwrap();
+    }
+    if let Some(body) = sops_yaml {
+        std::fs::write(dir.join(".sops.yaml"), body).unwrap();
+    }
+    std::env::set_current_dir(dir).unwrap();
+}
+
+fn add_args(
+    name: Option<&str>,
+    key: Option<&str>,
+    break_glass: bool,
+    no_updatekeys: bool,
+) -> RecipientCommand {
+    RecipientCommand::Add(RecipientAddArgs {
+        name_pos: None,
+        name: name.map(str::to_string),
+        public_key: key.map(str::to_string),
+        break_glass,
+        no_updatekeys,
+    })
+}
+
+fn remove_args(name: Option<&str>, no_updatekeys: bool) -> RecipientCommand {
+    RecipientCommand::Remove(RecipientRemoveArgs {
+        name_pos: None,
+        name: name.map(str::to_string),
+        no_updatekeys,
+    })
+}
+
+/// Restores the process cwd when dropped, so a panicking assertion inside a
+/// test body cannot strand later `#[serial]` tests in a deleted temp dir.
+struct CwdGuard(PathBuf);
+
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.0);
+    }
+}
+
+/// Run a closure with the cwd restored afterwards regardless of the outcome.
+///
+/// The guard is declared before `dir` so that on unwind `dir` (the `TempDir`)
+/// drops first — deleting the temp directory — and the guard then restores the
+/// cwd to the original project directory.
+fn with_repo(f: impl FnOnce(&Path)) {
+    let _guard = CwdGuard(std::env::current_dir().unwrap());
+    let dir = TempDir::new().unwrap();
+    f(dir.path());
+}
+
+#[test]
+#[serial]
+fn add_without_sopsy_yml_is_friendly_error() {
+    with_repo(|dir| {
+        flow_repo(dir, None, Some(SOPS_ALICE_ONLY));
+        let err = recipient::run(&test_ui(), &add_args(Some("x"), Some("age1x"), false, true))
+            .unwrap_err();
+        assert!(matches!(err, Error::Validation(m) if m.contains("sopsy init")));
+    });
+}
+
+#[test]
+#[serial]
+fn add_with_invalid_sopsy_yml_propagates_parse_error() {
+    with_repo(|dir| {
+        flow_repo(
+            dir,
+            Some("recipients: [unterminated\n"),
+            Some(SOPS_ALICE_ONLY),
+        );
+        let err = recipient::run(&test_ui(), &add_args(Some("x"), Some("age1x"), false, true))
+            .unwrap_err();
+        assert!(matches!(err, Error::Parse { .. }));
+    });
+}
+
+#[test]
+#[serial]
+fn add_without_sops_yaml_is_friendly_error() {
+    with_repo(|dir| {
+        flow_repo(dir, Some(SOPSY_TWO), None);
+        let err = recipient::run(&test_ui(), &add_args(Some("x"), Some("age1x"), false, true))
+            .unwrap_err();
+        assert!(matches!(err, Error::Validation(m) if m.contains(".sops.yaml not found")));
+    });
+}
+
+#[test]
+#[serial]
+fn add_missing_name_non_interactive_errors() {
+    with_repo(|dir| {
+        flow_repo(dir, Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+        let err =
+            recipient::run(&test_ui(), &add_args(None, Some("age1x"), false, true)).unwrap_err();
+        assert!(matches!(err, Error::NonInteractive { .. }));
+    });
+}
+
+#[test]
+#[serial]
+fn add_missing_public_key_non_interactive_errors() {
+    with_repo(|dir| {
+        flow_repo(dir, Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+        let err =
+            recipient::run(&test_ui(), &add_args(Some("carol"), None, false, true)).unwrap_err();
+        assert!(matches!(err, Error::NonInteractive { .. }));
+    });
+}
+
+#[test]
+#[serial]
+fn add_blank_name_rejected() {
+    with_repo(|dir| {
+        flow_repo(dir, Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+        let err = recipient::run(
+            &test_ui(),
+            &add_args(Some("   "), Some("age1x"), false, true),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Validation(m) if m.contains("name must not be empty")));
+    });
+}
+
+#[test]
+#[serial]
+fn add_blank_public_key_rejected() {
+    with_repo(|dir| {
+        flow_repo(dir, Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+        let err = recipient::run(
+            &test_ui(),
+            &add_args(Some("carol"), Some("   "), false, true),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Validation(m) if m.contains("public key must not be empty")));
+    });
+}
+
+#[test]
+#[serial]
+fn add_duplicate_name_rejected() {
+    with_repo(|dir| {
+        flow_repo(dir, Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+        let err = recipient::run(
+            &test_ui(),
+            &add_args(Some("alice"), Some("age1new"), false, true),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Validation(m) if m.contains("already exists")));
+    });
+}
+
+#[test]
+#[serial]
+fn add_duplicate_key_rejected() {
+    with_repo(|dir| {
+        flow_repo(dir, Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+        let err = recipient::run(
+            &test_ui(),
+            &add_args(Some("carol"), Some("age1alice"), false, true),
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Validation(m) if m.contains("already registered")));
+    });
+}
+
+#[test]
+#[serial]
+fn add_warns_when_no_age_rule_matches() {
+    with_repo(|dir| {
+        // `.sops.yaml` rule has no `age:` list, so the key lands nowhere.
+        flow_repo(
+            dir,
+            Some(SOPSY_TWO),
+            Some("creation_rules:\n  - path_regex: \\.enc$\n"),
+        );
+        recipient::run(
+            &test_ui(),
+            &add_args(Some("carol"), Some("age1carol"), false, true),
+        )
+        .expect("add should still record the recipient");
+        let config = Config::load_from_dir(dir).unwrap();
+        assert!(config.recipient("carol").is_some());
+    });
+}
+
+#[test]
+#[serial]
+fn add_break_glass_recipient_records_flag() {
+    with_repo(|dir| {
+        flow_repo(dir, Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+        recipient::run(
+            &test_ui(),
+            &add_args(Some("carol"), Some("age1carol"), true, true),
+        )
+        .expect("add --break-glass should succeed");
+        let config = Config::load_from_dir(dir).unwrap();
+        assert!(config.recipient("carol").unwrap().break_glass);
+    });
+}
+
+#[test]
+#[serial]
+fn remove_missing_name_with_no_recipients_errors() {
+    with_repo(|dir| {
+        flow_repo(dir, Some("recipients: []\n"), Some(SOPS_ALICE_ONLY));
+        let err = recipient::run(&test_ui(), &remove_args(None, true)).unwrap_err();
+        assert!(matches!(err, Error::Validation(m) if m.contains("no recipients to remove")));
+    });
+}
+
+#[test]
+#[serial]
+fn remove_missing_name_non_interactive_errors() {
+    with_repo(|dir| {
+        flow_repo(dir, Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+        let err = recipient::run(&test_ui(), &remove_args(None, true)).unwrap_err();
+        assert!(matches!(err, Error::NonInteractive { .. }));
+    });
+}
+
+#[test]
+#[serial]
+fn remove_unknown_recipient_errors() {
+    with_repo(|dir| {
+        flow_repo(dir, Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+        let err = recipient::run(&test_ui(), &remove_args(Some("ghost"), true)).unwrap_err();
+        assert!(matches!(err, Error::Validation(m) if m.contains("no recipient named")));
+    });
+}
+
+#[test]
+#[serial]
+fn remove_last_recipient_refused() {
+    with_repo(|dir| {
+        flow_repo(
+            dir,
+            Some("recipients:\n  - name: solo\n    public_key: age1solo\n    break_glass: false\n"),
+            Some(SOPS_ALICE_ONLY),
+        );
+        let err = recipient::run(&test_ui(), &remove_args(Some("solo"), true)).unwrap_err();
+        assert!(matches!(err, Error::Validation(m) if m.contains("only remaining recipient")));
+    });
+}
+
+#[test]
+#[serial]
+fn remove_sole_break_glass_refused() {
+    with_repo(|dir| {
+        // alice is the only break-glass recipient; removing her is refused.
+        flow_repo(dir, Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+        let err = recipient::run(&test_ui(), &remove_args(Some("alice"), true)).unwrap_err();
+        assert!(matches!(err, Error::Validation(m) if m.contains("only break-glass recipient")));
+    });
+}
+
+#[test]
+#[serial]
+fn remove_warns_when_key_absent_from_sops_yaml() {
+    with_repo(|dir| {
+        // bob is removable (not last, not break-glass); his key is not in
+        // `.sops.yaml`, exercising the "left unchanged" warning path.
+        flow_repo(dir, Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+        recipient::run(&test_ui(), &remove_args(Some("bob"), true))
+            .expect("removing bob should succeed");
+        let config = Config::load_from_dir(dir).unwrap();
+        assert!(config.recipient("bob").is_none());
+    });
+}
+
+#[test]
+#[serial]
+fn list_without_sopsy_yml_is_noop() {
+    with_repo(|dir| {
+        flow_repo(dir, None, None);
+        recipient::run(&test_ui(), &RecipientCommand::List).expect("list should succeed");
+    });
+}
+
+#[test]
+#[serial]
+fn list_with_invalid_sopsy_yml_errors() {
+    with_repo(|dir| {
+        flow_repo(dir, Some("recipients: [unterminated\n"), None);
+        let err = recipient::run(&test_ui(), &RecipientCommand::List).unwrap_err();
+        assert!(matches!(err, Error::Parse { .. }));
+    });
+}
+
+#[test]
+#[serial]
+fn list_with_no_recipients_is_noop() {
+    with_repo(|dir| {
+        flow_repo(dir, Some("recipients: []\n"), None);
+        recipient::run(&test_ui(), &RecipientCommand::List).expect("list should succeed");
+    });
+}
+
+#[test]
+#[serial]
+fn list_renders_plain_and_colored_tables() {
+    with_repo(|dir| {
+        // A long key exercises truncation; both UIs render the table in-process.
+        let long_key = format!("age1{}", "z".repeat(60));
+        let body = format!(
+            "recipients:\n  - name: alice\n    public_key: {long_key}\n    break_glass: true\n  \
+             - name: bob\n    public_key: age1bob\n    break_glass: false\n"
+        );
+        flow_repo(dir, Some(&body), None);
+        recipient::run(&test_ui(), &RecipientCommand::List).expect("plain list");
+        recipient::run(&color_ui(), &RecipientCommand::List).expect("colored list");
+    });
+}
+
+#[test]
+#[serial]
+fn add_without_encrypted_files_reports_nothing_to_rekey() {
+    with_repo(|dir| {
+        // No encrypted files exist, so `run_updatekeys` returns before sops.
+        flow_repo(dir, Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+        recipient::run(
+            &test_ui(),
+            &add_args(Some("carol"), Some("age1carol"), false, false),
+        )
+        .expect("add should succeed with nothing to re-key");
+        let config = Config::load_from_dir(dir).unwrap();
+        assert!(config.recipient("carol").is_some());
+    });
+}
+
+#[test]
+#[serial]
+fn updatekeys_failure_surfaces_process_error() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    flow_repo(dir.path(), Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+    // An encrypted file so `run_updatekeys` actually invokes (the fake) sops.
+    std::fs::write(dir.path().join("secret.enc"), "FOO=ENC[x]\n").unwrap();
+
+    // Fake `sops` that always fails.
+    let fake = dir.path().join("fake-sops.sh");
+    std::fs::write(&fake, "#!/bin/sh\necho 'boom' >&2\nexit 1\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    unsafe {
+        std::env::set_var("SOPSY_SOPS_BIN", &fake);
+    }
+
+    let err = recipient::run(
+        &test_ui(),
+        &add_args(Some("carol"), Some("age1carol"), false, false),
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::ProcessFailed { .. }));
+
+    unsafe {
+        std::env::remove_var("SOPSY_SOPS_BIN");
+    }
+    restore_cwd(&original);
 }

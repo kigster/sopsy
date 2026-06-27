@@ -466,3 +466,141 @@ fn parse_age_keys(value: &Value) -> Vec<String> {
 fn age_keys_to_value(keys: &[String]) -> Value {
     Value::Sequence(keys.iter().cloned().map(Value::String).collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert_fs::TempDir;
+
+    #[test]
+    fn truncate_key_shortens_only_long_keys() {
+        // Short keys pass through unchanged; long ones get an ellipsis.
+        assert_eq!(truncate_key("age1short"), "age1short");
+        let long = "age1".to_string() + &"x".repeat(60);
+        let out = truncate_key(&long);
+        assert!(out.ends_with('…'));
+        assert_eq!(out.chars().count(), 25); // 24 chars + ellipsis
+    }
+
+    #[test]
+    fn parse_age_keys_handles_each_yaml_shape() {
+        // Sequence form.
+        let seq: Value = serde_yaml_ng::from_str("- age1a\n- age1b\n").unwrap();
+        assert_eq!(parse_age_keys(&seq), vec!["age1a", "age1b"]);
+        // Comma/whitespace-delimited string form.
+        let s: Value = serde_yaml_ng::from_str("\"age1a, age1b\\nage1c\"").unwrap();
+        assert_eq!(parse_age_keys(&s), vec!["age1a", "age1b", "age1c"]);
+        // Anything else (e.g. a mapping) yields no keys.
+        let other: Value = serde_yaml_ng::from_str("{a: b}").unwrap();
+        assert!(parse_age_keys(&other).is_empty());
+    }
+
+    #[test]
+    fn age_keys_to_value_round_trips() {
+        let keys = vec!["age1a".to_string(), "age1b".to_string()];
+        let value = age_keys_to_value(&keys);
+        assert_eq!(parse_age_keys(&value), keys);
+    }
+
+    /// Write `body` to a fresh `.sops.yaml` and return its path (kept alive by
+    /// the returned `TempDir`).
+    fn sops_yaml(body: &str) -> (TempDir, PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".sops.yaml");
+        std::fs::write(&path, body).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn add_key_preserves_unrelated_yaml_and_dedupes() {
+        let (_dir, path) = sops_yaml(
+            "creation_rules:\n  - path_regex: \\.enc$\n    age:\n      - age1a\nother: keep-me\n",
+        );
+
+        // First add appends the key to the one matching rule.
+        assert_eq!(add_key_to_sops_yaml(&path, "age1b").unwrap(), 1);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("age1a") && raw.contains("age1b"));
+        assert!(raw.contains("other: keep-me"), "unrelated keys preserved");
+        assert!(raw.contains("path_regex"), "rule metadata preserved");
+
+        // Re-adding an existing key changes nothing (the `already present` arm).
+        assert_eq!(add_key_to_sops_yaml(&path, "age1b").unwrap(), 0);
+    }
+
+    #[test]
+    fn remove_key_drops_only_the_named_key() {
+        let (_dir, path) = sops_yaml(
+            "creation_rules:\n  - path_regex: \\.enc$\n    age:\n      - age1a\n      - age1b\n",
+        );
+        assert_eq!(remove_key_from_sops_yaml(&path, "age1a").unwrap(), 1);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("age1a") && raw.contains("age1b"));
+        // Removing an absent key reports no modification.
+        assert_eq!(remove_key_from_sops_yaml(&path, "age1zzz").unwrap(), 0);
+    }
+
+    #[test]
+    fn mutate_skips_non_mapping_and_age_less_rules() {
+        // A scalar rule (not a mapping) and a rule without `age:` are skipped;
+        // an `age:` given as a delimited string is parsed and rewritten.
+        let (_dir, path) = sops_yaml(
+            "creation_rules:\n  - just-a-scalar\n  - path_regex: \\.no-age$\n  \
+             - path_regex: \\.enc$\n    age: \"age1a, age1b\"\n",
+        );
+        assert_eq!(add_key_to_sops_yaml(&path, "age1c").unwrap(), 1);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("age1a") && raw.contains("age1b") && raw.contains("age1c"));
+    }
+
+    #[test]
+    fn mutate_reports_parse_errors() {
+        let (_dir, path) = sops_yaml("creation_rules: [unterminated\n");
+        let err = add_key_to_sops_yaml(&path, "age1a").unwrap_err();
+        assert!(matches!(err, Error::Parse { .. }));
+    }
+
+    #[test]
+    fn is_encrypted_file_detects_marker_and_skips_sops_yaml() {
+        let dir = TempDir::new().unwrap();
+        let enc = dir.path().join("secret.encrypted");
+        std::fs::write(&enc, "FOO=ENC[data]\n").unwrap();
+        assert!(is_encrypted_file(&enc));
+
+        let plain = dir.path().join("plain.txt");
+        std::fs::write(&plain, "FOO=bar\n").unwrap();
+        assert!(!is_encrypted_file(&plain));
+
+        // `.sops.yaml` is never treated as an artifact, even with an ENC marker.
+        let sops = dir.path().join(".sops.yaml");
+        std::fs::write(&sops, "ENC[x]\n").unwrap();
+        assert!(!is_encrypted_file(&sops));
+
+        // An unreadable path yields `false` rather than erroring.
+        assert!(!is_encrypted_file(&dir.path().join("does-not-exist")));
+    }
+
+    #[test]
+    fn collect_encrypted_files_walks_recursively_and_skips_git() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        std::fs::write(repo.join("top.encrypted"), "A=ENC[x]\n").unwrap();
+        std::fs::write(repo.join("plain.env"), "A=b\n").unwrap();
+        std::fs::write(repo.join(".sops.yaml"), "ENC[ignored]\n").unwrap();
+        std::fs::create_dir(repo.join("nested")).unwrap();
+        std::fs::write(repo.join("nested/deep.encrypted"), "B=ENC[y]\n").unwrap();
+        // A `.git` directory whose contents must be ignored.
+        std::fs::create_dir(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/obj.encrypted"), "C=ENC[z]\n").unwrap();
+
+        let found = collect_encrypted_files(repo).unwrap();
+        assert_eq!(
+            found,
+            vec![
+                repo.join("nested/deep.encrypted"),
+                repo.join("top.encrypted")
+            ],
+            "expected the two ENC artifacts, sorted, with .git and .sops.yaml excluded"
+        );
+    }
+}
