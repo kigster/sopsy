@@ -114,6 +114,10 @@ fn add(ui: &Ui, args: &RecipientAddArgs) -> Result<()> {
         )));
     }
 
+    // Snapshot the config files so a failed re-encryption rolls back cleanly,
+    // never leaving a recipient listed that the secrets were not re-wrapped for.
+    let snapshot = ConfigSnapshot::capture(&repo, &sops_config);
+
     // Append to `.sopsy.yml`.
     let recipient = Recipient {
         break_glass: args.break_glass,
@@ -139,7 +143,11 @@ fn add(ui: &Ui, args: &RecipientAddArgs) -> Result<()> {
         ui.info(format!("`{name}` is marked as the break-glass recipient"));
     }
 
-    run_updatekeys(ui, &repo, args.no_updatekeys)?;
+    if let Err(err) = run_updatekeys(ui, &repo, args.no_updatekeys) {
+        snapshot.restore()?;
+        ui.warn("rolled back configuration changes — no recipient was added");
+        return Err(rewrap_error(err));
+    }
 
     ui.success(format!("recipient `{name}` added"));
     Ok(())
@@ -186,6 +194,9 @@ fn remove(ui: &Ui, args: &RecipientRemoveArgs) -> Result<()> {
         ));
     }
 
+    // Snapshot for rollback if re-encryption fails (see `add`).
+    let snapshot = ConfigSnapshot::capture(&repo, &sops_config);
+
     config.recipients.retain(|r| r.name != name);
     config.save_to_dir(&repo)?;
     ui.success(format!("removed `{name}` from {CONFIG_FILE_NAME}"));
@@ -201,10 +212,64 @@ fn remove(ui: &Ui, args: &RecipientRemoveArgs) -> Result<()> {
         ));
     }
 
-    run_updatekeys(ui, &repo, args.no_updatekeys)?;
+    if let Err(err) = run_updatekeys(ui, &repo, args.no_updatekeys) {
+        snapshot.restore()?;
+        ui.warn("rolled back configuration changes — no recipient was removed");
+        return Err(rewrap_error(err));
+    }
 
     ui.success(format!("recipient `{name}` removed"));
     Ok(())
+}
+
+/// A snapshot of the two recipient-config files (`.sopsy.yml` and `.sops.yaml`),
+/// used to roll a partial mutation back. Updating recipients touches both files
+/// *before* `sops updatekeys` re-wraps the encrypted secrets; if that re-wrap
+/// fails (most often because the operator's age key is not available to decrypt
+/// the existing secrets), restoring this snapshot keeps the repository
+/// consistent — it never lists a recipient the secrets were not re-wrapped for.
+struct ConfigSnapshot {
+    files: [(PathBuf, Option<Vec<u8>>); 2],
+}
+
+impl ConfigSnapshot {
+    /// Capture the current bytes of both config files (`None` if absent).
+    fn capture(repo: &Path, sops_config: &Path) -> Self {
+        let sopsy = repo.join(CONFIG_FILE_NAME);
+        ConfigSnapshot {
+            files: [
+                (sopsy.clone(), std::fs::read(&sopsy).ok()),
+                (sops_config.to_path_buf(), std::fs::read(sops_config).ok()),
+            ],
+        }
+    }
+
+    /// Restore both files to their captured contents (removing any that did not
+    /// exist when captured).
+    fn restore(&self) -> Result<()> {
+        for (path, contents) in &self.files {
+            match contents {
+                Some(bytes) => std::fs::write(path, bytes)?,
+                None => {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Wrap a `sops updatekeys` failure with actionable guidance. Updating
+/// recipients requires decrypting the existing secrets, so the operator must be
+/// an existing recipient with their key available.
+fn rewrap_error(source: Error) -> Error {
+    Error::Validation(format!(
+        "could not re-encrypt secrets for the updated recipient set, so the change \
+         was rolled back. Updating recipients requires decrypting the existing \
+         secrets — make your age key available (unlock your Secure Enclave \
+         identity, or set SOPS_AGE_KEY_FILE to a key that is already a recipient), \
+         or pass --no-updatekeys to update configuration only. Underlying error: {source}"
+    ))
 }
 
 /// Print all configured recipients as a colorful aligned table.

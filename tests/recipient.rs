@@ -377,6 +377,60 @@ fn no_updatekeys_skips_reencryption() {
     restore_cwd(&original_cwd);
 }
 
+#[test]
+#[serial]
+fn add_rolls_back_when_reencryption_fails() {
+    let original_cwd = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+
+    let (a_pub, _a_file) = generate_age_key(dir.path(), "keyA.txt");
+    git_init(dir.path());
+    write_sops_yaml(dir.path(), &a_pub);
+    write_sopsy_yml(dir.path(), &a_pub);
+    // A stand-in encrypted file so the re-key walk has something to act on.
+    std::fs::write(dir.path().join(".env.encrypted"), "FOO=ENC[fake]\n").unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    // Fake `sops` that fails every invocation, simulating an operator who cannot
+    // decrypt the existing secrets (no usable age key for `updatekeys`).
+    let fake = dir.path().join("fake-sops.sh");
+    std::fs::write(&fake, "#!/bin/sh\necho 'cannot get data key' >&2\nexit 1\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    unsafe {
+        std::env::set_var("SOPSY_SOPS_BIN", &fake);
+    }
+
+    let new_key = "age1rollbackkeyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+    let err = recipient::run(&test_ui(), &add_command("second", new_key, false, false))
+        .expect_err("recipient add must fail when re-encryption fails");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("SOPS_AGE_KEY_FILE") && msg.contains("rolled back"),
+        "error should guide the operator and mention rollback: {msg}"
+    );
+
+    // The repository must be left consistent: neither config file lists the key.
+    let config = Config::load_from_dir(dir.path()).unwrap();
+    assert!(
+        config.recipient("second").is_none(),
+        "`second` must not remain in .sopsy.yml after rollback"
+    );
+    let sops_yaml = std::fs::read_to_string(dir.path().join(".sops.yaml")).unwrap();
+    assert!(
+        !sops_yaml.contains(new_key),
+        ".sops.yaml must not list the new key after rollback"
+    );
+
+    unsafe {
+        std::env::remove_var("SOPSY_SOPS_BIN");
+    }
+    restore_cwd(&original_cwd);
+}
+
 // ---------------------------------------------------------------------------
 // Config-driven flow tests. These do not need real `sops`: they either pass
 // `--no-updatekeys`, exercise pure-config validation that returns before any
@@ -755,7 +809,23 @@ fn updatekeys_failure_surfaces_process_error() {
         &add_args(Some("carol"), Some("age1carol"), false, false),
     )
     .unwrap_err();
-    assert!(matches!(err, Error::ProcessFailed { .. }));
+    // The raw sops failure is wrapped with actionable rollback guidance, and the
+    // underlying error text is preserved.
+    let msg = err.to_string();
+    assert!(
+        matches!(err, Error::Validation(_)),
+        "updatekeys failure should surface as a rollback validation error: {msg}"
+    );
+    assert!(
+        msg.contains("rolled back") && msg.contains("boom"),
+        "error should mention rollback and include the sops error: {msg}"
+    );
+    // The config change is rolled back: carol is not left behind.
+    let config = Config::load_from_dir(dir.path()).unwrap();
+    assert!(
+        config.recipient("carol").is_none(),
+        "carol must be rolled back out of .sopsy.yml"
+    );
 
     unsafe {
         std::env::remove_var("SOPSY_SOPS_BIN");
