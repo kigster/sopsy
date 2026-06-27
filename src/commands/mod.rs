@@ -7,6 +7,8 @@
 //! a `//! TODO` contract describing the behavior the next phase must implement.
 
 pub mod check;
+pub mod completion;
+pub mod deps;
 pub mod doctor;
 pub mod edit;
 pub mod init;

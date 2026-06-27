@@ -53,6 +53,8 @@ fn dispatch(ui: &Ui, command: Command) -> Result<()> {
         Command::Edit(args) => commands::edit::run(ui, &args),
         Command::Recipient(cmd) => commands::recipient::run(ui, &cmd),
         Command::Check => commands::check::run(ui),
+        Command::Deps(args) => commands::deps::run(ui, &args),
+        Command::Completion(args) => commands::completion::run(&args),
     }
 }
 

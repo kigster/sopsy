@@ -1,6 +1,6 @@
 [package]
 name = "sopsy"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 description = "The missing developer experience for SOPS"
 license = "MIT"
@@ -11,7 +11,9 @@ categories = ["command-line-utilities", "config"]
 
 [dependencies]
 anyhow = "1.0.103"
-clap = { version = "4.6.1", features = ["derive"] }
+# `wrap_help` makes clap honor terminal width and the `max_term_width` cap.
+clap = { version = "4.6.1", features = ["derive", "wrap_help"] }
+clap_complete = "4.6"
 color-eyre = "0.6.5"
 indicatif = "0.18.4"
 inquire = "0.9.4"
