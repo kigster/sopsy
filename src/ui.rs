@@ -49,6 +49,20 @@ impl Ui {
     pub fn new(color: bool, verbose: bool, interactive: bool) -> Self {
         let stdout_tty = std::io::stdout().is_terminal();
         let no_color_env = std::env::var_os("NO_COLOR").is_some();
+        Self::resolve(color, verbose, interactive, stdout_tty, no_color_env)
+    }
+
+    /// Apply the runtime downgrade rules. Factored out of [`Ui::new`] so the
+    /// logic can be tested deterministically with explicit `stdout_tty` /
+    /// `no_color_env` values, rather than depending on whether the test
+    /// process's own stdout happens to be a terminal.
+    fn resolve(
+        color: bool,
+        verbose: bool,
+        interactive: bool,
+        stdout_tty: bool,
+        no_color_env: bool,
+    ) -> Self {
         Self {
             color: color && stdout_tty && !no_color_env,
             verbose,
@@ -287,14 +301,37 @@ mod tests {
     }
 
     #[test]
-    fn new_downgrades_color_and_interactivity_without_tty() {
-        // Under `cargo test` stdout is not a terminal, so even when the caller
-        // asks for color + interactivity both must be disabled.
-        let ui = Ui::new(true, true, true);
+    fn resolve_applies_tty_and_no_color_downgrades() {
+        // No TTY: color and interactivity are disabled regardless of request,
+        // but verbosity (terminal-independent) is preserved.
+        let ui = Ui::resolve(true, true, true, false, false);
         assert!(!ui.color_enabled());
         assert!(!ui.is_interactive());
-        // Verbosity is independent of the terminal and must be preserved.
         assert!(ui.is_verbose());
+
+        // TTY, no NO_COLOR: both honored.
+        let ui = Ui::resolve(true, false, true, true, false);
+        assert!(ui.color_enabled());
+        assert!(ui.is_interactive());
+
+        // NO_COLOR disables color even on a TTY; interactivity is unaffected.
+        let ui = Ui::resolve(true, false, true, true, true);
+        assert!(!ui.color_enabled());
+        assert!(ui.is_interactive());
+
+        // The caller opting out is always honored.
+        let ui = Ui::resolve(false, false, false, true, false);
+        assert!(!ui.color_enabled());
+        assert!(!ui.is_interactive());
+    }
+
+    #[test]
+    fn new_constructs_from_ambient_environment() {
+        // Exercises `Ui::new`'s real TTY/NO_COLOR detection. The resolved color
+        // and interactivity depend on the environment, so we only assert it
+        // builds and preserves the terminal-independent verbosity flag.
+        assert!(Ui::new(true, true, true).is_verbose());
+        assert!(!Ui::new(true, false, true).is_verbose());
     }
 
     #[test]
