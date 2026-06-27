@@ -38,6 +38,8 @@ secret sneaks in.
   - [`sopsy edit`](#sopsy-edit)
   - [`sopsy recipient`](#sopsy-recipient)
   - [`sopsy check`](#sopsy-check)
+  - [`sopsy deps`](#sopsy-deps)
+  - [`sopsy completion`](#sopsy-completion)
 - [Using sopsy in CI](#using-sopsy-in-ci)
 - [Environment variables](#environment-variables)
 - [Scope and roadmap](#scope-and-roadmap)
@@ -606,6 +608,62 @@ sopsy check && echo "secrets hygiene: OK"
 > [!NOTE]
 > If `.sopsy.yml` is absent, the repository is not sopsy-managed, so `check`
 > prints a notice and exits **0** rather than failing unrelated repositories.
+
+---
+
+### `sopsy deps`
+
+Install the external tools sopsy needs (`sops`, `age`, `age-plugin-se`) with
+[Homebrew](https://brew.sh). It probes for each tool first and only installs the
+ones that are missing, so it is safe to run repeatedly. This is the *remedy* that
+pairs with `sopsy doctor`'s *diagnosis*.
+
+| Flag        | Effect                                                       |
+| ----------- | ------------------------------------------------------------ |
+| `--check`   | Report status only; exit **non-zero** if anything is missing.|
+| `--dry-run` | Print the `brew install …` command without running it.       |
+
+```bash
+sopsy deps              # install whatever is missing
+sopsy deps --check      # CI / pre-flight: fail if a dependency is absent
+sopsy deps --dry-run    # preview the brew command without touching the system
+```
+
+> [!NOTE]
+> `git` is intentionally **not** installed here — it ships with macOS / the Xcode
+> Command Line Tools. If `brew` itself is missing, `deps` points you to
+> <https://brew.sh>.
+
+> [!TIP]
+> `sopsy doctor` tells you *what* is missing; `sopsy deps` *fixes* it. For tests
+> and sandboxes, the `brew` binary can be overridden with `SOPSY_BREW_BIN`.
+
+---
+
+### `sopsy completion`
+
+Generate a shell completion script. Completions are derived directly from the
+CLI definition, so they never drift from the real commands and flags. Supports
+`bash`, `zsh`, `fish`, `powershell`, and `elvish`. The script is written to
+**stdout**.
+
+```bash
+# zsh — write into a directory on your $fpath
+sopsy completion zsh > "${fpath[1]}/_sopsy"
+
+# bash — into Homebrew's bash-completion directory
+sopsy completion bash > "$(brew --prefix)/etc/bash_completion.d/sopsy"
+
+# fish
+sopsy completion fish > ~/.config/fish/completions/sopsy.fish
+
+# …or load it ephemerally from your shell rc
+eval "$(sopsy completion zsh)"
+```
+
+> [!TIP]
+> After installing a zsh completion you may need to restart your shell (or run
+> `compinit`) for it to take effect.
 
 ---
 

@@ -18,6 +18,9 @@ use clap::{Args, Parser, Subcommand};
 #[command(version)]
 #[command(about = "The missing developer experience for SOPS")]
 #[command(propagate_version = true)]
+// Wrap help output at 80 columns (capped, so narrower terminals still wrap to
+// their width). Set on the root command, this applies to every subcommand too.
+#[command(max_term_width = 80)]
 pub struct Cli {
     /// Global flags shared by every subcommand.
     #[command(flatten)]
@@ -77,6 +80,12 @@ pub enum Command {
 
     /// CI gate: verify the repo's encrypted-secrets hygiene (exit 0/1).
     Check,
+
+    /// Install sopsy's external tools (sops, age, age-plugin-se) via Homebrew.
+    Deps(DepsArgs),
+
+    /// Generate a shell completion script (bash, zsh, fish, …).
+    Completion(CompletionArgs),
 }
 
 /// Arguments for `sopsy init`.
@@ -112,6 +121,27 @@ pub struct EditArgs {
     /// Extra arguments forwarded verbatim to `sops` after `--`.
     #[arg(last = true)]
     pub sops_args: Vec<String>,
+}
+
+/// Arguments for `sopsy deps`.
+#[derive(Debug, Args)]
+pub struct DepsArgs {
+    /// Only report which dependencies are missing; do not install anything.
+    /// Exits non-zero if any are missing (handy in CI / pre-flight checks).
+    #[arg(long)]
+    pub check: bool,
+
+    /// Print the `brew install` command that would run, without executing it.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// Arguments for `sopsy completion`.
+#[derive(Debug, Args)]
+pub struct CompletionArgs {
+    /// The shell to generate a completion script for.
+    #[arg(value_enum)]
+    pub shell: clap_complete::Shell,
 }
 
 /// `sopsy recipient` subcommands.
