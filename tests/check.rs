@@ -313,3 +313,179 @@ fn no_break_glass_recipient_fails() {
         .failure()
         .stdout(predicate::str::contains("no break-glass recipient"));
 }
+
+/// Build a repository whose `.sops.yaml`, `.sopsy.yml`, and `.gitignore` are
+/// committed, then create a real sops-encrypted `.env.encrypted` that is left
+/// **untracked** on disk (mirroring the state right after `sopsy init`, before
+/// the user commits). The file is always encrypted with a matching rule first;
+/// `match_rule`/`valid_meta` then mutate it to drive the failure cases.
+fn build_untracked_encrypted(match_rule: bool, valid_meta: bool) -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let repo = dir.path();
+    let public_key = generate_age_key(repo);
+
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "ci@example.com"]);
+    git(repo, &["config", "user.name", "CI"]);
+
+    std::fs::write(
+        repo.join(".sops.yaml"),
+        format!("creation_rules:\n  - path_regex: \\.encrypted$\n    age: {public_key}\n"),
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(".sopsy.yml"),
+        format!(
+            "encrypted_globs:\n  - \"*.encrypted\"\nrecipients:\n  \
+             - name: dev\n    public_key: {public_key}\n  \
+             - name: break-glass\n    public_key: {public_key}\n    break_glass: true\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(repo.join(".gitignore"), ".env\n").unwrap();
+
+    // Commit only the configuration; the encrypted artifact stays untracked.
+    git(repo, &["add", ".sops.yaml", ".sopsy.yml", ".gitignore"]);
+    git(repo, &["commit", "-qm", "init"]);
+
+    // Create + encrypt the real artifact (untracked on disk).
+    let encrypted = repo.join(".env.encrypted");
+    std::fs::write(&encrypted, "TOKEN=secret123\n").unwrap();
+    sops_encrypt_dotenv(repo, ".env.encrypted");
+
+    if !match_rule {
+        // Narrow the rule so it no longer covers `.env.encrypted`.
+        std::fs::write(
+            repo.join(".sops.yaml"),
+            format!(
+                "creation_rules:\n  - path_regex: doesnotmatch\\.encrypted$\n    age: {public_key}\n"
+            ),
+        )
+        .unwrap();
+    }
+    if !valid_meta {
+        // Strip the sops metadata by overwriting with plaintext.
+        std::fs::write(&encrypted, "TOKEN=plaintext\n").unwrap();
+    }
+
+    dir
+}
+
+#[test]
+#[serial]
+fn untracked_encrypted_file_is_validated() {
+    // The real bug: an on-disk `.env.encrypted` that is not yet committed must
+    // still be validated (not skipped as "no encrypted files to verify").
+    let dir = build_untracked_encrypted(true, true);
+
+    // Sanity: the artifact really is untracked.
+    let tracked = Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["ls-files", ".env.encrypted"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&tracked.stdout).trim().is_empty(),
+        ".env.encrypted should be untracked for this fixture"
+    );
+
+    run_check(dir.path())
+        .success()
+        .stdout(
+            predicate::str::contains("matches a .sops.yaml creation rule")
+                .and(predicate::str::contains("contains valid sops metadata"))
+                .and(predicate::str::contains("all checks passed")),
+        )
+        // Must NOT vacuously skip the (untracked) artifact.
+        .stdout(predicate::str::contains("no encrypted files to verify").not());
+}
+
+#[test]
+#[serial]
+fn untracked_encrypted_unmatched_rule_fails() {
+    // With the old (tracked-only) logic this passed vacuously; it must now fail.
+    let dir = build_untracked_encrypted(false, true);
+    run_check(dir.path())
+        .failure()
+        .stdout(predicate::str::contains(
+            "matches no .sops.yaml creation rule",
+        ));
+}
+
+#[test]
+#[serial]
+fn untracked_encrypted_missing_metadata_fails() {
+    // Likewise, a broken (plaintext) untracked artifact must now be caught.
+    let dir = build_untracked_encrypted(true, false);
+    run_check(dir.path())
+        .failure()
+        .stdout(predicate::str::contains("missing sops metadata"));
+}
+
+/// Build a minimal sopsy-managed repo containing **no** encrypted files at all.
+fn build_repo_without_encrypted(sops_yaml: &str, sopsy_yml: &str) -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let repo = dir.path();
+    let public_key = generate_age_key(repo);
+
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "ci@example.com"]);
+    git(repo, &["config", "user.name", "CI"]);
+
+    std::fs::write(
+        repo.join(".sops.yaml"),
+        sops_yaml.replace("{KEY}", &public_key),
+    )
+    .unwrap();
+    std::fs::write(
+        repo.join(".sopsy.yml"),
+        sopsy_yml.replace("{KEY}", &public_key),
+    )
+    .unwrap();
+    std::fs::write(repo.join(".gitignore"), ".env\n").unwrap();
+    git(repo, &["add", "-A"]);
+    git(repo, &["commit", "-qm", "init"]);
+    dir
+}
+
+#[test]
+#[serial]
+fn no_encrypted_files_passes_vacuously() {
+    // A managed repo with no artifacts: the two "no encrypted files" branches.
+    let dir = build_repo_without_encrypted(
+        "creation_rules:\n  - path_regex: \\.encrypted$\n    age: {KEY}\n",
+        "encrypted_globs:\n  - \"*.encrypted\"\nrecipients:\n  - name: bg\n    public_key: {KEY}\n    break_glass: true\n",
+    );
+    run_check(dir.path()).success().stdout(
+        predicate::str::contains("no encrypted files to verify against creation rules")
+            .and(predicate::str::contains("no encrypted files to parse")),
+    );
+}
+
+#[test]
+#[serial]
+fn sops_yaml_without_creation_rules_fails() {
+    // `.sops.yaml` parses but defines no creation rules.
+    let dir = build_repo_without_encrypted(
+        "other_key: 1\n",
+        "encrypted_globs:\n  - \"*.encrypted\"\nrecipients:\n  - name: bg\n    public_key: {KEY}\n    break_glass: true\n",
+    );
+    run_check(dir.path())
+        .failure()
+        .stdout(predicate::str::contains(".sops.yaml has no creation_rules"));
+}
+
+#[test]
+#[serial]
+fn invalid_sopsy_yml_surfaces_error() {
+    // A malformed `.sopsy.yml` is a hard error (not a vacuous skip): exercises
+    // the non-`FileNotFound` error arm of `Config::load_from_dir`.
+    let dir = TempDir::new().unwrap();
+    let repo = dir.path();
+    git(repo, &["init", "-q"]);
+    git(repo, &["config", "user.email", "ci@example.com"]);
+    git(repo, &["config", "user.name", "CI"]);
+    std::fs::write(repo.join(".sopsy.yml"), "recipients: [unterminated\n").unwrap();
+    run_check(repo).failure();
+}
