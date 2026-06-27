@@ -1,7 +1,6 @@
 # Sopsy
 
-[![CI](https://github.com/kigster/sopsy/actions/workflows/ci.yml/badge.svg)](https://github.com/kigster/sopsy/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/kigster/sopsy/graph/badge.svg)](https://codecov.io/gh/kigster/sopsy)
+[![crates](https://img.shields.io/crates/v/sopsy?logo=rust&style=flat-square&color=E05D44)](https://crates.io/crates/sopsy)  [![CI](https://github.com/kigster/sopsy/actions/workflows/ci.yml/badge.svg)](https://github.com/kigster/sopsy/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/kigster/sopsy/graph/badge.svg)](https://codecov.io/gh/kigster/sopsy) [![repository](https://img.shields.io/badge/repo-kigster/sopsy-1370D3?style=flat-square&logo=github)](https://github.com/kigster/sopsy) ![License](https://img.shields.io/crates/l/sopsy?style=flat-square&color=1370D3) [![docs](https://img.shields.io/badge/docs-sopsy-1370D3?style=flat-square&logo=rust)](https://docs.rs/crate/sopsy/latest) 
 
 > The missing developer experience for [SOPS](https://github.com/getsops/sops).
 

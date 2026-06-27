@@ -1,3 +1,11 @@
+[![CI](https://github.com/kigster/sopsy/actions/workflows/ci.yml/badge.svg)](https://github.com/kigster/sopsy/actions/workflows/ci.yml)
+
+![crates](https://img.shields.io/crates/v/sopsy?logo=rust&style=flat-square&color=E05D44)
+
+![repo](https://img.shields.io/badge/repo-kigster/sopsy-1370D3?style=flat-square&logo=github)
+
+![mit](https://img.shields.io/crates/l/ratatui?style=flat-square&color=1370D3)
+
 # Sopsy
 
 ## What this is?
