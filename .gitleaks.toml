@@ -1,0 +1,34 @@
+# Gitleaks configuration — EXTENDS the built-in ruleset (does not replace it).
+# Docs: https://github.com/gitleaks/gitleaks
+#
+# Used by both the local pre-commit hook (lefthook.yml) and the gitleaks CI job,
+# so local and CI behavior match.
+
+title = "Archive gitleaks config"
+
+[extend]
+# Inherit gitleaks' default rules (AWS, OpenAI, Stripe, generic high-entropy, etc.)
+# and only ADD the allowlists below. Do not set a custom `path` alongside useDefault.
+useDefault = true
+
+# Global allowlists apply to every rule. Array-of-tables syntax (gitleaks v8.25+).
+[[allowlists]]
+description = "Example/sample env files and committed fixtures (never real secrets)"
+paths = [
+  '''(^|/)\.env\.example$''',
+  '''(^|/)\.env\.sample$''',
+  '''.*\.example\.(env|yml|yaml|json|toml)$''',
+  '''(^|/)spec/fixtures/.*''',
+  '''(^|/)spec/.*/fixtures/.*''',
+  '''(^|/)__fixtures__/.*''',
+  # detect-secrets baseline: stores only one-way `hashed_secret` digests + metadata,
+  # never cleartext. gitleaks' generic-high-entropy rule otherwise flags every hash
+  # as a secret. The two scanners share no config, so gitleaks needs this explicitly.
+  '''(^|/)\.secrets\.baseline$''',
+]
+
+[[allowlists]]
+description = "Obvious non-secret placeholders"
+regexes = [
+  '''(?i)\b(localhost|example\.com|changeme|placeholder|your[-_ ]?(api[-_ ]?)?key[-_ ]?here|dummy|xxxx+|\.\.\.\.)\b''',
+]

@@ -8,6 +8,7 @@ recipes:
 
 setup:
     brew bundle --no-upgrade
+    lefthook install
 
 fmt: 
     cargo fmt

@@ -1,0 +1,57 @@
+# Lefthook — git hooks for this repo.
+#
+# Install the hooks:  lefthook install   (bin/setup also runs this)
+# Install the tools:  brew bundle        (installs lefthook, gitleaks, detect-secrets)
+#
+# IMPORTANT: client-side hooks are ADVISORY — they can be bypassed with
+# `git commit --no-verify`. The authoritative, non-bypassable secret gate is the
+# gitleaks CI job (see .plans/PLA-545/plan.md → Phase 1). Keep BOTH: these hooks are
+# fast local feedback; CI is the gate that cannot be skipped.
+#
+# Two complementary secret scanners run in parallel on pre-commit:
+#   - gitleaks       — regex/entropy + git-aware; strong on known token shapes.
+#   - detect-secrets — plugin + baseline-driven, with an audit workflow
+#                      (`detect-secrets audit .secrets.baseline`) to triage findings.
+# Defense in depth: a secret one heuristic misses, the other often catches.
+
+output:
+  - summary
+  - failure
+
+pre-commit:
+  parallel: true
+  commands:
+    gitleaks:
+      # Scan ONLY staged changes; a non-zero exit blocks the commit.
+      # Fail CLOSED if gitleaks is missing — secret scanning is mandatory.
+      run: |
+        if ! command -v gitleaks >/dev/null 2>&1; then
+          echo "gitleaks is not installed — secret scanning is required before committing."
+          echo "Install it:  brew bundle   (installs gitleaks + detect-secrets + lefthook)"
+          exit 1
+        fi
+        gitleaks git --pre-commit --redact --staged --no-banner --verbose
+      fail_text: |
+        Commit blocked: gitleaks flagged a possible secret in your staged changes
+        (or gitleaks is not installed). Review the finding above.
+        - Real secret? Remove it; use Rails encrypted credentials or a secrets manager.
+        - False positive? Allowlist it in .gitleaks.toml ([[allowlists]]) or add its
+          fingerprint to .gitleaksignore. Do NOT --no-verify past a real secret.
+
+    detect-secrets:
+      # Baseline-driven scan of the staged files. A finding NOT already recorded
+      # (and audited) in .secrets.baseline exits non-zero and blocks the commit.
+      # Fail CLOSED if detect-secrets is missing.
+      run: |
+        if ! command -v detect-secrets-hook >/dev/null 2>&1; then
+          echo "detect-secrets is not installed — secret scanning is required before committing."
+          echo "Install it:  brew bundle   (installs gitleaks + detect-secrets + lefthook)"
+          exit 1
+        fi
+        detect-secrets-hook --baseline .secrets.baseline --exclude-files 'pnpm-lock\.yaml$' {staged_files}
+      fail_text: |
+        Commit blocked: detect-secrets flagged a possible secret in your staged changes.
+        - Real secret? Remove it; use Rails encrypted credentials or a secrets manager.
+        - False positive? Audit & record it:  detect-secrets scan --baseline .secrets.baseline
+          then  detect-secrets audit .secrets.baseline  and commit the updated baseline.
+          Do NOT --no-verify past a real secret.
