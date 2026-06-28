@@ -370,6 +370,37 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn system_username_falls_back_to_none_when_unset() {
+        // Snapshot and clear both vars, then restore them afterwards.
+        let saved: Vec<(&str, Option<String>)> = ["USER", "LOGNAME"]
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
+        // SAFETY: serialized via `#[serial]`.
+        unsafe {
+            std::env::remove_var("USER");
+            std::env::remove_var("LOGNAME");
+        }
+        assert_eq!(system_username(), None);
+        // An empty value is also treated as absent.
+        // SAFETY: serialized via `#[serial]`.
+        unsafe {
+            std::env::set_var("USER", "   ");
+        }
+        assert_eq!(system_username(), None);
+        // SAFETY: restore the original environment.
+        unsafe {
+            for (k, v) in saved {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
+    #[test]
     fn read_seed_prefers_dotenv_then_example_then_template() {
         let dir = assert_fs::TempDir::new().unwrap();
         let root = dir.path();

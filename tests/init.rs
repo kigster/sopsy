@@ -342,6 +342,38 @@ fn init_outside_git_repo_fails_friendly() {
         .stderr(predicate::str::contains("git repository"));
 }
 
+#[test]
+#[serial]
+fn init_records_username_and_respects_no_break_glass() {
+    let dir = TempDir::new().unwrap();
+    init_git_repo(dir.path());
+    let (public_key, _key_file) = generate_age_key(dir.path());
+
+    sopsy_in(dir.path())
+        .args([
+            "--non-interactive",
+            "init",
+            "--no-generate",
+            "--public-key",
+            &public_key,
+            "--username",
+            "alice",
+            "--no-break-glass",
+        ])
+        .assert()
+        .success();
+
+    let config = std::fs::read_to_string(dir.path().join(".sopsy.yml")).unwrap();
+    assert!(
+        config.contains("username: alice"),
+        "username should be recorded"
+    );
+    assert!(
+        !config.contains("break_glass: true"),
+        "--no-break-glass must skip break-glass setup"
+    );
+}
+
 // ----------------------------------------------------------------------------
 // Break-glass during init
 // ----------------------------------------------------------------------------

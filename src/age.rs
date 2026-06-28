@@ -147,4 +147,70 @@ mod tests {
             Some("age1real")
         );
     }
+
+    /// Write an executable fake `age-keygen` to `dir` and point the override at it.
+    ///
+    /// # Safety
+    /// Callers must be serialized (`#[serial]`) — the env var is process-wide.
+    fn install_fake_keygen(dir: &std::path::Path, body: &str) {
+        let script = dir.join("fake-age-keygen");
+        std::fs::write(&script, format!("#!/bin/sh\n{body}")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // SAFETY: serialized via `#[serial]`.
+        unsafe {
+            std::env::set_var(KEYGEN_BIN_ENV, &script);
+        }
+    }
+
+    fn clear_fake_keygen() {
+        // SAFETY: serialized via `#[serial]`.
+        unsafe {
+            std::env::remove_var(KEYGEN_BIN_ENV);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn ensure_available_errs_when_binary_missing() {
+        // SAFETY: serialized via `#[serial]`.
+        unsafe {
+            std::env::set_var(KEYGEN_BIN_ENV, "/nonexistent/age-keygen-xyz");
+        }
+        assert!(matches!(ensure_available(), Err(Error::ToolNotFound(_))));
+        clear_fake_keygen();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn generate_keypair_parses_fake_success() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        install_fake_keygen(
+            dir.path(),
+            "cat <<'EOF'\n\
+             # created: 2026-06-27T00:00:00Z\n\
+             # public key: age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p\n\
+             AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQ\n\
+             EOF\n",
+        );
+        let pair = generate_keypair().unwrap();
+        assert!(pair.public_key.starts_with("age1"));
+        assert!(pair.identity.contains("AGE-SECRET-KEY-1"));
+        clear_fake_keygen();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn generate_keypair_maps_nonzero_exit_to_process_failed() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        install_fake_keygen(dir.path(), "echo 'boom' >&2\nexit 1\n");
+        assert!(matches!(
+            generate_keypair(),
+            Err(Error::ProcessFailed { .. })
+        ));
+        clear_fake_keygen();
+    }
 }

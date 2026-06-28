@@ -406,6 +406,22 @@ mod tests {
                 .expect_err("text should refuse to prompt"),
             Error::NonInteractive { .. }
         ));
+        assert!(matches!(
+            ui.text_with_default("Name?", "--name", "default")
+                .expect_err("text_with_default should refuse to prompt"),
+            Error::NonInteractive { .. }
+        ));
+        assert!(matches!(
+            ui.press_enter("Press ENTER:")
+                .expect_err("press_enter should refuse without a terminal"),
+            Error::NonInteractive { .. }
+        ));
+    }
+
+    #[test]
+    fn pause_is_a_noop_when_not_interactive() {
+        // Must return immediately (no sleep) in non-interactive mode.
+        noninteractive_ui().pause(Duration::from_secs(3600));
     }
 
     #[test]

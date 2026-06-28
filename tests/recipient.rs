@@ -335,6 +335,352 @@ fn break_glass_non_interactive_without_optin_fails_before_writing() {
     restore_cwd(&original);
 }
 
+/// A `.sopsy.yml` with alice (active) and bob (pending), with an optional extra
+/// line appended to bob's entry (e.g. a `requested_at` or `state`).
+fn sopsy_with_pending_bob(bob_extra: &str) -> String {
+    format!(
+        "recipients:\n  - name: alice\n    public_key: age1alice\n  \
+         - name: bob\n    public_key: age1bob\n    state: pending\n{bob_extra}"
+    )
+}
+
+#[test]
+#[serial]
+fn join_empty_name_rejected() {
+    with_repo(|dir| {
+        flow_repo(dir, Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+        let err = join::run(
+            &test_ui(),
+            &JoinArgs {
+                name: "   ".into(),
+                sopsy_file: None,
+                public_key: Some("age1x".into()),
+                age_args: vec![],
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Validation(m) if m.contains("must not be empty")));
+    });
+}
+
+#[test]
+#[serial]
+fn join_rejects_duplicate_pending_request() {
+    with_repo(|dir| {
+        flow_repo(
+            dir,
+            Some(&sopsy_with_pending_bob("")),
+            Some(SOPS_ALICE_ONLY),
+        );
+        let err = join::run(
+            &test_ui(),
+            &JoinArgs {
+                name: "bob".into(),
+                sopsy_file: None,
+                public_key: Some("age1bobnew".into()),
+                age_args: vec![],
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Validation(m) if m.contains("pending request")));
+    });
+}
+
+#[test]
+#[serial]
+fn join_rejects_duplicate_public_key() {
+    with_repo(|dir| {
+        flow_repo(dir, Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+        // age1alice already belongs to alice in SOPSY_TWO.
+        let err = join::run(
+            &test_ui(),
+            &JoinArgs {
+                name: "carol".into(),
+                sopsy_file: None,
+                public_key: Some("age1alice".into()),
+                age_args: vec![],
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Validation(m) if m.contains("already registered")));
+    });
+}
+
+#[test]
+#[serial]
+fn join_with_sopsy_file_targets_custom_path() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("custom-sopsy.yml");
+    std::fs::write(
+        &file,
+        "recipients:\n  - name: alice\n    public_key: age1alice\n",
+    )
+    .unwrap();
+
+    join::run(
+        &test_ui(),
+        &JoinArgs {
+            name: "bob".into(),
+            sopsy_file: Some(file.clone()),
+            public_key: Some("age1bobkey".into()),
+            age_args: vec![],
+        },
+    )
+    .expect("join --sopsy-file should succeed");
+
+    let cfg = Config::load(&file).unwrap();
+    let bob = cfg.recipient("bob").unwrap();
+    assert!(bob.is_pending());
+    assert!(bob.requested_at.is_some());
+}
+
+#[test]
+fn join_with_missing_sopsy_file_errors() {
+    let err = join::run(
+        &test_ui(),
+        &JoinArgs {
+            name: "bob".into(),
+            sopsy_file: Some("/nonexistent/dir/custom.yml".into()),
+            public_key: Some("age1bobkey".into()),
+            age_args: vec![],
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::Validation(m) if m.contains("not found")));
+}
+
+#[test]
+#[serial]
+fn join_generates_enclave_identity_with_fake_plugin() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    git_init(dir.path());
+    std::fs::write(
+        dir.path().join(".sopsy.yml"),
+        "recipients:\n  - name: alice\n    public_key: age1alice\n",
+    )
+    .unwrap();
+
+    let fake_pub = "age1se1qg8vwwqhztnh3vpt2nf2xwn7famktxlmp0nmkfltp8lkvzp8nafkqleh258";
+    let plugin = dir.path().join("age-plugin-se");
+    write_script(
+        &plugin,
+        &format!("cat <<'EOF'\n# public key: {fake_pub}\nAGE-PLUGIN-SE-1QFAKE\nEOF\n"),
+    );
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let output = assert_cmd::Command::cargo_bin("sopsy")
+        .unwrap()
+        .env("SOPSY_AGE_PLUGIN_SE_BIN", &plugin)
+        .current_dir(dir.path())
+        .args(["--non-interactive", "join", "newbie"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "join (generate) should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cfg = Config::load_from_dir(dir.path()).unwrap();
+    let m = cfg.recipient("newbie").expect("newbie recorded");
+    assert!(m.is_pending());
+    assert_eq!(m.public_key, fake_pub);
+
+    restore_cwd(&original);
+}
+
+#[test]
+#[serial]
+fn approve_proceeds_without_timestamp_and_warns_on_no_age_rule() {
+    with_repo(|dir| {
+        set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+        // bob is pending without a timestamp; the .sops.yaml rule has no `age:`,
+        // exercising both the missing-timestamp and zero-modified warn branches.
+        flow_repo(
+            dir,
+            Some(&sopsy_with_pending_bob("")),
+            Some("creation_rules:\n  - path_regex: \\.enc$\n"),
+        );
+        approve::run(
+            &test_ui(),
+            &ApproveArgs {
+                name: "bob".into(),
+                force: false,
+                no_updatekeys: false,
+            },
+        )
+        .expect("approve should succeed");
+        let cfg = Config::load_from_dir(dir).unwrap();
+        assert_eq!(cfg.recipient("bob").unwrap().state, MemberState::Active);
+        set_env("SOPSY_ASSUME_YES", None);
+    });
+}
+
+#[test]
+#[serial]
+fn approve_handles_unparseable_and_future_timestamps() {
+    // Unparseable timestamp: warns, proceeds.
+    with_repo(|dir| {
+        set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+        flow_repo(
+            dir,
+            Some(&sopsy_with_pending_bob("    requested_at: not-a-date\n")),
+            Some(SOPS_ALICE_ONLY),
+        );
+        approve::run(
+            &test_ui(),
+            &ApproveArgs {
+                name: "bob".into(),
+                force: false,
+                no_updatekeys: false,
+            },
+        )
+        .expect("approve should proceed past a bad timestamp");
+        assert_eq!(
+            Config::load_from_dir(dir)
+                .unwrap()
+                .recipient("bob")
+                .unwrap()
+                .state,
+            MemberState::Active
+        );
+        set_env("SOPSY_ASSUME_YES", None);
+    });
+    // Future timestamp: treated as fresh.
+    with_repo(|dir| {
+        set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+        flow_repo(
+            dir,
+            Some(&sopsy_with_pending_bob(
+                "    requested_at: 2999-01-01T00:00:00Z\n",
+            )),
+            Some(SOPS_ALICE_ONLY),
+        );
+        approve::run(
+            &test_ui(),
+            &ApproveArgs {
+                name: "bob".into(),
+                force: false,
+                no_updatekeys: false,
+            },
+        )
+        .expect("a future-dated request is fresh");
+        set_env("SOPSY_ASSUME_YES", None);
+    });
+}
+
+#[test]
+#[serial]
+fn approve_stale_request_with_force_proceeds() {
+    with_repo(|dir| {
+        set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+        flow_repo(
+            dir,
+            Some(&sopsy_with_pending_bob(
+                "    requested_at: 2020-01-01T00:00:00Z\njoin_request_ttl: 1h\n",
+            )),
+            Some(SOPS_ALICE_ONLY),
+        );
+        approve::run(
+            &test_ui(),
+            &ApproveArgs {
+                name: "bob".into(),
+                force: true,
+                no_updatekeys: false,
+            },
+        )
+        .expect("--force should approve a stale request");
+        assert_eq!(
+            Config::load_from_dir(dir)
+                .unwrap()
+                .recipient("bob")
+                .unwrap()
+                .state,
+            MemberState::Active
+        );
+        set_env("SOPSY_ASSUME_YES", None);
+    });
+}
+
+#[test]
+#[serial]
+fn approve_non_interactive_without_optin_errors_at_vouch() {
+    with_repo(|dir| {
+        set_env("SOPSY_ASSUME_YES", None); // ensure no automation opt-in
+        flow_repo(
+            dir,
+            Some(&sopsy_with_pending_bob("")),
+            Some(SOPS_ALICE_ONLY),
+        );
+        let err = approve::run(
+            &test_ui(),
+            &ApproveArgs {
+                name: "bob".into(),
+                force: false,
+                no_updatekeys: false,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::NonInteractive { .. }));
+        // Nothing changed: bob is still pending.
+        assert_eq!(
+            Config::load_from_dir(dir)
+                .unwrap()
+                .recipient("bob")
+                .unwrap()
+                .state,
+            MemberState::Pending
+        );
+    });
+}
+
+#[test]
+#[serial]
+fn approve_rolls_back_when_reencryption_fails() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    flow_repo(
+        dir.path(),
+        Some(&sopsy_with_pending_bob("")),
+        Some(SOPS_ALICE_ONLY),
+    );
+    std::fs::write(dir.path().join("secret.enc"), "FOO=ENC[x]\n").unwrap();
+    set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+
+    let fake = dir.path().join("fake-sops.sh");
+    write_script(&fake, "echo 'cannot get data key' >&2\nexit 1\n");
+    unsafe {
+        std::env::set_var("SOPSY_SOPS_BIN", &fake);
+    }
+
+    let err = approve::run(
+        &test_ui(),
+        &ApproveArgs {
+            name: "bob".into(),
+            force: false,
+            no_updatekeys: false,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::Validation(m) if m.contains("rolled back")));
+    // bob is rolled back to pending.
+    assert_eq!(
+        Config::load_from_dir(dir.path())
+            .unwrap()
+            .recipient("bob")
+            .unwrap()
+            .state,
+        MemberState::Pending
+    );
+
+    unsafe {
+        std::env::remove_var("SOPSY_SOPS_BIN");
+    }
+    set_env("SOPSY_ASSUME_YES", None);
+    restore_cwd(&original);
+}
+
 /// Local mirror of the production `with_suffix` helper for assertions.
 fn with_suffix_test(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
