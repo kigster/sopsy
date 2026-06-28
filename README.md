@@ -730,7 +730,7 @@ sopsy secrets decrypt config.json.encrypted -o config.json
 > **Load secrets into your shell with `direnv`** — drop this in `.envrc` so the
 > decrypted values live only in memory, only inside the project directory:
 > ```bash
-> eval "$(sopsy secrets decrypt .env.encrypted | sed 's/^/export /')"
+> eval "$(sopsy secrets decrypt .env.encrypted | sed -E '/^#/d; /^$/d; s/^([A-Z])/export \1/g')"
 > ```
 > The same idea works in a wrapper that `exec`s your app (Rails, etc.) with the
 > secrets in its environment — nothing is ever written to disk in plaintext.
