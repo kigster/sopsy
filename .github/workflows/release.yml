@@ -32,13 +32,14 @@ jobs:
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       # Builds (cross-compiling where needed), tars the binary as
       # sopsy-<target>.tar.gz, generates a .sha256, and uploads to the release.
-      - uses: taiki-e/upload-rust-binary-action@v1
+      # Pinned to a full commit SHA (supply-chain hardening); bump deliberately.
+      - uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1
         with:
           bin: sopsy
           target: ${{ matrix.target }}
