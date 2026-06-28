@@ -1,0 +1,71 @@
+name: release
+
+# Build prebuilt sopsy binaries and attach them to the GitHub Release for a tag,
+# so users can install via Homebrew (kigster/tap) without a Rust toolchain.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach binaries to (e.g. v1.0.2)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  upload:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      # Builds (cross-compiling where needed), tars the binary as
+      # sopsy-<target>.tar.gz, generates a .sha256, and uploads to the release.
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: sopsy
+          target: ${{ matrix.target }}
+          archive: sopsy-$target
+          checksum: sha256
+          ref: refs/tags/${{ github.event.inputs.tag || github.ref_name }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  notify-tap:
+    name: refresh Homebrew formula
+    needs: upload
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger tap update-formula workflow
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+          # Optional: a PAT with `repo` scope on kigster/homebrew-tap. Without it
+          # the tap is updated by running its update-formula workflow manually.
+          GH_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "TAP_DISPATCH_TOKEN not set — skipping auto-update."
+            echo "Run the tap's update-formula workflow manually:"
+            echo "  gh workflow run update-formula.yml -R kigster/homebrew-tap -f tag=$TAG"
+            exit 0
+          fi
+          gh api "repos/kigster/homebrew-tap/dispatches" \
+            -f "event_type=sopsy-release" \
+            -f "client_payload[tag]=$TAG"
