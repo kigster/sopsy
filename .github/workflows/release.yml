@@ -16,8 +16,28 @@ permissions:
   contents: write
 
 jobs:
+  # Pushing a tag does not create a GitHub Release object, and
+  # upload-rust-binary-action attaches to an existing release rather than
+  # creating one — so create (or reuse) the release first, once.
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure the GitHub release exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; reusing it."
+          else
+            gh release create "$TAG" --title "$TAG" --generate-notes
+          fi
+
   upload:
     name: ${{ matrix.target }}
+    needs: create-release
     strategy:
       fail-fast: false
       matrix:
