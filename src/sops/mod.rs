@@ -35,8 +35,13 @@ fn sops_bin() -> OsString {
 }
 
 /// Supported sops input/output formats. `dotenv` is the primary use case for
-/// sopsy (`.env` files), alongside YAML and JSON.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// sopsy (`.env` files), alongside YAML, JSON and INI. Anything else is treated
+/// as opaque `binary` (the whole file is encrypted, not value-by-value).
+///
+/// Derives [`clap::ValueEnum`] so it can back the `--type` flag directly; the
+/// generated value names (`dotenv`/`yaml`/`json`/`ini`/`binary`) match
+/// [`FileType::as_sops_type`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum FileType {
     /// `.env`-style `KEY=value` files.
     Dotenv,
@@ -44,7 +49,9 @@ pub enum FileType {
     Yaml,
     /// JSON documents.
     Json,
-    /// Opaque binary blobs.
+    /// INI files.
+    Ini,
+    /// Opaque binary blobs (whole-file encryption).
     Binary,
 }
 
@@ -55,22 +62,57 @@ impl FileType {
             FileType::Dotenv => "dotenv",
             FileType::Yaml => "yaml",
             FileType::Json => "json",
+            FileType::Ini => "ini",
             FileType::Binary => "binary",
         }
     }
 
+    /// A human hint of which file names auto-detect to this type, for
+    /// `sopsy list-supported-types`.
+    pub fn extension_hint(self) -> &'static str {
+        match self {
+            FileType::Dotenv => ".env, .env.*, *.env",
+            FileType::Yaml => ".yaml, .yml",
+            FileType::Json => ".json",
+            FileType::Ini => ".ini",
+            FileType::Binary => "anything else (whole-file)",
+        }
+    }
+
+    /// All supported types, in display order.
+    pub fn all() -> [FileType; 5] {
+        [
+            FileType::Dotenv,
+            FileType::Yaml,
+            FileType::Json,
+            FileType::Ini,
+            FileType::Binary,
+        ]
+    }
+
     /// Infer a [`FileType`] from a file name / extension.
     ///
-    /// Detection rules:
+    /// A trailing `.encrypted` is stripped first, so encrypted artifacts are
+    /// detected by their *inner* type (e.g. `config.json.encrypted` → JSON,
+    /// `.env.encrypted` → dotenv). Detection rules on the remaining name:
     /// - `.env`, `.env.*` (e.g. `.env.production`), or `*.env` → [`FileType::Dotenv`]
     /// - `.yaml` / `.yml` → [`FileType::Yaml`]
     /// - `.json` → [`FileType::Json`]
+    /// - `.ini` → [`FileType::Ini`]
     /// - anything else → [`FileType::Binary`]
     pub fn from_path(path: &Path) -> Self {
-        let name = path
+        let original = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
+
+        // Strip a trailing `.encrypted` (case-insensitive) so the encrypted
+        // artifact detects by its inner format.
+        let name = if original.to_ascii_lowercase().ends_with(".encrypted") {
+            original[..original.len() - ".encrypted".len()].to_string()
+        } else {
+            original
+        };
         let lower = name.to_ascii_lowercase();
 
         // dotenv: the file is exactly `.env`, begins with `.env.`, or ends in `.env`.
@@ -80,13 +122,14 @@ impl FileType {
 
         // Any `*.env` file was already classified as dotenv above, so only the
         // structured extensions remain to distinguish here.
-        match path
+        match Path::new(&name)
             .extension()
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
             .as_deref()
         {
             Some("yaml") | Some("yml") => FileType::Yaml,
             Some("json") => FileType::Json,
+            Some("ini") => FileType::Ini,
             _ => FileType::Binary,
         }
     }
@@ -157,6 +200,29 @@ pub fn encrypt_in_place(file: &Path, file_type: FileType) -> Result<()> {
         .arg(file)
         .output()?;
     check_status(&output)
+}
+
+/// Encrypt `file` and return the ciphertext, leaving `file` untouched.
+///
+/// `filename_override` is the name sops uses to match `.sops.yaml`
+/// `creation_rules` (i.e. the intended `.encrypted` artifact name) — the
+/// plaintext file's own name usually does not match a rule, so without this sops
+/// would not know which recipients to use. The explicit `--input-type` /
+/// `--output-type` still force the format regardless of that override.
+pub fn encrypt_to_string(
+    file: &Path,
+    file_type: FileType,
+    filename_override: &Path,
+) -> Result<String> {
+    let ty = file_type.as_sops_type();
+    let output = Command::new(sops_bin())
+        .args(["--encrypt", "--input-type", ty, "--output-type", ty])
+        .arg("--filename-override")
+        .arg(filename_override)
+        .arg(file)
+        .output()?;
+    check_status(&output)?;
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 /// Decrypt `file` and return its plaintext contents.
@@ -275,6 +341,42 @@ mod tests {
             FileType::from_path(&PathBuf::from("config.json")),
             FileType::Json
         );
+        assert_eq!(
+            FileType::from_path(&PathBuf::from("app.ini")),
+            FileType::Ini
+        );
+    }
+
+    #[test]
+    fn from_path_strips_encrypted_suffix_for_inner_type() {
+        // Encrypted artifacts detect by their inner format.
+        assert_eq!(
+            FileType::from_path(&PathBuf::from(".env.encrypted")),
+            FileType::Dotenv
+        );
+        assert_eq!(
+            FileType::from_path(&PathBuf::from("config.json.encrypted")),
+            FileType::Json
+        );
+        assert_eq!(
+            FileType::from_path(&PathBuf::from("helm.yml.ENCRYPTED")),
+            FileType::Yaml
+        );
+        assert_eq!(
+            FileType::from_path(&PathBuf::from("app.ini.encrypted")),
+            FileType::Ini
+        );
+        // No inner extension → binary (caller can pass --type).
+        assert_eq!(
+            FileType::from_path(&PathBuf::from("secret.encrypted")),
+            FileType::Binary
+        );
+    }
+
+    #[test]
+    fn sops_type_includes_ini() {
+        assert_eq!(FileType::Ini.as_sops_type(), "ini");
+        assert_eq!(FileType::all().len(), 5);
     }
 
     #[test]

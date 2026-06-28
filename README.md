@@ -39,6 +39,8 @@ secret sneaks in.
   - [`sopsy join`](#sopsy-join)
   - [`sopsy approve`](#sopsy-approve)
   - [`sopsy recipient`](#sopsy-recipient)
+  - [`sopsy secrets`](#sopsy-secrets)
+  - [`sopsy list-supported-types`](#sopsy-list-supported-types)
   - [`sopsy check`](#sopsy-check)
   - [`sopsy deps`](#sopsy-deps)
   - [`sopsy completion`](#sopsy-completion)
@@ -83,6 +85,8 @@ the private key that can decrypt them never leaves your Mac's Secure Enclave.
 - 🤝 **Self-service onboarding** — newcomers `sopsy join` to generate a key and
   request access via a pull request; any active member `sopsy approve`s them.
 - 👥 **Recipient management** — add, remove, and list the people who can decrypt.
+- 🔁 **`secrets encrypt`/`decrypt`** — one-shot encrypt/decrypt of `.env`/YAML/JSON/INI
+  files to stdout (or `-o`), ideal for `direnv` and process wrappers.
 - 🚨 **Break-glass ceremony** — `sopsy recipient break-glass` generates a portable
   emergency key, hands it off for offline storage, then deletes the local copy.
 - 🔄 **SOPS key rotation** — every membership change re-wraps the existing secrets
@@ -688,6 +692,67 @@ sopsy recipient break-glass -o break-glass
 > This step is interactive by design (it waits for you to confirm the key is stored
 > safely before deleting it). For automation set `SOPSY_ASSUME_YES`, which assumes
 > the confirmation — use it only when something else handles secure storage.
+
+### `sopsy secrets`
+
+One-shot encrypt/decrypt of a single file, defaulting to **stdout** so it composes
+in pipelines. Unlike `edit` (which opens an editor) these are non-interactive and
+scriptable. The encrypted artifact always ends in `.encrypted`, so the default
+`.sops.yaml` rule covers it.
+
+#### `secrets encrypt`
+
+| Argument / Flag        | Description                                                                  |
+| ---------------------- | ---------------------------------------------------------------------------- |
+| `<file>`               | The plaintext file to encrypt (`.env`/`.yaml`/`.json`/`.ini`/…).             |
+| `-o, --output <FILE>`  | Write ciphertext to a file (**must end in `.encrypted`**) instead of stdout. |
+| `--type <T>`           | Override the format (`dotenv`/`yaml`/`json`/`ini`/`binary`) if the name lacks a usable extension. |
+
+```bash
+sopsy secrets encrypt .env -o .env.encrypted        # the committed artifact
+sopsy secrets encrypt config.json > config.json.encrypted
+```
+
+#### `secrets decrypt`
+
+| Argument / Flag        | Description                                                        |
+| ---------------------- | ----------------------------------------------------------------- |
+| `<file>`               | The encrypted file to decrypt.                                    |
+| `-o, --output <FILE>`  | Write plaintext to a file instead of stdout.                     |
+| `--type <T>`           | Override the format (rarely needed; inferred from the name).      |
+
+```bash
+sopsy secrets decrypt .env.encrypted                 # → plaintext on stdout
+sopsy secrets decrypt config.json.encrypted -o config.json
+```
+
+> [!TIP]
+> **Load secrets into your shell with `direnv`** — drop this in `.envrc` so the
+> decrypted values live only in memory, only inside the project directory:
+> ```bash
+> eval "$(sopsy secrets decrypt .env.encrypted | sed 's/^/export /')"
+> ```
+> The same idea works in a wrapper that `exec`s your app (Rails, etc.) with the
+> secrets in its environment — nothing is ever written to disk in plaintext.
+
+> [!NOTE]
+> Structured formats (`dotenv`/`yaml`/`json`/`ini`) encrypt **values only**, so
+> keys and structure stay readable and diffable in Git. Everything else is
+> `binary` (the whole file is encrypted as one opaque blob).
+
+### `sopsy list-supported-types`
+
+Print the file formats sopsy understands (the valid values for `--type`) and which
+extensions auto-detect to each. Takes no flags.
+
+```bash
+sopsy list-supported-types
+#   dotenv   .env, .env.*, *.env
+#   yaml     .yaml, .yml
+#   json     .json
+#   ini      .ini
+#   binary   anything else (whole-file)
+```
 
 ### `sopsy check`
 

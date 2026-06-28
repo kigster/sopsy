@@ -55,6 +55,11 @@ fn dispatch(ui: &Ui, command: Command) -> Result<()> {
         Command::Join(args) => commands::join::run(ui, &args),
         Command::Approve(args) => commands::approve::run(ui, &args),
         Command::Recipient(cmd) => commands::recipient::run(ui, &cmd),
+        Command::Secrets(cmd) => commands::secrets::run(ui, &cmd),
+        Command::ListSupportedTypes => {
+            commands::secrets::list_supported_types(ui);
+            Ok(())
+        }
         Command::Check => commands::check::run(ui),
         Command::Deps(args) => commands::deps::run(ui, &args),
         Command::Completion(args) => commands::completion::run(&args),

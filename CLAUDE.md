@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `sopsy` is a Rust CLI (`edition = "2024"`) that wraps [SOPS](https://github.com/getsops/sops) and [age](https://github.com/FiloSottile/age) to give a better developer experience for managing Git-stored encrypted secrets. On macOS it targets Secure Enclave-backed identities via the external `age-plugin-se` binary, and uses `age-keygen` for portable (break-glass) keys. It shells out to these external tools rather than reimplementing encryption.
 
-All commands are implemented: `init`, `doctor`, `edit`, `join`, `approve`, `recipient` (`add`/`remove`/`list`/`keygen`/`break-glass`), `check`, `deps`, and `completion`. The entry point is `src/lib.rs::run` (the binary in `src/main.rs` just maps errors to an exit code).
+All commands are implemented: `init`, `doctor`, `edit`, `join`, `approve`, `recipient` (`add`/`remove`/`list`/`keygen`/`break-glass`), `secrets` (`encrypt`/`decrypt`, stdout by default, for direnv/wrappers), `list-supported-types`, `check`, `deps`, and `completion`. The entry point is `src/lib.rs::run` (the binary in `src/main.rs` just maps errors to an exit code). `sops::FileType` (dotenv/yaml/json/ini/binary) backs `--type` and auto-detects from the filename (stripping a trailing `.encrypted`).
 
 ## Commands
 

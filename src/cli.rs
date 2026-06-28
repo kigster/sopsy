@@ -12,6 +12,8 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
+use crate::sops::FileType;
+
 /// Top-level CLI parser.
 #[derive(Debug, Parser)]
 #[command(name = "sopsy")]
@@ -83,6 +85,13 @@ pub enum Command {
     /// Manage repository recipients (add/remove/list).
     #[command(subcommand)]
     Recipient(RecipientCommand),
+
+    /// Encrypt or decrypt a secrets file to stdout (or a file).
+    #[command(subcommand)]
+    Secrets(SecretsCommand),
+
+    /// List the file types sopsy understands (for `--type`).
+    ListSupportedTypes,
 
     /// CI gate: verify the repo's encrypted-secrets hygiene (exit 0/1).
     Check,
@@ -176,6 +185,47 @@ pub struct ApproveArgs {
     /// Skip running `sops updatekeys` after editing `.sops.yaml`.
     #[arg(long)]
     pub no_updatekeys: bool,
+}
+
+/// `sopsy secrets` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum SecretsCommand {
+    /// Encrypt a plaintext file (`.env`/YAML/JSON) to stdout (or `-o <file>`).
+    Encrypt(SecretsEncryptArgs),
+
+    /// Decrypt an encrypted file to stdout (or `-o <file>`).
+    Decrypt(SecretsDecryptArgs),
+}
+
+/// Arguments for `sopsy secrets encrypt`.
+#[derive(Debug, Args)]
+pub struct SecretsEncryptArgs {
+    /// The plaintext file to encrypt (e.g. `.env`, `config.yaml`, `data.json`).
+    pub file: PathBuf,
+
+    /// Write the ciphertext to this file (must end in `.encrypted`) instead of
+    /// stdout. The committed artifact, e.g. `-o .env.encrypted`.
+    #[arg(short = 'o', long = "output")]
+    pub output: Option<PathBuf>,
+
+    /// Override the file type (inferred from `<file>`'s extension otherwise).
+    #[arg(long = "type", value_enum)]
+    pub file_type: Option<FileType>,
+}
+
+/// Arguments for `sopsy secrets decrypt`.
+#[derive(Debug, Args)]
+pub struct SecretsDecryptArgs {
+    /// The encrypted file to decrypt.
+    pub file: PathBuf,
+
+    /// Write the plaintext here instead of stdout.
+    #[arg(short = 'o', long = "output")]
+    pub output: Option<PathBuf>,
+
+    /// Override the detected file type (when the name has no usable extension).
+    #[arg(long = "type", value_enum)]
+    pub file_type: Option<FileType>,
 }
 
 /// Arguments for `sopsy deps`.

@@ -15,3 +15,4 @@ pub mod edit;
 pub mod init;
 pub mod join;
 pub mod recipient;
+pub mod secrets;
