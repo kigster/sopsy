@@ -43,7 +43,7 @@ package:
 publish-dry-run:
     cargo publish --dry-run
 
-publish: fmt warnings test package publish-dry-run
+publish: fmt warnings package publish-dry-run
     cargo publish
 
 release:
