@@ -12,8 +12,9 @@
 //! - [`config`] — serde model for `.sopsy.yml`.
 //! - [`error`] — the library [`Error`](error::Error) enum and [`Result`].
 //! - [`commands`] — one module per subcommand.
-//! - [`sops`], [`enclave`], [`git`] — helpers wrapping external tools.
+//! - [`sops`], [`enclave`], [`age`], [`git`] — helpers wrapping external tools.
 
+pub mod age;
 pub mod cli;
 pub mod commands;
 pub mod config;
@@ -51,6 +52,8 @@ fn dispatch(ui: &Ui, command: Command) -> Result<()> {
         Command::Init(args) => commands::init::run(ui, &args),
         Command::Doctor => commands::doctor::run(ui),
         Command::Edit(args) => commands::edit::run(ui, &args),
+        Command::Join(args) => commands::join::run(ui, &args),
+        Command::Approve(args) => commands::approve::run(ui, &args),
         Command::Recipient(cmd) => commands::recipient::run(ui, &cmd),
         Command::Check => commands::check::run(ui),
         Command::Deps(args) => commands::deps::run(ui, &args),
@@ -84,8 +87,11 @@ mod tests {
                 &ui,
                 Command::Init(InitArgs {
                     recipient_name: None,
+                    username: None,
                     public_key: None,
                     no_generate: true,
+                    break_glass: false,
+                    no_break_glass: true,
                     force: false,
                 })
             )

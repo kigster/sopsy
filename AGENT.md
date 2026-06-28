@@ -25,7 +25,9 @@ encrypted secrets simple.
 - 📦 Repository bootstrap
 - 🩺 `doctor` health checks
 - ✏️ `edit` using your preferred editor
+- 🤝 Self-service onboarding (`join` / `approve`)
 - 👥 Recipient management
+- 🚨 Break-glass emergency key ceremony
 - 🔄 SOPS key rotation
 - 🧪 Safe defaults
 
@@ -37,11 +39,11 @@ sopsy/
 ├── src/
 │   ├── main.rs
 │   ├── cli.rs
-│   ├── commands/
+│   ├── commands/   # init, doctor, edit, join, approve, recipient, check, …
 │   ├── sops/
-│   ├── enclave/
-│   ├── git/
-│   └── doctor/
+│   ├── enclave/    # age-plugin-se (Secure Enclave)
+│   ├── age.rs      # age-keygen (portable break-glass keys)
+│   └── git/
 ├── tests/
 ├── docs/
 └── README.md
@@ -176,6 +178,31 @@ sops updatekeys -r .
 ## `sopsy recipient remove [ name ]`
 
 Same idea.
+
+## `sopsy recipient keygen [ -- age flags ]`
+
+Generates a Secure Enclave identity (`age-plugin-se keygen`) and prints the public
+key + identity, without touching any config. Trailing args after `--` are forwarded
+to the plugin.
+
+## `sopsy recipient break-glass -o <file>`
+
+Generates a portable (`age-keygen`) emergency key, writes `<file>.private` /
+`<file>.public`, prompts the owner to copy them to an offline vault (1Password),
+waits, then deletes the local copies and registers the key as the break-glass
+recipient. Also offered automatically during `sopsy init`.
+
+## `sopsy join <name>`
+
+Self-service onboarding for a newcomer: generates their Enclave key and records a
+**pending** entry in `.sopsy.yml` (with a timestamp). Pending grants nothing — they
+push it as a pull request.
+
+## `sopsy approve <name>`
+
+Run by any active member: checks the request is fresh (`join_request_ttl`), vouches
+for the key, adds it to `.sops.yaml`, flips the member to `active`, and runs
+`sops updatekeys`.
 
 ## `sopsy check`
 

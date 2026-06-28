@@ -93,7 +93,7 @@ fn init_with_public_key_encrypts_real_env() {
     let (public_key, key_file) = generate_age_key(dir.path());
 
     // Seed a real `.env` so we can assert an exact decrypt round-trip.
-    let plaintext = "PASSWORD=hunter2\nAPI_KEY=abc123\n";
+    let plaintext = "PASSWORD=hunter2\nAPI_KEY=abc123\n"; // pragma: allowlist secret
     std::fs::write(dir.path().join(".env"), plaintext).unwrap();
 
     sopsy_in(dir.path())
@@ -340,4 +340,125 @@ fn init_outside_git_repo_fails_friendly() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("git repository"));
+}
+
+#[test]
+#[serial]
+fn init_records_username_and_respects_no_break_glass() {
+    let dir = TempDir::new().unwrap();
+    init_git_repo(dir.path());
+    let (public_key, _key_file) = generate_age_key(dir.path());
+
+    sopsy_in(dir.path())
+        .args([
+            "--non-interactive",
+            "init",
+            "--no-generate",
+            "--public-key",
+            &public_key,
+            "--username",
+            "alice",
+            "--no-break-glass",
+        ])
+        .assert()
+        .success();
+
+    let config = std::fs::read_to_string(dir.path().join(".sopsy.yml")).unwrap();
+    assert!(
+        config.contains("username: alice"),
+        "username should be recorded"
+    );
+    assert!(
+        !config.contains("break_glass: true"),
+        "--no-break-glass must skip break-glass setup"
+    );
+}
+
+// ----------------------------------------------------------------------------
+// Break-glass during init
+// ----------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn init_without_break_glass_prints_guidance() {
+    let dir = TempDir::new().unwrap();
+    init_git_repo(dir.path());
+    let (public_key, _key_file) = generate_age_key(dir.path());
+
+    // Non-interactive init skips break-glass but tells the owner how to add it.
+    sopsy_in(dir.path())
+        .args([
+            "--non-interactive",
+            "init",
+            "--no-generate",
+            "--public-key",
+            &public_key,
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sopsy recipient break-glass"));
+
+    let config = std::fs::read_to_string(dir.path().join(".sopsy.yml")).unwrap();
+    assert!(
+        !config.contains("break_glass: true"),
+        "no break-glass should be registered without the flag"
+    );
+}
+
+#[test]
+#[serial]
+fn init_break_glass_flag_registers_offline_key() {
+    let dir = TempDir::new().unwrap();
+    init_git_repo(dir.path());
+    let (public_key, key_file) = generate_age_key(dir.path());
+
+    // `--break-glass` runs the ceremony; SOPS_AGE_KEY_FILE lets the implicit
+    // re-key decrypt with the owner's key, and SOPSY_ASSUME_YES skips the
+    // interactive "copy to 1Password, press ENTER" wait.
+    sopsy_in(dir.path())
+        .env("SOPS_AGE_KEY_FILE", &key_file)
+        .env("SOPSY_ASSUME_YES", "1")
+        .args([
+            "--non-interactive",
+            "init",
+            "--no-generate",
+            "--public-key",
+            &public_key,
+            "--break-glass",
+        ])
+        .assert()
+        .success();
+
+    // A break-glass recipient is recorded, and the transient files are gone.
+    let config = std::fs::read_to_string(dir.path().join(".sopsy.yml")).unwrap();
+    assert!(
+        config.contains("break_glass: true"),
+        "break-glass recipient should be recorded:\n{config}"
+    );
+    assert!(!dir.path().join("break-glass.private").exists());
+    assert!(!dir.path().join("break-glass.public").exists());
+
+    // The owner key is still a recipient, and the secret decrypts with it.
+    let sops_yaml = std::fs::read_to_string(dir.path().join(".sops.yaml")).unwrap();
+    assert!(
+        sops_yaml.contains(&public_key),
+        "owner key must remain a recipient"
+    );
+    let decrypted = StdCommand::new("sops")
+        .env("SOPS_AGE_KEY_FILE", &key_file)
+        .args([
+            "--decrypt",
+            "--input-type",
+            "dotenv",
+            "--output-type",
+            "dotenv",
+        ])
+        .arg(dir.path().join(".env.encrypted"))
+        .output()
+        .unwrap();
+    assert!(
+        decrypted.status.success(),
+        "owner should still decrypt after break-glass re-key: {}",
+        String::from_utf8_lossy(&decrypted.stderr)
+    );
 }

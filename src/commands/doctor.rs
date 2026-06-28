@@ -332,9 +332,8 @@ mod tests {
 
         // A break-glass recipient is configured.
         cfg.recipients.push(Recipient {
-            name: "break-glass".into(),
-            public_key: "age1emergency".into(),
             break_glass: true,
+            ..Recipient::new("break-glass", "age1emergency")
         });
         recipient_checks(&ui(), &cfg);
     }

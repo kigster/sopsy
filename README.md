@@ -36,6 +36,8 @@ secret sneaks in.
   - [`sopsy init`](#sopsy-init)
   - [`sopsy doctor`](#sopsy-doctor)
   - [`sopsy edit`](#sopsy-edit)
+  - [`sopsy join`](#sopsy-join)
+  - [`sopsy approve`](#sopsy-approve)
   - [`sopsy recipient`](#sopsy-recipient)
   - [`sopsy check`](#sopsy-check)
   - [`sopsy deps`](#sopsy-deps)
@@ -78,8 +80,12 @@ the private key that can decrypt them never leaves your Mac's Secure Enclave.
   ID, the external tools, repo health, and a break-glass reminder.
 - ✏️ **`edit`** — open an encrypted file in your editor through SOPS, with nicer
   errors and automatic file-type detection (including `dotenv`).
+- 🤝 **Self-service onboarding** — newcomers `sopsy join` to generate a key and
+  request access via a pull request; any active member `sopsy approve`s them.
 - 👥 **Recipient management** — add, remove, and list the people who can decrypt.
-- 🔄 **SOPS key rotation** — every recipient change re-wraps the existing secrets
+- 🚨 **Break-glass ceremony** — `sopsy recipient break-glass` generates a portable
+  emergency key, hands it off for offline storage, then deletes the local copy.
+- 🔄 **SOPS key rotation** — every membership change re-wraps the existing secrets
   via `sops updatekeys`.
 - 🧪 **Safe defaults & a CI gate** — `sopsy check` enforces seven hygiene
   invariants and exits non-zero on any violation.
@@ -160,6 +166,12 @@ The `sopsy init` run prints your **public recipient** prominently. That string
 access — it is safe to share. The matching **private key never leaves the Secure
 Enclave**.
 
+> [!TIP]
+> **Joining a repo someone else bootstrapped?** Don't run `init`. Run
+> `sopsy join <your-name>` to generate your key and record a pending request, open
+> a pull request, and ask any current member to run `sopsy approve <your-name>`.
+> See the [Member guide](docs/guide-member.md).
+
 ---
 
 ## Architecture
@@ -184,20 +196,23 @@ flowchart TD
             init["init"]
             doctor["doctor"]
             edit["edit"]
-            recipient["recipient<br/>add / remove / list"]
+            join["join"]
+            approve["approve"]
+            recipient["recipient<br/>add / remove / list<br/>keygen / break-glass"]
             check["check"]
         end
 
         subgraph Helpers["external-tool wrappers"]
             sops["sops/<br/>encrypt, decrypt, edit, updatekeys"]
             enclave["enclave/<br/>age-plugin-se keygen"]
+            age["age<br/>age-keygen (portable keys)"]
             git["git/<br/>repo root, tracked, ignored"]
         end
     end
 
     subgraph External["External tools"]
         sopsbin([sops])
-        agebin([age])
+        agebin([age / age-keygen])
         sebin([age-plugin-se])
         gitbin([git])
     end
@@ -210,11 +225,14 @@ flowchart TD
     init --> sops & enclave & git
     doctor --> git
     edit --> sops
-    recipient --> sops & git
+    join --> enclave & git
+    approve --> sops & git
+    recipient --> sops & enclave & age & git
     check --> git & config
     sops --> sopsbin
     sopsbin --> agebin
     enclave --> sebin
+    age --> agebin
     git --> gitbin
 ```
 
@@ -222,10 +240,11 @@ flowchart TD
 | --------------- | -------------------------------------------------------------------- |
 | `cli.rs`        | Authoritative `clap` definition of every command and flag.           |
 | `ui.rs`         | All output and `inquire`-backed prompts; color/TTY/`NO_COLOR` logic. |
-| `config.rs`     | The serde model for `.sopsy.yml` (recipients, globs, sops version).  |
-| `commands/`     | One module per subcommand (`init`, `doctor`, `edit`, …).             |
+| `config.rs`     | The serde model for `.sopsy.yml` (members, states, globs, TTL, …).   |
+| `commands/`     | One module per subcommand (`init`, `join`, `approve`, `recipient`, …).|
 | `sops/`         | Wraps `sops` (`encrypt`, `decrypt`, `edit`, `updatekeys`).           |
-| `enclave/`      | Wraps `age-plugin-se keygen` and parses its output.                  |
+| `enclave/`      | Wraps `age-plugin-se keygen` (Secure Enclave identities).            |
+| `age.rs`        | Wraps `age-keygen` for portable keys (used by break-glass).          |
 | `git/`          | Repo root, tracked files, ignore status, `.gitignore` editing.       |
 | `error.rs`      | `Error`/`Result`; the binary maps any `Err` to a non-zero exit.      |
 
@@ -258,12 +277,23 @@ sequenceDiagram
     Sops-->>FS: encrypted .env.encrypted
     Sopsy->>FS: update .gitignore (ignore plaintext secrets)
     Sopsy->>FS: write .sopsy.yml (recipients, sops version)
-    Sopsy->>Dev: health summary + break-glass reminder
+    opt break-glass (prompted, or --break-glass)
+        Sopsy->>Dev: generate portable key, "copy to 1Password", wait for ENTER
+        Sopsy->>FS: delete local key files; register break-glass + re-key
+    end
+    Sopsy->>Dev: health summary
 ```
 
 > [!NOTE]
 > `init` is **idempotent**: existing files are preserved unless you pass
 > `--force`. Re-running it is always safe.
+
+> [!TIP]
+> In **interactive** mode `init` offers to set up the break-glass key right then —
+> the moment you're most likely to actually do it. It prints a yellow prompt to
+> copy the generated `break-glass.private` / `.public` into 1Password, waits for
+> you, then deletes the local copies. Use `--break-glass` / `--no-break-glass` to
+> decide explicitly (e.g. in scripts).
 
 ---
 
@@ -348,15 +378,18 @@ flowchart TB
 A **break-glass key** is a separate emergency `age` key pair stored *offline*
 (for example in 1Password) and shared with only a few admins. It is your
 disaster-recovery path: if every developer's Secure Enclave device is lost, the
-break-glass key can still decrypt and re-key the repository.
+break-glass key can still decrypt and re-key the repository. It is a **portable**
+age key (not Enclave-backed), precisely so it can survive the loss of any device.
+
+`sopsy recipient break-glass` runs the whole ceremony — generate, hand off, delete,
+register — in one command:
 
 ```bash
-# 1. Generate an emergency key pair OFFLINE (a normal age key, not Enclave-backed):
-age-keygen -o break-glass.key
-#   public key: age1q...   <-- register this; store break-glass.key in a vault
-
-# 2. Register it as the break-glass recipient (re-encrypts existing secrets):
-sopsy recipient add break-glass --public-key age1q... --break-glass
+sopsy recipient break-glass -o break-glass
+#  1. generates a portable age key pair
+#  2. writes break-glass.private and break-glass.public
+#  3. prompts you to copy them into 1Password, then WAITS for ENTER
+#  4. deletes both local files and registers the key, re-keying every secret
 ```
 
 > [!CAUTION]
@@ -372,7 +405,7 @@ sopsy recipient add break-glass --public-key age1q... --break-glass
 | File             | Committed? | Purpose                                                              |
 | ---------------- | ---------- | ------------------------------------------------------------------- |
 | `.sops.yaml`     | ✅ yes     | SOPS `creation_rules`: maps file patterns → `age` recipients.       |
-| `.sopsy.yml`     | ✅ yes     | sopsy's own state: recipient names, break-glass marker, sops version. |
+| `.sopsy.yml`     | ✅ yes     | sopsy's own state: member names, usernames, `pending`/`active` state, break-glass marker, `join_request_ttl`, sops version. |
 | `.env.example`   | ✅ yes     | Placeholder variables; the template for a real `.env`.              |
 | `.env.encrypted` | ✅ yes     | The encrypted secrets (`KEY=ENC[…]` + sops metadata).               |
 | `.gitignore`     | ✅ yes     | Updated to ignore plaintext secrets and un-ignore the safe files.   |
@@ -437,8 +470,11 @@ safety rules, and `.sopsy.yml`.
 | Flag                       | Description                                                                                  |
 | -------------------------- | -------------------------------------------------------------------------------------------- |
 | `--recipient-name <NAME>`  | Name to record for the recipient created/registered during init (default: `primary`).        |
+| `--username <NAME>`        | Username of who generated the key, recorded in `.sopsy.yml`. When generating interactively, this is the default offered at the prompt (falls back to `$USER`). |
 | `--public-key <age1...>`   | Use an existing `age` public key instead of generating a new Secure Enclave identity.        |
 | `--no-generate`            | Skip Secure Enclave identity generation. Requires `--public-key`, else init errors.          |
+| `--break-glass`            | Run the break-glass ceremony as part of init (interactive mode prompts by default).          |
+| `--no-break-glass`         | Skip break-glass setup during init (you'll get a reminder to run it later).                   |
 | `--force`                  | Overwrite/recreate `.sops.yaml` and `.env.encrypted` even if they already exist.             |
 
 ```bash
@@ -504,11 +540,64 @@ sopsy edit config/db.encrypted.yaml -- --indent 4
 > `.env.encrypted` don't carry an extension sops recognizes. Anything you pass
 > after `--` is appended afterward and can override these defaults.
 
+### `sopsy join`
+
+Request membership in a repo someone else bootstrapped. Generates your Secure
+Enclave identity (or uses `--public-key`) and records a **pending** entry in
+`.sopsy.yml` with a timestamp. A pending entry is *not* added to `.sops.yaml`, so it
+grants no access — it is purely a request you then push as a pull request.
+
+| Argument / Flag           | Description                                                                       |
+| ------------------------- | -------------------------------------------------------------------------------- |
+| `<name>`                  | Your member name / handle (required).                                            |
+| `--public-key <age1...>`  | Use an existing public key instead of generating a new Secure Enclave identity.  |
+| `--sopsy-file <FILE>`     | Path to the `.sopsy.yml` to update (defaults to the one in the repo root).       |
+| `-- <age flags>`          | Everything after `--` is forwarded to `age-plugin-se keygen`.                    |
+
+```bash
+sopsy join alice                          # generate a key, record a pending request
+sopsy join alice --public-key age1se1…    # reuse an existing public key
+# then:
+git add .sopsy.yml && git commit -m "join: request access for alice" && git push
+```
+
+> [!NOTE]
+> After pushing, open a pull request and ask any active member to run
+> `sopsy approve alice`. Approve promptly — the request expires after the repo's
+> `join_request_ttl` (default 72h); just re-run `sopsy join` to refresh it.
+
+### `sopsy approve`
+
+Approve a pending member (run by **any active member**, on their PR branch). Checks
+the request is fresh, asks you to vouch that the key belongs to the person, adds the
+key to `.sops.yaml`, flips them to `active`, and runs `sops updatekeys` so every
+encrypted file gains a stanza they can open. Rolls back atomically if the re-key
+fails.
+
+| Argument / Flag     | Description                                                                |
+| ------------------- | ------------------------------------------------------------------------- |
+| `<name>`            | The pending member to approve (required).                                 |
+| `--force`           | Approve even if the join request is older than `join_request_ttl`.        |
+| `--no-updatekeys`   | Skip the `sops updatekeys` re-encryption step after editing `.sops.yaml`. |
+
+```bash
+git fetch origin pull/123/head:join-alice && git switch join-alice
+sopsy approve alice                       # vouch, re-key, activate (Touch ID prompts)
+git add -A && git commit -m "approve: alice" && git push   # then merge the PR
+```
+
+> [!WARNING]
+> Encrypted files do **not** merge. If `.env.encrypted` changes on `main` between
+> your `approve` and the merge, the PR will conflict — rebase onto latest `main`
+> right before approving, and merge promptly. In non-interactive contexts the vouch
+> step requires `SOPSY_ASSUME_YES` (it cannot be left unattended).
+
 ### `sopsy recipient`
 
 Manage the repository's recipients. `add`/`remove` keep `.sopsy.yml` and
 `.sops.yaml` in sync and then re-wrap the existing encrypted files for the new
-recipient set (`sops updatekeys`, per file).
+recipient set (`sops updatekeys`, per file). `keygen` and `break-glass` are key
+generation helpers.
 
 #### `recipient add`
 
@@ -565,6 +654,40 @@ public key, break-glass marker). Takes no flags.
 ```bash
 sopsy recipient list
 ```
+
+#### `recipient keygen`
+
+Generate a fresh Secure Enclave identity and print its public key + identity
+**without** touching any config (use the printed key with `recipient add`). Trailing
+args after `--` are forwarded to `age-plugin-se keygen`.
+
+```bash
+sopsy recipient keygen
+sopsy recipient keygen -- --access-control=any-biometry-or-passcode
+```
+
+#### `recipient break-glass`
+
+Generate the offline emergency key in one guided ceremony: write
+`<output>.private` / `<output>.public`, prompt you to copy them into a secure store,
+wait for ENTER, then delete the local files and register the key as the break-glass
+recipient (re-keying every secret).
+
+| Argument / Flag        | Description                                                          |
+| ---------------------- | ------------------------------------------------------------------- |
+| `-o, --output <FILE>`  | Output prefix; writes `<output>.private` and `<output>.public`.     |
+| `--name <NAME>`        | Recipient name to record (defaults to `break-glass`).               |
+| `--force`              | Overwrite the `.private` / `.public` files if they already exist.   |
+| `--no-updatekeys`      | Skip the `sops updatekeys` re-encryption step.                      |
+
+```bash
+sopsy recipient break-glass -o break-glass
+```
+
+> [!IMPORTANT]
+> This step is interactive by design (it waits for you to confirm the key is stored
+> safely before deleting it). For automation set `SOPSY_ASSUME_YES`, which assumes
+> the confirmation — use it only when something else handles secure storage.
 
 ### `sopsy check`
 
@@ -709,6 +832,8 @@ exec sopsy check
 | `NO_COLOR`                  | Disables colored output (same as `--no-color`).                               |
 | `SOPSY_SOPS_BIN`            | Override the `sops` binary path (primarily for testing).                      |
 | `SOPSY_AGE_PLUGIN_SE_BIN`   | Override the `age-plugin-se` binary path (primarily for testing).             |
+| `SOPSY_AGE_KEYGEN_BIN`      | Override the `age-keygen` binary path (used by break-glass; for testing).     |
+| `SOPSY_ASSUME_YES`          | Assume interactive confirmations (break-glass press-ENTER, `approve` vouch). For automation/CI only. |
 
 ---
 
@@ -721,10 +846,10 @@ Ratatui TUI.
 
 ## Further reading
 
-- 📘 **[Developer guide](docs/guide-developer.md)** — joining a sopsy-managed
-  repo, registering your key, day-to-day workflow, and troubleshooting.
-- 🛠️ **[Admin guide](docs/guide-admin.md)** — onboarding/offboarding, the
-  recipient lifecycle, and break-glass procedures for maintainers.
+- 📘 **[Member guide](docs/guide-member.md)** — joining a sopsy-managed repo with
+  `sopsy join`, day-to-day workflow, and troubleshooting.
+- 🛠️ **[Owner guide](docs/guide-owner.md)** — bootstrapping, break-glass, the
+  join/approve membership lifecycle, and offboarding.
 - 🔗 Repository: <https://github.com/kigster/sopsy>
 - 🔗 Crate: <https://crates.io/crates/sopsy>
 - 🔗 [SOPS](https://github.com/getsops/sops) ·

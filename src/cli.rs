@@ -74,6 +74,12 @@ pub enum Command {
     /// Edit an encrypted file with your editor via `sops`.
     Edit(EditArgs),
 
+    /// Request membership: generate an identity and record a pending entry.
+    Join(JoinArgs),
+
+    /// Approve a pending member: re-key secrets so they can decrypt.
+    Approve(ApproveArgs),
+
     /// Manage repository recipients (add/remove/list).
     #[command(subcommand)]
     Recipient(RecipientCommand),
@@ -95,6 +101,12 @@ pub struct InitArgs {
     #[arg(long)]
     pub recipient_name: Option<String>,
 
+    /// Username of who is generating the key (recorded in `.sopsy.yml`). When a
+    /// new identity is generated interactively, this is the default offered at
+    /// the prompt; falls back to the current system user.
+    #[arg(long)]
+    pub username: Option<String>,
+
     /// Use an existing age public key instead of generating a new identity.
     #[arg(long)]
     pub public_key: Option<String>,
@@ -102,6 +114,15 @@ pub struct InitArgs {
     /// Skip Secure Enclave identity generation (e.g. when supplying a key).
     #[arg(long)]
     pub no_generate: bool,
+
+    /// Generate a break-glass emergency key as part of init (the default in
+    /// interactive mode is to prompt). Mutually exclusive with `--no-break-glass`.
+    #[arg(long, conflicts_with = "no_break_glass")]
+    pub break_glass: bool,
+
+    /// Skip break-glass key generation during init.
+    #[arg(long)]
+    pub no_break_glass: bool,
 
     /// Proceed even if some doctor checks fail.
     #[arg(long)]
@@ -121,6 +142,40 @@ pub struct EditArgs {
     /// Extra arguments forwarded verbatim to `sops` after `--`.
     #[arg(last = true)]
     pub sops_args: Vec<String>,
+}
+
+/// Arguments for `sopsy join`.
+#[derive(Debug, Args)]
+pub struct JoinArgs {
+    /// The member name to register (your handle, e.g. `alice`).
+    pub name: String,
+
+    /// Path to the `.sopsy.yml` to update (defaults to the one in the repo root).
+    #[arg(long)]
+    pub sopsy_file: Option<PathBuf>,
+
+    /// Use this existing age public key instead of generating a new identity.
+    #[arg(long)]
+    pub public_key: Option<String>,
+
+    /// Extra arguments forwarded verbatim to `age-plugin-se keygen` after `--`.
+    #[arg(last = true)]
+    pub age_args: Vec<String>,
+}
+
+/// Arguments for `sopsy approve`.
+#[derive(Debug, Args)]
+pub struct ApproveArgs {
+    /// The pending member to approve.
+    pub name: String,
+
+    /// Approve even if the join request is older than the configured window.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Skip running `sops updatekeys` after editing `.sops.yaml`.
+    #[arg(long)]
+    pub no_updatekeys: bool,
 }
 
 /// Arguments for `sopsy deps`.
@@ -155,6 +210,42 @@ pub enum RecipientCommand {
 
     /// List configured recipients.
     List,
+
+    /// Generate a new Secure Enclave identity and print its public key.
+    Keygen(RecipientKeygenArgs),
+
+    /// Generate a portable break-glass emergency key for offline storage.
+    BreakGlass(RecipientBreakGlassArgs),
+}
+
+/// Arguments for `sopsy recipient keygen`.
+#[derive(Debug, Args)]
+pub struct RecipientKeygenArgs {
+    /// Extra arguments forwarded verbatim to `age-plugin-se keygen` after `--`
+    /// (e.g. `--access-control=any-biometry-or-passcode`).
+    #[arg(last = true)]
+    pub age_args: Vec<String>,
+}
+
+/// Arguments for `sopsy recipient break-glass`.
+#[derive(Debug, Args)]
+pub struct RecipientBreakGlassArgs {
+    /// Output path prefix; writes `<output>.private` and `<output>.public`.
+    /// Both files are deleted from disk after you confirm they are stored safely.
+    #[arg(short = 'o', long = "output")]
+    pub output: PathBuf,
+
+    /// Recipient name to record (defaults to `break-glass`).
+    #[arg(long = "name")]
+    pub name: Option<String>,
+
+    /// Overwrite the `<output>.private` / `<output>.public` files if they exist.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Skip running `sops updatekeys` after editing `.sops.yaml`.
+    #[arg(long)]
+    pub no_updatekeys: bool,
 }
 
 /// Arguments for `sopsy recipient add`.

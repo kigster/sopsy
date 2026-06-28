@@ -12,8 +12,9 @@
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
-use crate::cli::InitArgs;
+use crate::cli::{InitArgs, RecipientBreakGlassArgs, RecipientCommand};
 use crate::config::{Config, Recipient};
 use crate::error::{Error, Result};
 use crate::sops::{self, FileType};
@@ -55,6 +56,9 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
     // 4. Print the public recipient prominently.
     ui.header("Your repository recipient");
     ui.info(format!("name: {}", recipient.name));
+    if let Some(username) = &recipient.username {
+        ui.info(format!("owner: {username}"));
+    }
     ui.animated_line(&recipient.public_key);
 
     // 5. `.sops.yaml` creation rules.
@@ -99,6 +103,10 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
         "!.env.encrypted",
         "*.key",
         "*.pem",
+        // Break-glass halves are written transiently and deleted after storage,
+        // but ignore them so an interrupted ceremony can never commit a key.
+        "*.private",
+        "*.public",
     ] {
         gitignore_changed |= git::ensure_gitignored(&root, pattern)?;
     }
@@ -117,9 +125,49 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
     let config_path = config.save_to_dir(&root)?;
     ui.success(format!("Wrote {}.", config_path.display()));
 
-    // 10. Final, colorful health summary.
+    // 10. Offer to create the break-glass emergency key while we're here — this
+    //     is the moment the owner is most likely to actually do it.
+    maybe_setup_break_glass(ui, &root, args)?;
+
+    // 11. Final, colorful health summary.
     print_summary(ui, &recipient);
     Ok(())
+}
+
+/// Generate the break-glass emergency key during init, if appropriate.
+///
+/// Resolution: `--no-break-glass` skips; `--break-glass` forces; otherwise we
+/// prompt in interactive mode and skip (with guidance) when non-interactive.
+/// Delegates to `sopsy recipient break-glass` so the ceremony (write → copy to
+/// 1Password → delete → register + re-key) is identical to the standalone path.
+fn maybe_setup_break_glass(ui: &Ui, root: &Path, args: &InitArgs) -> Result<()> {
+    let want = if args.no_break_glass {
+        false
+    } else if args.break_glass {
+        true
+    } else if ui.is_interactive() {
+        ui.confirm(
+            "Set up a break-glass emergency key now? (strongly recommended)",
+            "--break-glass",
+            true,
+        )?
+    } else {
+        false
+    };
+
+    if !want {
+        ui.warn("No break-glass key yet. Create one ASAP with:");
+        ui.warn("    sopsy recipient break-glass -o break-glass");
+        return Ok(());
+    }
+
+    let break_glass_args = RecipientBreakGlassArgs {
+        output: root.join("break-glass"),
+        name: None,
+        force: false,
+        no_updatekeys: false,
+    };
+    crate::commands::recipient::run(ui, &RecipientCommand::BreakGlass(break_glass_args))
 }
 
 /// Determine the age recipient for this repository.
@@ -136,7 +184,11 @@ fn acquire_recipient(ui: &Ui, args: &InitArgs) -> Result<Recipient> {
 
     if let Some(public_key) = args.public_key.as_deref() {
         ui.success(format!("Using supplied age public key for `{name}`."));
-        return Ok(Recipient::new(name, public_key));
+        return Ok(recipient_with_optional_username(
+            name,
+            public_key,
+            args.username.clone(),
+        ));
     }
 
     if args.no_generate {
@@ -155,8 +207,12 @@ fn acquire_recipient(ui: &Ui, args: &InitArgs) -> Result<Recipient> {
             true,
         )?;
         if !generate {
-            let public_key = ui.text("Paste your age public key (age1...)", "--public-key")?;
-            return Ok(Recipient::new(name, public_key));
+            let public_key = ui.text("Paste your age public key (age1...):", "--public-key")?;
+            return Ok(recipient_with_optional_username(
+                name,
+                public_key,
+                args.username.clone(),
+            ));
         }
     }
 
@@ -168,7 +224,77 @@ fn acquire_recipient(ui: &Ui, args: &InitArgs) -> Result<Recipient> {
     let identity = identity?;
     ui.success("Created a Secure Enclave-backed identity.");
     ui.info("The private key stays in the Secure Enclave and never leaves this device.");
-    Ok(Recipient::new(name, identity.public_key))
+
+    // Make it obvious a key was generated: show the public key, then pause so
+    // the user can take it in before the bootstrap output scrolls on.
+    ui.header("Your newly generated public key");
+    ui.animated_line(&identity.public_key);
+    ui.pause(Duration::from_secs(2));
+
+    // Record who generated this key (default to the system user at the prompt).
+    let username = resolve_username(ui, args)?;
+    Ok(make_recipient(name, identity.public_key, username))
+}
+
+/// Build a [`Recipient`], attaching `username` only when it is `Some`.
+fn make_recipient(name: String, public_key: String, username: Option<String>) -> Recipient {
+    match username {
+        Some(username) => Recipient::with_username(name, public_key, username),
+        None => Recipient::new(name, public_key),
+    }
+}
+
+/// Build a recipient for a *supplied* key, recording `--username` if given.
+fn recipient_with_optional_username(
+    name: String,
+    public_key: impl Into<String>,
+    username: Option<String>,
+) -> Recipient {
+    let username = username.and_then(|u| {
+        let u = u.trim().to_string();
+        (!u.is_empty()).then_some(u)
+    });
+    make_recipient(name, public_key.into(), username)
+}
+
+/// Resolve the username to record for a freshly generated identity.
+///
+/// Interactively, the prompt defaults to `--username` (if given) or the system
+/// user, so pressing ENTER records that. Non-interactively, the same default is
+/// used without prompting.
+fn resolve_username(ui: &Ui, args: &InitArgs) -> Result<Option<String>> {
+    let default = args
+        .username
+        .clone()
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+        .or_else(system_username);
+
+    if ui.is_interactive() {
+        let default_str = default.clone().unwrap_or_default();
+        let entered = ui.text_with_default(
+            "Your name (recorded as this key's owner):",
+            "--username",
+            &default_str,
+        )?;
+        let entered = entered.trim().to_string();
+        Ok((!entered.is_empty()).then_some(entered))
+    } else {
+        Ok(default)
+    }
+}
+
+/// Best-effort current system username from `$USER` / `$LOGNAME`.
+fn system_username() -> Option<String> {
+    for var in ["USER", "LOGNAME"] {
+        if let Ok(value) = std::env::var(var) {
+            let value = value.trim().to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
 }
 
 /// Render a `.sops.yaml` whose creation rules encrypt the project's encrypted
@@ -241,6 +367,37 @@ mod tests {
         assert!(yaml.contains("creation_rules:"));
         assert!(yaml.contains("age1aaa,age1bbb"));
         assert!(yaml.contains(r"\.env\.encrypted$"));
+    }
+
+    #[test]
+    #[serial]
+    fn system_username_falls_back_to_none_when_unset() {
+        // Snapshot and clear both vars, then restore them afterwards.
+        let saved: Vec<(&str, Option<String>)> = ["USER", "LOGNAME"]
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
+        // SAFETY: serialized via `#[serial]`.
+        unsafe {
+            std::env::remove_var("USER");
+            std::env::remove_var("LOGNAME");
+        }
+        assert_eq!(system_username(), None);
+        // An empty value is also treated as absent.
+        // SAFETY: serialized via `#[serial]`.
+        unsafe {
+            std::env::set_var("USER", "   ");
+        }
+        assert_eq!(system_username(), None);
+        // SAFETY: restore the original environment.
+        unsafe {
+            for (k, v) in saved {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
     }
 
     #[test]

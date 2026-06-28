@@ -17,6 +17,14 @@ Implement **all** features and commands described in `AGENT.md`:
   trailing `-- <sops args>`.
 - `sopsy recipient add [name]` / `remove [name]` / `list` — mutate `.sops.yaml`
   recipients, then run `sops updatekeys -r .`.
+- `sopsy recipient keygen` — generate a Secure Enclave identity and print it
+  (no config changes); forwards trailing `-- <age flags>` to `age-plugin-se keygen`.
+- `sopsy recipient break-glass -o <file>` — generate a portable emergency key, hand
+  it off for offline storage, delete the local copy, and register it (also offered
+  during `init`).
+- `sopsy join <name>` / `sopsy approve <name>` — self-service onboarding: a newcomer
+  records a pending request (`join`); any active member activates it and re-keys
+  (`approve`), gated by a `join_request_ttl` freshness window.
 - `sopsy check` — CI gate (exit 0/1): `.env` not committed and is ignored,
   `.sops.yaml` valid, every encrypted file matches a creation rule, no plaintext
   secrets in tracked files, all encrypted files parse, break-glass recipient exists.

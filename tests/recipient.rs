@@ -16,9 +16,12 @@ use std::process::Command;
 
 use assert_fs::TempDir;
 use serial_test::serial;
-use sopsy::cli::{RecipientAddArgs, RecipientCommand, RecipientRemoveArgs};
-use sopsy::commands::recipient;
-use sopsy::config::Config;
+use sopsy::cli::{
+    ApproveArgs, JoinArgs, RecipientAddArgs, RecipientBreakGlassArgs, RecipientCommand,
+    RecipientRemoveArgs,
+};
+use sopsy::commands::{approve, join, recipient};
+use sopsy::config::{Config, MemberState};
 use sopsy::error::Error;
 use sopsy::sops::{self, FileType};
 use sopsy::ui::Ui;
@@ -162,6 +165,697 @@ fn remove_command(name: &str, no_updatekeys: bool) -> RecipientCommand {
         name: Some(name.to_string()),
         no_updatekeys,
     })
+}
+
+/// Write an executable shell script to `path` with the given body.
+fn write_script(path: &Path, body: &str) {
+    std::fs::write(path, format!("#!/bin/sh\n{body}")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+/// Set or clear an arbitrary environment variable (callers must be `#[serial]`).
+fn set_env(key: &str, value: Option<&Path>) {
+    unsafe {
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `recipient keygen` — Secure Enclave identity generation (fake age-plugin-se).
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn keygen_generates_and_prints_enclave_identity() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+
+    let fake_pubkey = "age1se1qg8vwwqhztnh3vpt2nf2xwn7famktxlmp0nmkfltp8lkvzp8nafkqleh258";
+    // A fake `age-plugin-se` that records its args to a file (so we can assert
+    // flag forwarding — its stderr is captured by sopsy, so a file is the only
+    // observable channel) and emits a canned identity file.
+    let record = dir.path().join("plugin-args.log");
+    let plugin = dir.path().join("age-plugin-se");
+    write_script(
+        &plugin,
+        &format!(
+            "echo \"$@\" >> '{record}'\n\
+             cat <<'EOF'\n# public key: {fake_pubkey}\nAGE-PLUGIN-SE-1QFAKEIDENTITY\nEOF\n",
+            record = record.display()
+        ),
+    );
+
+    let output = assert_cmd::Command::cargo_bin("sopsy")
+        .unwrap()
+        .env("SOPSY_AGE_PLUGIN_SE_BIN", &plugin)
+        .current_dir(dir.path())
+        .args([
+            "recipient",
+            "keygen",
+            "--",
+            "--access-control=any-biometry-or-passcode",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "keygen should exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(fake_pubkey),
+        "keygen should print the public key; got:\n{stdout}"
+    );
+    // The trailing `--` args are forwarded verbatim to age-plugin-se keygen.
+    let logged = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        logged.contains("keygen") && logged.contains("--access-control=any-biometry-or-passcode"),
+        "keygen should forward age flags to age-plugin-se; got:\n{logged}"
+    );
+
+    restore_cwd(&original);
+}
+
+// ---------------------------------------------------------------------------
+// `recipient break-glass` — portable emergency key (real age-keygen + sops).
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn break_glass_generates_registers_and_deletes_local_files() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let (repo, key_a, _key_b) = setup_repo(dir.path());
+
+    // updatekeys must decrypt the existing secret with the primary key A.
+    set_age_key_file(Some(&key_a.file));
+    // Non-interactively confirm the (simulated) offline copy.
+    set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+
+    let out_prefix = repo.join("break-glass-key");
+    recipient::run(
+        &test_ui(),
+        &RecipientCommand::BreakGlass(RecipientBreakGlassArgs {
+            output: out_prefix.clone(),
+            name: None,
+            force: false,
+            no_updatekeys: false,
+        }),
+    )
+    .expect("break-glass should succeed");
+
+    // The local key files were deleted after confirmation.
+    assert!(
+        !with_suffix_test(&out_prefix, "private").exists(),
+        "private key file must be deleted"
+    );
+    assert!(
+        !with_suffix_test(&out_prefix, "public").exists(),
+        "public key file must be deleted"
+    );
+
+    // The break-glass recipient is recorded with the flag set.
+    let config = Config::load_from_dir(&repo).unwrap();
+    let bg = config
+        .recipient("break-glass")
+        .expect("break-glass recipient should be recorded");
+    assert!(bg.break_glass, "recipient must be marked break-glass");
+    assert!(
+        bg.public_key.starts_with("age1"),
+        "a real age public key should be recorded; got {}",
+        bg.public_key
+    );
+
+    // Its key is also in `.sops.yaml`, and the secret still decrypts with key A.
+    let sops_yaml = std::fs::read_to_string(repo.join(".sops.yaml")).unwrap();
+    assert!(
+        sops_yaml.contains(&bg.public_key),
+        "break-glass key should be in .sops.yaml"
+    );
+    let decrypted = sops::decrypt(&repo.join(".env.encrypted"), FileType::Dotenv).unwrap();
+    assert!(decrypted.contains("FOO=bar"), "key A should still decrypt");
+
+    set_env("SOPSY_ASSUME_YES", None);
+    set_age_key_file(None);
+    restore_cwd(&original);
+}
+
+#[test]
+#[serial]
+fn break_glass_non_interactive_without_optin_fails_before_writing() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let (repo, _key_a, _key_b) = setup_repo(dir.path());
+
+    // No SOPSY_ASSUME_YES and a non-interactive UI: must fail fast.
+    let out_prefix = repo.join("bg");
+    let err = recipient::run(
+        &test_ui(),
+        &RecipientCommand::BreakGlass(RecipientBreakGlassArgs {
+            output: out_prefix.clone(),
+            name: None,
+            force: false,
+            no_updatekeys: false,
+        }),
+    )
+    .expect_err("break-glass must refuse to run non-interactively");
+    assert!(matches!(err, Error::NonInteractive { .. }));
+
+    // Nothing was written and no recipient was added.
+    assert!(!with_suffix_test(&out_prefix, "private").exists());
+    assert!(!with_suffix_test(&out_prefix, "public").exists());
+    let config = Config::load_from_dir(&repo).unwrap();
+    assert!(config.recipient("break-glass").is_none());
+
+    restore_cwd(&original);
+}
+
+/// A `.sopsy.yml` with alice (active) and bob (pending), with an optional extra
+/// line appended to bob's entry (e.g. a `requested_at` or `state`).
+fn sopsy_with_pending_bob(bob_extra: &str) -> String {
+    format!(
+        "recipients:\n  - name: alice\n    public_key: age1alice\n  \
+         - name: bob\n    public_key: age1bob\n    state: pending\n{bob_extra}"
+    )
+}
+
+#[test]
+#[serial]
+fn join_empty_name_rejected() {
+    with_repo(|dir| {
+        flow_repo(dir, Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+        let err = join::run(
+            &test_ui(),
+            &JoinArgs {
+                name: "   ".into(),
+                sopsy_file: None,
+                public_key: Some("age1x".into()),
+                age_args: vec![],
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Validation(m) if m.contains("must not be empty")));
+    });
+}
+
+#[test]
+#[serial]
+fn join_rejects_duplicate_pending_request() {
+    with_repo(|dir| {
+        flow_repo(
+            dir,
+            Some(&sopsy_with_pending_bob("")),
+            Some(SOPS_ALICE_ONLY),
+        );
+        let err = join::run(
+            &test_ui(),
+            &JoinArgs {
+                name: "bob".into(),
+                sopsy_file: None,
+                public_key: Some("age1bobnew".into()),
+                age_args: vec![],
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Validation(m) if m.contains("pending request")));
+    });
+}
+
+#[test]
+#[serial]
+fn join_rejects_duplicate_public_key() {
+    with_repo(|dir| {
+        flow_repo(dir, Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+        // age1alice already belongs to alice in SOPSY_TWO.
+        let err = join::run(
+            &test_ui(),
+            &JoinArgs {
+                name: "carol".into(),
+                sopsy_file: None,
+                public_key: Some("age1alice".into()),
+                age_args: vec![],
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Validation(m) if m.contains("already registered")));
+    });
+}
+
+#[test]
+#[serial]
+fn join_with_sopsy_file_targets_custom_path() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("custom-sopsy.yml");
+    std::fs::write(
+        &file,
+        "recipients:\n  - name: alice\n    public_key: age1alice\n",
+    )
+    .unwrap();
+
+    join::run(
+        &test_ui(),
+        &JoinArgs {
+            name: "bob".into(),
+            sopsy_file: Some(file.clone()),
+            public_key: Some("age1bobkey".into()),
+            age_args: vec![],
+        },
+    )
+    .expect("join --sopsy-file should succeed");
+
+    let cfg = Config::load(&file).unwrap();
+    let bob = cfg.recipient("bob").unwrap();
+    assert!(bob.is_pending());
+    assert!(bob.requested_at.is_some());
+}
+
+#[test]
+fn join_with_missing_sopsy_file_errors() {
+    let err = join::run(
+        &test_ui(),
+        &JoinArgs {
+            name: "bob".into(),
+            sopsy_file: Some("/nonexistent/dir/custom.yml".into()),
+            public_key: Some("age1bobkey".into()),
+            age_args: vec![],
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::Validation(m) if m.contains("not found")));
+}
+
+#[test]
+#[serial]
+fn join_generates_enclave_identity_with_fake_plugin() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    git_init(dir.path());
+    std::fs::write(
+        dir.path().join(".sopsy.yml"),
+        "recipients:\n  - name: alice\n    public_key: age1alice\n",
+    )
+    .unwrap();
+
+    let fake_pub = "age1se1qg8vwwqhztnh3vpt2nf2xwn7famktxlmp0nmkfltp8lkvzp8nafkqleh258";
+    let plugin = dir.path().join("age-plugin-se");
+    write_script(
+        &plugin,
+        &format!("cat <<'EOF'\n# public key: {fake_pub}\nAGE-PLUGIN-SE-1QFAKE\nEOF\n"),
+    );
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let output = assert_cmd::Command::cargo_bin("sopsy")
+        .unwrap()
+        .env("SOPSY_AGE_PLUGIN_SE_BIN", &plugin)
+        .current_dir(dir.path())
+        .args(["--non-interactive", "join", "newbie"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "join (generate) should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cfg = Config::load_from_dir(dir.path()).unwrap();
+    let m = cfg.recipient("newbie").expect("newbie recorded");
+    assert!(m.is_pending());
+    assert_eq!(m.public_key, fake_pub);
+
+    restore_cwd(&original);
+}
+
+#[test]
+#[serial]
+fn approve_proceeds_without_timestamp_and_warns_on_no_age_rule() {
+    with_repo(|dir| {
+        set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+        // bob is pending without a timestamp; the .sops.yaml rule has no `age:`,
+        // exercising both the missing-timestamp and zero-modified warn branches.
+        flow_repo(
+            dir,
+            Some(&sopsy_with_pending_bob("")),
+            Some("creation_rules:\n  - path_regex: \\.enc$\n"),
+        );
+        approve::run(
+            &test_ui(),
+            &ApproveArgs {
+                name: "bob".into(),
+                force: false,
+                no_updatekeys: false,
+            },
+        )
+        .expect("approve should succeed");
+        let cfg = Config::load_from_dir(dir).unwrap();
+        assert_eq!(cfg.recipient("bob").unwrap().state, MemberState::Active);
+        set_env("SOPSY_ASSUME_YES", None);
+    });
+}
+
+#[test]
+#[serial]
+fn approve_handles_unparseable_and_future_timestamps() {
+    // Unparseable timestamp: warns, proceeds.
+    with_repo(|dir| {
+        set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+        flow_repo(
+            dir,
+            Some(&sopsy_with_pending_bob("    requested_at: not-a-date\n")),
+            Some(SOPS_ALICE_ONLY),
+        );
+        approve::run(
+            &test_ui(),
+            &ApproveArgs {
+                name: "bob".into(),
+                force: false,
+                no_updatekeys: false,
+            },
+        )
+        .expect("approve should proceed past a bad timestamp");
+        assert_eq!(
+            Config::load_from_dir(dir)
+                .unwrap()
+                .recipient("bob")
+                .unwrap()
+                .state,
+            MemberState::Active
+        );
+        set_env("SOPSY_ASSUME_YES", None);
+    });
+    // Future timestamp: treated as fresh.
+    with_repo(|dir| {
+        set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+        flow_repo(
+            dir,
+            Some(&sopsy_with_pending_bob(
+                "    requested_at: 2999-01-01T00:00:00Z\n",
+            )),
+            Some(SOPS_ALICE_ONLY),
+        );
+        approve::run(
+            &test_ui(),
+            &ApproveArgs {
+                name: "bob".into(),
+                force: false,
+                no_updatekeys: false,
+            },
+        )
+        .expect("a future-dated request is fresh");
+        set_env("SOPSY_ASSUME_YES", None);
+    });
+}
+
+#[test]
+#[serial]
+fn approve_stale_request_with_force_proceeds() {
+    with_repo(|dir| {
+        set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+        flow_repo(
+            dir,
+            Some(&sopsy_with_pending_bob(
+                "    requested_at: 2020-01-01T00:00:00Z\njoin_request_ttl: 1h\n",
+            )),
+            Some(SOPS_ALICE_ONLY),
+        );
+        approve::run(
+            &test_ui(),
+            &ApproveArgs {
+                name: "bob".into(),
+                force: true,
+                no_updatekeys: false,
+            },
+        )
+        .expect("--force should approve a stale request");
+        assert_eq!(
+            Config::load_from_dir(dir)
+                .unwrap()
+                .recipient("bob")
+                .unwrap()
+                .state,
+            MemberState::Active
+        );
+        set_env("SOPSY_ASSUME_YES", None);
+    });
+}
+
+#[test]
+#[serial]
+fn approve_non_interactive_without_optin_errors_at_vouch() {
+    with_repo(|dir| {
+        set_env("SOPSY_ASSUME_YES", None); // ensure no automation opt-in
+        flow_repo(
+            dir,
+            Some(&sopsy_with_pending_bob("")),
+            Some(SOPS_ALICE_ONLY),
+        );
+        let err = approve::run(
+            &test_ui(),
+            &ApproveArgs {
+                name: "bob".into(),
+                force: false,
+                no_updatekeys: false,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::NonInteractive { .. }));
+        // Nothing changed: bob is still pending.
+        assert_eq!(
+            Config::load_from_dir(dir)
+                .unwrap()
+                .recipient("bob")
+                .unwrap()
+                .state,
+            MemberState::Pending
+        );
+    });
+}
+
+#[test]
+#[serial]
+fn approve_rolls_back_when_reencryption_fails() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    flow_repo(
+        dir.path(),
+        Some(&sopsy_with_pending_bob("")),
+        Some(SOPS_ALICE_ONLY),
+    );
+    std::fs::write(dir.path().join("secret.enc"), "FOO=ENC[x]\n").unwrap();
+    set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+
+    let fake = dir.path().join("fake-sops.sh");
+    write_script(&fake, "echo 'cannot get data key' >&2\nexit 1\n");
+    unsafe {
+        std::env::set_var("SOPSY_SOPS_BIN", &fake);
+    }
+
+    let err = approve::run(
+        &test_ui(),
+        &ApproveArgs {
+            name: "bob".into(),
+            force: false,
+            no_updatekeys: false,
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(err, Error::Validation(m) if m.contains("rolled back")));
+    // bob is rolled back to pending.
+    assert_eq!(
+        Config::load_from_dir(dir.path())
+            .unwrap()
+            .recipient("bob")
+            .unwrap()
+            .state,
+        MemberState::Pending
+    );
+
+    unsafe {
+        std::env::remove_var("SOPSY_SOPS_BIN");
+    }
+    set_env("SOPSY_ASSUME_YES", None);
+    restore_cwd(&original);
+}
+
+/// Local mirror of the production `with_suffix` helper for assertions.
+fn with_suffix_test(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".");
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+// ---------------------------------------------------------------------------
+// `join` / `approve` — the self-service membership flow.
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn join_records_pending_member_without_granting_access() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let (repo, _key_a, key_b) = setup_repo(dir.path());
+
+    join::run(
+        &test_ui(),
+        &JoinArgs {
+            name: "bob".into(),
+            sopsy_file: None,
+            public_key: Some(key_b.public.clone()),
+            age_args: vec![],
+        },
+    )
+    .expect("join should succeed");
+
+    let config = Config::load_from_dir(&repo).unwrap();
+    let bob = config.recipient("bob").expect("bob should be recorded");
+    assert_eq!(bob.state, MemberState::Pending);
+    assert!(bob.requested_at.is_some(), "join should stamp a timestamp");
+
+    // A pending member grants nothing: the key must NOT be in `.sops.yaml`.
+    let sops_yaml = std::fs::read_to_string(repo.join(".sops.yaml")).unwrap();
+    assert!(
+        !sops_yaml.contains(&key_b.public),
+        "pending key must not appear in .sops.yaml"
+    );
+
+    restore_cwd(&original);
+}
+
+#[test]
+#[serial]
+fn join_rejects_existing_member() {
+    with_repo(|dir| {
+        flow_repo(dir, Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+        let err = join::run(
+            &test_ui(),
+            &JoinArgs {
+                name: "alice".into(),
+                sopsy_file: None,
+                public_key: Some("age1x".into()),
+                age_args: vec![],
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Validation(m) if m.contains("already an active member")));
+    });
+}
+
+#[test]
+#[serial]
+fn approve_activates_pending_member_and_rekeys() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let (repo, key_a, key_b) = setup_repo(dir.path());
+
+    // bob requests access.
+    join::run(
+        &test_ui(),
+        &JoinArgs {
+            name: "bob".into(),
+            sopsy_file: None,
+            public_key: Some(key_b.public.clone()),
+            age_args: vec![],
+        },
+    )
+    .expect("join should succeed");
+
+    // An existing member (key A) approves; auto-vouch for the test.
+    set_age_key_file(Some(&key_a.file));
+    set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+    approve::run(
+        &test_ui(),
+        &ApproveArgs {
+            name: "bob".into(),
+            force: false,
+            no_updatekeys: false,
+        },
+    )
+    .expect("approve should succeed");
+
+    let config = Config::load_from_dir(&repo).unwrap();
+    let bob = config.recipient("bob").unwrap();
+    assert_eq!(bob.state, MemberState::Active);
+    assert!(
+        bob.requested_at.is_none(),
+        "timestamp is cleared on approval"
+    );
+
+    let sops_yaml = std::fs::read_to_string(repo.join(".sops.yaml")).unwrap();
+    assert!(
+        sops_yaml.contains(&key_b.public),
+        "approved key must be added to .sops.yaml"
+    );
+
+    // bob (key B) can now decrypt the existing secret.
+    set_age_key_file(Some(&key_b.file));
+    let plain = sops::decrypt(&repo.join(".env.encrypted"), FileType::Dotenv).unwrap();
+    assert!(
+        plain.contains("FOO=bar"),
+        "newly approved member should decrypt"
+    );
+
+    set_env("SOPSY_ASSUME_YES", None);
+    set_age_key_file(None);
+    restore_cwd(&original);
+}
+
+#[test]
+#[serial]
+fn approve_rejects_stale_request() {
+    with_repo(|dir| {
+        let sopsy = "recipients:\n  - name: alice\n    public_key: age1alice\n  \
+            - name: bob\n    public_key: age1bob\n    state: pending\n    \
+            requested_at: 2020-01-01T00:00:00Z\njoin_request_ttl: 1h\n";
+        flow_repo(dir, Some(sopsy), Some(SOPS_ALICE_ONLY));
+        let err = approve::run(
+            &test_ui(),
+            &ApproveArgs {
+                name: "bob".into(),
+                force: false,
+                no_updatekeys: false,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Validation(m) if m.contains("older than")));
+        // bob stays pending; nothing leaked into .sops.yaml.
+        let config = Config::load_from_dir(dir).unwrap();
+        assert_eq!(config.recipient("bob").unwrap().state, MemberState::Pending);
+    });
+}
+
+#[test]
+#[serial]
+fn approve_unknown_and_already_active_error() {
+    with_repo(|dir| {
+        flow_repo(dir, Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+        let ghost = approve::run(
+            &test_ui(),
+            &ApproveArgs {
+                name: "ghost".into(),
+                force: false,
+                no_updatekeys: false,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(ghost, Error::Validation(m) if m.contains("no member named")));
+
+        // alice is already active in SOPSY_TWO.
+        let active = approve::run(
+            &test_ui(),
+            &ApproveArgs {
+                name: "alice".into(),
+                force: false,
+                no_updatekeys: false,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(active, Error::Validation(m) if m.contains("already an active member")));
+    });
 }
 
 #[test]

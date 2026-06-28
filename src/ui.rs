@@ -202,6 +202,35 @@ impl Ui {
         let _ = std::io::stdout().flush();
     }
 
+    /// Pause for `duration` so the user can read what was just printed.
+    ///
+    /// Only sleeps in interactive mode; in non-interactive runs (CI, pipes) the
+    /// pause is skipped so scripts never block on a cosmetic delay.
+    pub fn pause(&self, duration: Duration) {
+        if self.interactive {
+            std::thread::sleep(duration);
+        }
+    }
+
+    /// Wait for the user to press ENTER, displaying `prompt` first.
+    ///
+    /// Returns [`Error::NonInteractive`] when prompting is disabled: this is a
+    /// blocking confirmation that cannot be satisfied without a terminal.
+    pub fn press_enter(&self, prompt: &str) -> Result<()> {
+        if !self.interactive {
+            return Err(Error::NonInteractive {
+                prompt: prompt.to_string(),
+                flag: "an interactive terminal (this step cannot be scripted)".to_string(),
+            });
+        }
+        println!();
+        print!("{} ", self.paint(prompt, Style::new().bold().cyan()));
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        Ok(())
+    }
+
     // ----- Interactive prompt wrappers ------------------------------------
 
     /// Ask the user to pick one option from `options`.
@@ -246,6 +275,18 @@ impl Ui {
     pub fn text(&self, prompt: &str, flag: &str) -> Result<String> {
         self.ensure_interactive(prompt, flag)?;
         Text::new(prompt).prompt().map_err(into_other)
+    }
+
+    /// Ask the user for a free-form text value, offering `default` when they
+    /// press ENTER without typing anything.
+    ///
+    /// Returns [`Error::NonInteractive`] when prompting is disabled.
+    pub fn text_with_default(&self, prompt: &str, flag: &str, default: &str) -> Result<String> {
+        self.ensure_interactive(prompt, flag)?;
+        Text::new(prompt)
+            .with_default(default)
+            .prompt()
+            .map_err(into_other)
     }
 
     /// Guard that converts a disallowed prompt into a clear error.
@@ -365,6 +406,22 @@ mod tests {
                 .expect_err("text should refuse to prompt"),
             Error::NonInteractive { .. }
         ));
+        assert!(matches!(
+            ui.text_with_default("Name?", "--name", "default")
+                .expect_err("text_with_default should refuse to prompt"),
+            Error::NonInteractive { .. }
+        ));
+        assert!(matches!(
+            ui.press_enter("Press ENTER:")
+                .expect_err("press_enter should refuse without a terminal"),
+            Error::NonInteractive { .. }
+        ));
+    }
+
+    #[test]
+    fn pause_is_a_noop_when_not_interactive() {
+        // Must return immediately (no sleep) in non-interactive mode.
+        noninteractive_ui().pause(Duration::from_secs(3600));
     }
 
     #[test]

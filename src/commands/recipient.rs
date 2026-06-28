@@ -19,15 +19,27 @@ use std::process::Command;
 use owo_colors::OwoColorize;
 use serde_yaml_ng::Value;
 
-use crate::cli::{RecipientAddArgs, RecipientCommand, RecipientRemoveArgs};
+use crate::cli::{
+    RecipientAddArgs, RecipientBreakGlassArgs, RecipientCommand, RecipientKeygenArgs,
+    RecipientRemoveArgs,
+};
 use crate::config::{CONFIG_FILE_NAME, Config, Recipient};
 use crate::error::{Error, Result};
-use crate::git;
-use crate::sops;
 use crate::ui::Ui;
+use crate::{age, enclave, git, sops};
 
 /// Conventional name of the `sops` configuration file.
-const SOPS_CONFIG_FILE_NAME: &str = ".sops.yaml";
+pub(crate) const SOPS_CONFIG_FILE_NAME: &str = ".sops.yaml";
+
+/// When set, interactive confirmations (`break-glass`'s press-ENTER, `approve`'s
+/// vouch prompt) are assumed. Intended for automation and tests; in real use the
+/// operator should confirm interactively.
+pub(crate) const ASSUME_YES_ENV: &str = "SOPSY_ASSUME_YES";
+
+/// Whether the [`ASSUME_YES_ENV`] automation opt-in is set.
+pub(crate) fn assume_yes() -> bool {
+    std::env::var_os(ASSUME_YES_ENV).is_some()
+}
 
 /// Dispatch a `recipient` subcommand.
 pub fn run(ui: &Ui, command: &RecipientCommand) -> Result<()> {
@@ -35,17 +47,19 @@ pub fn run(ui: &Ui, command: &RecipientCommand) -> Result<()> {
         RecipientCommand::Add(args) => add(ui, args),
         RecipientCommand::Remove(args) => remove(ui, args),
         RecipientCommand::List => list(ui),
+        RecipientCommand::Keygen(args) => keygen(ui, args),
+        RecipientCommand::BreakGlass(args) => break_glass(ui, args),
     }
 }
 
 /// Locate the repository root containing the current directory.
-fn current_repo_root() -> Result<PathBuf> {
+pub(crate) fn current_repo_root() -> Result<PathBuf> {
     let cwd = std::env::current_dir()?;
     git::repo_root(&cwd)
 }
 
 /// Load `.sopsy.yml`, turning a missing file into a friendly hint.
-fn load_config(repo: &Path) -> Result<Config> {
+pub(crate) fn load_config(repo: &Path) -> Result<Config> {
     match Config::load_from_dir(repo) {
         Ok(config) => Ok(config),
         Err(Error::FileNotFound(_)) => Err(Error::Validation(format!(
@@ -57,7 +71,7 @@ fn load_config(repo: &Path) -> Result<Config> {
 }
 
 /// Resolve and validate the path to `.sops.yaml` inside `repo`.
-fn sops_config_path(repo: &Path) -> Result<PathBuf> {
+pub(crate) fn sops_config_path(repo: &Path) -> Result<PathBuf> {
     let path = repo.join(SOPS_CONFIG_FILE_NAME);
     if !path.exists() {
         return Err(Error::Validation(format!(
@@ -79,7 +93,7 @@ fn add(ui: &Ui, args: &RecipientAddArgs) -> Result<()> {
     // Resolve the name and public key from flags, or prompt interactively.
     let name = match args.resolved_name() {
         Some(name) => name.to_string(),
-        None => ui.text("Recipient name", "--name")?,
+        None => ui.text("Recipient name:", "--name")?,
     };
     let name = name.trim().to_string();
     if name.is_empty() {
@@ -88,7 +102,7 @@ fn add(ui: &Ui, args: &RecipientAddArgs) -> Result<()> {
 
     let public_key = match args.public_key.as_deref() {
         Some(key) => key.to_string(),
-        None => ui.text("Recipient age public key (age1…)", "--public-key")?,
+        None => ui.text("Recipient age public key (age1…):", "--public-key")?,
     };
     let public_key = public_key.trim().to_string();
     if public_key.is_empty() {
@@ -170,7 +184,7 @@ fn remove(ui: &Ui, args: &RecipientRemoveArgs) -> Result<()> {
                     "there are no recipients to remove".into(),
                 ));
             }
-            ui.select("Recipient to remove", "--name", options)?
+            ui.select("Recipient to remove:", "--name", options)?
         }
     };
     let name = name.trim().to_string();
@@ -228,13 +242,13 @@ fn remove(ui: &Ui, args: &RecipientRemoveArgs) -> Result<()> {
 /// fails (most often because the operator's age key is not available to decrypt
 /// the existing secrets), restoring this snapshot keeps the repository
 /// consistent — it never lists a recipient the secrets were not re-wrapped for.
-struct ConfigSnapshot {
+pub(crate) struct ConfigSnapshot {
     files: [(PathBuf, Option<Vec<u8>>); 2],
 }
 
 impl ConfigSnapshot {
     /// Capture the current bytes of both config files (`None` if absent).
-    fn capture(repo: &Path, sops_config: &Path) -> Self {
+    pub(crate) fn capture(repo: &Path, sops_config: &Path) -> Self {
         let sopsy = repo.join(CONFIG_FILE_NAME);
         ConfigSnapshot {
             files: [
@@ -246,7 +260,7 @@ impl ConfigSnapshot {
 
     /// Restore both files to their captured contents (removing any that did not
     /// exist when captured).
-    fn restore(&self) -> Result<()> {
+    pub(crate) fn restore(&self) -> Result<()> {
         for (path, contents) in &self.files {
             match contents {
                 Some(bytes) => std::fs::write(path, bytes)?,
@@ -262,7 +276,7 @@ impl ConfigSnapshot {
 /// Wrap a `sops updatekeys` failure with actionable guidance. Updating
 /// recipients requires decrypting the existing secrets, so the operator must be
 /// an existing recipient with their key available.
-fn rewrap_error(source: Error) -> Error {
+pub(crate) fn rewrap_error(source: Error) -> Error {
     Error::Validation(format!(
         "could not re-encrypt secrets for the updated recipient set, so the change \
          was rolled back. Updating recipients requires decrypting the existing \
@@ -343,6 +357,178 @@ fn list(ui: &Ui) -> Result<()> {
     Ok(())
 }
 
+/// Generate a fresh Secure Enclave identity and print it.
+///
+/// This is a stateless helper: it does **not** touch `.sopsy.yml` or
+/// `.sops.yaml`. Use the printed public key with `sopsy recipient add` to
+/// register it. Trailing args after `--` are forwarded to `age-plugin-se keygen`.
+fn keygen(ui: &Ui, args: &RecipientKeygenArgs) -> Result<()> {
+    ui.header("sopsy recipient keygen");
+
+    enclave::ensure_available()?;
+    let spinner = ui.spinner("Generating Secure Enclave identity (Touch ID may prompt)…");
+    let identity = enclave::generate_identity_with_args(&args.age_args);
+    spinner.finish_and_clear();
+    let identity = identity?;
+
+    ui.success("Generated a Secure Enclave-backed identity.");
+    ui.info("The private key stays in the Secure Enclave and never leaves this device.");
+
+    ui.header("Public key (share this; register with `sopsy recipient add`)");
+    ui.animated_line(&identity.public_key);
+
+    ui.header("Identity reference (store this where you keep your age identities)");
+    println!("{}", identity.identity);
+
+    Ok(())
+}
+
+/// Generate a portable break-glass emergency key, hand it to the operator for
+/// offline storage, then delete it locally and register it as a recipient.
+///
+/// The break-glass key is an ordinary (exportable) age key — *not* a Secure
+/// Enclave identity — precisely because it must survive the loss of any single
+/// device. The flow is deliberately interactive: we write the key to disk, wait
+/// for the operator to copy it into a secure store (e.g. 1Password), then remove
+/// the local copies so the only surviving private key lives offline.
+fn break_glass(ui: &Ui, args: &RecipientBreakGlassArgs) -> Result<()> {
+    ui.header("sopsy recipient break-glass");
+
+    let repo = current_repo_root()?;
+    let mut config = load_config(&repo)?;
+    let sops_config = sops_config_path(&repo)?;
+
+    let name = args
+        .name
+        .as_deref()
+        .unwrap_or("break-glass")
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        return Err(Error::Validation("recipient name must not be empty".into()));
+    }
+    if config.recipient(&name).is_some() {
+        return Err(Error::Validation(format!(
+            "a recipient named `{name}` already exists"
+        )));
+    }
+
+    // This flow blocks on an interactive confirmation. Fail fast — before any
+    // key material touches disk — when we cannot prompt (and automation has not
+    // opted in via SOPSY_ASSUME_YES).
+    let assume_yes = assume_yes();
+    if !ui.is_interactive() && !assume_yes {
+        return Err(Error::NonInteractive {
+            prompt: "press ENTER to confirm the break-glass key is stored safely".to_string(),
+            flag: format!("an interactive terminal (or set {ASSUME_YES_ENV} for automation)"),
+        });
+    }
+
+    // Resolve the two output paths and refuse to clobber existing files.
+    let private_path = with_suffix(&args.output, "private");
+    let public_path = with_suffix(&args.output, "public");
+    for path in [&private_path, &public_path] {
+        if path.exists() && !args.force {
+            return Err(Error::Validation(format!(
+                "{} already exists (pass --force to overwrite)",
+                path.display()
+            )));
+        }
+    }
+
+    // Generate a portable age key pair.
+    age::ensure_available()?;
+    let spinner = ui.spinner("Generating a portable age key pair for break-glass…");
+    let keypair = age::generate_keypair();
+    spinner.finish_and_clear();
+    let keypair = keypair?;
+
+    // Write both halves to disk (private key locked down on unix).
+    std::fs::write(&private_path, &keypair.identity)?;
+    std::fs::write(&public_path, format!("{}\n", keypair.public_key))?;
+    restrict_permissions(&private_path);
+    ui.success(format!("wrote private key to {}", private_path.display()));
+    ui.success(format!("wrote public key to {}", public_path.display()));
+
+    // Hand off to the operator and block until they confirm safe storage.
+    ui.header("ACTION REQUIRED — store the break-glass key offline");
+    ui.warn(
+        "Please copy these files and place them in 1Password (or another secure, offline store):",
+    );
+    ui.info(format!("  • {}", private_path.display()));
+    ui.info(format!("  • {}", public_path.display()));
+    ui.warn("Both files will be DELETED from this machine as soon as you continue.");
+    if assume_yes {
+        ui.info(format!(
+            "{ASSUME_YES_ENV} set — assuming the keys are stored; continuing."
+        ));
+    } else {
+        ui.press_enter(
+            "Please press ENTER when you copied the keys to a secure storage (eg 1Password):",
+        )?;
+    }
+
+    // Remove the local copies; the only surviving private key is now offline.
+    std::fs::remove_file(&private_path)?;
+    std::fs::remove_file(&public_path)?;
+    ui.success("removed the local key files");
+
+    // Register the break-glass recipient in both config files and re-wrap
+    // secrets, rolling back atomically if the re-encryption fails (see `add`).
+    let snapshot = ConfigSnapshot::capture(&repo, &sops_config);
+    config.recipients.push(Recipient {
+        break_glass: true,
+        ..Recipient::new(&name, &keypair.public_key)
+    });
+    config.save_to_dir(&repo)?;
+    ui.success(format!(
+        "recorded `{name}` (break-glass) in {CONFIG_FILE_NAME}"
+    ));
+
+    let modified = add_key_to_sops_yaml(&sops_config, &keypair.public_key)?;
+    if modified == 0 {
+        ui.warn(format!(
+            "no `age:` creation_rules matched in {SOPS_CONFIG_FILE_NAME}; left unchanged"
+        ));
+    } else {
+        ui.success(format!(
+            "added the key to {modified} creation rule(s) in {SOPS_CONFIG_FILE_NAME}"
+        ));
+    }
+
+    if let Err(err) = run_updatekeys(ui, &repo, args.no_updatekeys) {
+        snapshot.restore()?;
+        ui.warn("rolled back configuration changes — break-glass recipient was not added");
+        return Err(rewrap_error(err));
+    }
+
+    ui.success(format!("break-glass recipient `{name}` added"));
+    Ok(())
+}
+
+/// Return `path` with `.<suffix>` appended (e.g. `key` + `private` → `key.private`).
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".");
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Best-effort tighten of a private-key file to owner read/write only (unix).
+fn restrict_permissions(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            let mut perms = metadata.permissions();
+            perms.set_mode(0o600);
+            let _ = std::fs::set_permissions(path, perms);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
 /// Re-wrap every encrypted file in `repo` for the current recipient set, unless
 /// skipping was requested.
 ///
@@ -350,7 +536,7 @@ fn list(ui: &Ui) -> Result<()> {
 /// file-by-file: `sops updatekeys` (3.x) operates on a single file and has no
 /// recursive mode, so sopsy discovers the managed files itself and runs
 /// `sops updatekeys -y --input-type T <file>` for each.
-fn run_updatekeys(ui: &Ui, repo: &Path, skip: bool) -> Result<()> {
+pub(crate) fn run_updatekeys(ui: &Ui, repo: &Path, skip: bool) -> Result<()> {
     if skip {
         ui.info("skipping re-encryption (`--no-updatekeys`)");
         return Ok(());
@@ -449,7 +635,7 @@ fn truncate_key(key: &str) -> String {
 /// Add `key` to the `age:` list of every age-based creation rule in the
 /// `.sops.yaml` at `path`, preserving all other YAML. Returns how many rules
 /// were modified.
-fn add_key_to_sops_yaml(path: &Path, key: &str) -> Result<usize> {
+pub(crate) fn add_key_to_sops_yaml(path: &Path, key: &str) -> Result<usize> {
     mutate_sops_yaml(path, |keys| {
         if keys.iter().any(|k| k == key) {
             false
@@ -540,6 +726,23 @@ fn age_keys_to_value(keys: &[String]) -> Value {
 mod tests {
     use super::*;
     use assert_fs::TempDir;
+
+    #[test]
+    fn with_suffix_appends_dotted_extension() {
+        assert_eq!(
+            with_suffix(Path::new("key"), "private"),
+            PathBuf::from("key.private")
+        );
+        assert_eq!(
+            with_suffix(Path::new("/tmp/bg"), "public"),
+            PathBuf::from("/tmp/bg.public")
+        );
+        // An existing extension is preserved, not replaced.
+        assert_eq!(
+            with_suffix(Path::new("bg.key"), "private"),
+            PathBuf::from("bg.key.private")
+        );
+    }
 
     #[test]
     fn truncate_key_shortens_only_long_keys() {
