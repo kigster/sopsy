@@ -29,7 +29,7 @@ fmt:
     cargo fmt
 
 warnings:
-    cargo clippy -- -D warmings
+    cargo clippy -- -D warnings
 
 test:
     cargo test
