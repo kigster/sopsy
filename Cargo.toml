@@ -1,6 +1,6 @@
 [package]
 name = "sopsy"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2024"
 description = "The missing developer experience for SOPS"
 license = "MIT"
