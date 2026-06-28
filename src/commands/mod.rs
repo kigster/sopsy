@@ -6,10 +6,12 @@
 //! notice through the [`crate::ui::Ui`] layer and return `Ok(())`. Each carries
 //! a `//! TODO` contract describing the behavior the next phase must implement.
 
+pub mod approve;
 pub mod check;
 pub mod completion;
 pub mod deps;
 pub mod doctor;
 pub mod edit;
 pub mod init;
+pub mod join;
 pub mod recipient;

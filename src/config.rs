@@ -12,6 +12,7 @@
 //! break-glass marker) than `sops` understands.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +21,27 @@ use crate::error::{Error, Result};
 /// Default file name for sopsy's internal configuration.
 pub const CONFIG_FILE_NAME: &str = ".sopsy.yml";
 
+/// Fallback join-request validity window when `.sopsy.yml` does not set one.
+const DEFAULT_REQUEST_TTL: Duration = Duration::from_secs(72 * 3600);
+
+/// Lifecycle state of a member listed in `.sopsy.yml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemberState {
+    /// Requested access via `sopsy join` but not yet approved. A pending member
+    /// is **not** in `.sops.yaml`, so it grants no decryption ability.
+    Pending,
+    /// Approved: present in `.sops.yaml` and able to decrypt. This is the
+    /// default so legacy entries (written before states existed) read as active.
+    #[default]
+    Active,
+}
+
+/// Whether a member state is the default (`Active`), used to omit it on save.
+fn is_active(state: &MemberState) -> bool {
+    matches!(state, MemberState::Active)
+}
+
 /// A single recipient able to decrypt the repository's secrets.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Recipient {
@@ -27,6 +49,16 @@ pub struct Recipient {
     pub name: String,
     /// The age public key, e.g. `age1...` or `age1se1...` for Secure Enclave.
     pub public_key: String,
+    /// Username of who generated this key (e.g. `"kig"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// Lifecycle state. Omitted from the file when `Active` (the default).
+    #[serde(default, skip_serializing_if = "is_active")]
+    pub state: MemberState,
+    /// RFC3339 timestamp of when a pending join request was made. Used by
+    /// `sopsy approve` to reject stale requests. Cleared once approved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_at: Option<String>,
     /// Whether this recipient is the emergency "break-glass" key that is stored
     /// offline (e.g. in 1Password) rather than on a developer's machine.
     #[serde(default)]
@@ -34,13 +66,46 @@ pub struct Recipient {
 }
 
 impl Recipient {
-    /// Construct a normal (non break-glass) recipient.
+    /// Construct a normal, active (non break-glass) recipient.
     pub fn new(name: impl Into<String>, public_key: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             public_key: public_key.into(),
+            username: None,
+            state: MemberState::Active,
+            requested_at: None,
             break_glass: false,
         }
+    }
+
+    /// Construct an active recipient with a username.
+    pub fn with_username(
+        name: impl Into<String>,
+        public_key: impl Into<String>,
+        username: impl Into<String>,
+    ) -> Self {
+        Self {
+            username: Some(username.into()),
+            ..Self::new(name, public_key)
+        }
+    }
+
+    /// Construct a *pending* member (a join request awaiting approval).
+    pub fn pending(
+        name: impl Into<String>,
+        public_key: impl Into<String>,
+        requested_at: impl Into<String>,
+    ) -> Self {
+        Self {
+            state: MemberState::Pending,
+            requested_at: Some(requested_at.into()),
+            ..Self::new(name, public_key)
+        }
+    }
+
+    /// Whether this member is awaiting approval.
+    pub fn is_pending(&self) -> bool {
+        matches!(self.state, MemberState::Pending)
     }
 }
 
@@ -60,6 +125,16 @@ pub struct Config {
     /// diagnostics and reproducibility.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sops_version: Option<String>,
+
+    /// How long a pending join request stays valid, as a human duration string
+    /// (e.g. `"72h"`, `"3d"`). `sopsy approve` refuses older requests unless
+    /// `--force` is given; it doubles as a plain-text "approve me promptly"
+    /// reminder. Falls back to 72h when unset or unparseable.
+    #[serde(
+        default = "default_request_ttl",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub join_request_ttl: Option<String>,
 }
 
 impl Default for Config {
@@ -68,8 +143,14 @@ impl Default for Config {
             recipients: Vec::new(),
             encrypted_globs: default_encrypted_globs(),
             sops_version: None,
+            join_request_ttl: default_request_ttl(),
         }
     }
+}
+
+/// Default join-request validity window written into fresh configs.
+fn default_request_ttl() -> Option<String> {
+    Some("72h".to_string())
 }
 
 /// Default set of globs treated as encrypted artifacts.
@@ -90,6 +171,15 @@ impl Config {
     /// Look up a recipient by name.
     pub fn recipient(&self, name: &str) -> Option<&Recipient> {
         self.recipients.iter().find(|r| r.name == name)
+    }
+
+    /// The configured join-request validity window, falling back to the default
+    /// when unset or unparseable.
+    pub fn resolved_request_ttl(&self) -> Duration {
+        self.join_request_ttl
+            .as_deref()
+            .and_then(|s| humantime::parse_duration(s).ok())
+            .unwrap_or(DEFAULT_REQUEST_TTL)
     }
 
     /// Load configuration from `path`.
@@ -144,9 +234,8 @@ mod tests {
         let mut cfg = Config::default();
         cfg.recipients.push(Recipient::new("alice", "age1alice"));
         cfg.recipients.push(Recipient {
-            name: "break-glass".into(),
-            public_key: "age1emergency".into(),
             break_glass: true,
+            ..Recipient::new("break-glass", "age1emergency")
         });
         cfg.sops_version = Some("3.9.0".into());
 
@@ -157,6 +246,71 @@ mod tests {
         assert_eq!(cfg, loaded);
         assert_eq!(loaded.break_glass_recipient().unwrap().name, "break-glass");
         assert_eq!(loaded.recipient("alice").unwrap().public_key, "age1alice");
+    }
+
+    #[test]
+    fn username_round_trips_and_is_omitted_when_absent() {
+        let mut cfg = Config::default();
+        cfg.recipients
+            .push(Recipient::with_username("alice", "age1alice", "kig"));
+        cfg.recipients.push(Recipient::new("bob", "age1bob"));
+
+        let dir = assert_fs::TempDir::new().unwrap();
+        let path = cfg.save_to_dir(dir.path()).unwrap();
+
+        // The `username` is serialized for alice but skipped entirely for bob.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("username: kig"));
+        assert_eq!(raw.matches("username:").count(), 1);
+
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(cfg, loaded);
+        assert_eq!(
+            loaded.recipient("alice").unwrap().username.as_deref(),
+            Some("kig")
+        );
+        assert!(loaded.recipient("bob").unwrap().username.is_none());
+    }
+
+    #[test]
+    fn pending_member_round_trips_and_state_defaults_to_active() {
+        let mut cfg = Config::default();
+        cfg.recipients.push(Recipient::new("alice", "age1alice"));
+        cfg.recipients
+            .push(Recipient::pending("bob", "age1bob", "2026-06-27T00:00:00Z"));
+
+        let dir = assert_fs::TempDir::new().unwrap();
+        let path = cfg.save_to_dir(dir.path()).unwrap();
+
+        // Active state is omitted; pending state + timestamp are written.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("state: pending"));
+        assert!(raw.contains("requested_at: 2026-06-27T00:00:00Z"));
+        assert_eq!(
+            raw.matches("state:").count(),
+            1,
+            "active state must be omitted"
+        );
+
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(cfg, loaded);
+        assert!(!loaded.recipient("alice").unwrap().is_pending());
+        assert!(loaded.recipient("bob").unwrap().is_pending());
+    }
+
+    #[test]
+    fn resolved_request_ttl_parses_and_falls_back() {
+        let mut cfg = Config {
+            join_request_ttl: Some("2h".into()),
+            ..Config::default()
+        };
+        assert_eq!(cfg.resolved_request_ttl(), Duration::from_secs(7200));
+
+        // Unparseable or missing → 72h default.
+        cfg.join_request_ttl = Some("not-a-duration".into());
+        assert_eq!(cfg.resolved_request_ttl(), Duration::from_secs(72 * 3600));
+        cfg.join_request_ttl = None;
+        assert_eq!(cfg.resolved_request_ttl(), Duration::from_secs(72 * 3600));
     }
 
     #[test]

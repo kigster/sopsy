@@ -61,11 +61,22 @@ pub fn ensure_available() -> Result<()> {
 /// `AGE-PLUGIN-SE-...` identity line; the public key may also appear on stderr
 /// as `Public key: age1se1...`. Both stdout and stderr are parsed.
 pub fn generate_identity(access_control: Option<&str>) -> Result<EnclaveIdentity> {
+    let args: Vec<String> = access_control
+        .map(|value| vec![format!("--access-control={value}")])
+        .unwrap_or_default();
+    generate_identity_with_args(&args)
+}
+
+/// Generate a new Secure Enclave-backed identity, forwarding `extra_args`
+/// verbatim to `age-plugin-se keygen`.
+///
+/// This is the escape hatch behind `sopsy recipient keygen -- <age flags>`: it
+/// lets callers pass arbitrary plugin flags (e.g. `--access-control=...`) while
+/// still parsing the public key and identity out of the output.
+pub fn generate_identity_with_args(extra_args: &[String]) -> Result<EnclaveIdentity> {
     let mut command = Command::new(plugin_bin());
     command.arg("keygen");
-    if let Some(access_control) = access_control {
-        command.arg(format!("--access-control={access_control}"));
-    }
+    command.args(extra_args);
 
     let output = command.output()?;
     if !output.status.success() {
