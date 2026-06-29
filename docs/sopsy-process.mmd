@@ -1,0 +1,15 @@
+  flowchart LR
+      subgraph Plaintext["Plaintext (never committed)"]
+          env[".env<br/>KEY=value"]
+      end
+      subgraph Rules[".sops.yaml"]
+          cr["creation_rules<br/>path_regex → age recipients"]
+      end
+      subgraph Encrypted["Committed to Git"]
+          enc[".env.encrypted<br/>encrypted values + sops metadata"]
+      end
+
+      env -- "sops --encrypt --input-type dotenv" --> enc
+      cr -. supplies recipients .-> enc
+      enc -- "sops --decrypt (needs a private key)" --> view["plaintext in your editor"]
+      view -- "save → re-encrypt" --> enc

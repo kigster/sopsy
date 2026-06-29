@@ -1,0 +1,21 @@
+flowchart TB
+      subgraph Laptop["Developer's Mac"]
+          subgraph SE["Secure Enclave (hardware)"]
+              priv["🔒 Private key<br/>never leaves the chip<br/>gated by Touch ID"]
+          end
+          plugin["age-plugin-se"]
+          plugin -. references .-> priv
+      end
+
+      pub["📢 Public recipient<br/>age1se1…"]
+      priv -- derives --> pub
+
+      subgraph Repo["Git repository (shared)"]
+          sopsyaml[".sops.yaml<br/>age: age1se1…"]
+          sopsyyml[".sopsy.yml<br/>name + public key"]
+      end
+
+      pub -- "safe to commit" --> sopsyaml
+      pub -- "safe to commit" --> sopsyyml
+
+      priv -. "decrypt (Touch ID prompt)" .-> secrets[".env.encrypted"]

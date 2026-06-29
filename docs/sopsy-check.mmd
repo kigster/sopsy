@@ -1,0 +1,13 @@
+flowchart TD
+      start([sopsy check]) --> cfg{.sopsy.yml present?}
+      cfg -- no --> skip["warn: not sopsy-managed"] --> ok0([exit 0])
+      cfg -- yes --> i1["1 · .env not tracked by git"]
+      i1 --> i2["2 · .env is gitignored"]
+      i2 --> i3["3 · .sops.yaml valid + has creation_rules"]
+      i3 --> i4["4 · every encrypted file matches a creation rule"]
+      i4 --> i5["5 · no plaintext secrets tracked"]
+      i5 --> i6["6 · every encrypted file carries sops metadata"]
+      i6 --> i7["7 · a break-glass recipient is configured"]
+      i7 --> verdict{any failures?}
+      verdict -- no --> ok(["✔ all checks passed · exit 0"])
+      verdict -- yes --> fail(["✗ checks failed · exit 1"])
