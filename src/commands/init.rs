@@ -95,13 +95,16 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
     }
 
     // 8. Keep plaintext secrets out of git. `.env.*` is broad, so explicitly
-    //    un-ignore the two files we *do* want committed.
+    //    un-ignore the plaintext template and *all* encrypted artifacts — every
+    //    `*.encrypted` file (e.g. `.env.encrypted`, `.env.example.encrypted`,
+    //    `config/foo.encrypted`) is meant to be committed and must stay visible
+    //    to git, or membership changes can't re-key it.
     let mut gitignore_changed = false;
     for pattern in [
         ".env",
         ".env.*",
         "!.env.example",
-        "!.env.encrypted",
+        "!*.encrypted",
         "*.key",
         "*.pem",
         // Break-glass halves are written transiently and deleted after storage,

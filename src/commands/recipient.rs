@@ -595,40 +595,59 @@ fn updatekeys_file(file: &Path) -> Result<()> {
 
 /// Collect the sops-encrypted files in `repo` that need re-keying.
 ///
-/// Candidates come from `git ls-files` (tracked + untracked-not-ignored), so the
-/// scan is bounded to the repository's own content and respects `.gitignore` —
-/// it never walks into caches or `node_modules`, and never tries to read the
-/// entire filesystem when the repo root happens to be a huge directory. Each
-/// candidate must both match an `encrypted_globs` entry (the `.encrypted`
-/// convention) and actually contain the `ENC[` marker sops writes.
+/// The repo's `encrypted_globs` (from `.sopsy.yml`) are expanded against the
+/// working tree directly, so **every** matching artifact is found regardless of
+/// git status — a not-yet-committed or even `.gitignore`d `*.encrypted` still
+/// has to be re-keyed when membership changes, or the new member can't decrypt
+/// it. Expansion is bounded (see [`expand_glob`]): `*` never crosses `/`, so a
+/// glob like `*.encrypted` lists one directory, never a recursive walk of (say)
+/// `$HOME`. Each match must also carry the `ENC[` marker to count.
 fn collect_encrypted_files(repo: &Path, globs: &[String]) -> Result<Vec<PathBuf>> {
-    let mut found: Vec<PathBuf> = git::listed_files(repo)?
-        .into_iter()
-        .filter(|rel| matches_encrypted_glob(rel, globs))
-        .map(|rel| repo.join(rel))
-        .filter(|abs| is_encrypted_file(abs))
-        .collect();
+    let mut found = Vec::new();
+    for pattern in globs {
+        for path in expand_glob(repo, pattern) {
+            if path.is_file() && is_encrypted_file(&path) {
+                found.push(path);
+            }
+        }
+    }
     found.sort();
     found.dedup();
     Ok(found)
 }
 
-/// Whether `rel` (a repo-relative path) is named like an encrypted artifact.
-///
-/// A path matches when any glob matches its full relative path or its file name,
-/// or — as a backstop — when it ends in `.encrypted`. Matching the file name too
-/// lets a simple `*.encrypted` glob catch nested files like
-/// `config/db.encrypted` without needing a `**` pattern.
-fn matches_encrypted_glob(rel: &Path, globs: &[String]) -> bool {
-    let full = rel.to_string_lossy();
-    let base = rel
-        .file_name()
-        .map(|n| n.to_string_lossy())
-        .unwrap_or_default();
-    globs
-        .iter()
-        .any(|g| glob_match(g, &full) || glob_match(g, &base))
-        || rel.extension().is_some_and(|e| e == "encrypted")
+/// Expand a glob `pattern` against the filesystem under `repo`, one path segment
+/// at a time. A literal segment is joined without listing a directory; a segment
+/// containing `*`/`?` lists exactly its parent directory and keeps the matches.
+/// There is no `**`, and `*` never crosses `/`, so the work is bounded to the
+/// directories the pattern actually names — no recursive descent.
+fn expand_glob(repo: &Path, pattern: &str) -> Vec<PathBuf> {
+    let mut current = vec![repo.to_path_buf()];
+    for segment in pattern.split('/').filter(|s| !s.is_empty()) {
+        let mut next = Vec::new();
+        if segment.contains(['*', '?']) {
+            for dir in &current {
+                let Ok(entries) = std::fs::read_dir(dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    if glob_match(segment, &name.to_string_lossy()) {
+                        next.push(dir.join(&name));
+                    }
+                }
+            }
+        } else {
+            for dir in &current {
+                let candidate = dir.join(segment);
+                if candidate.exists() {
+                    next.push(candidate);
+                }
+            }
+        }
+        current = next;
+    }
+    current
 }
 
 /// Minimal glob matcher: `*` matches any run of characters except `/`, `?`
@@ -922,55 +941,63 @@ mod tests {
     }
 
     #[test]
-    fn matches_encrypted_glob_uses_globs_basename_and_extension() {
+    fn expand_glob_is_bounded_and_segment_wise() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        std::fs::write(repo.join(".env.encrypted"), "x").unwrap();
+        std::fs::create_dir(repo.join("config")).unwrap();
+        std::fs::write(repo.join("config/db.encrypted.yaml"), "x").unwrap();
+        std::fs::create_dir(repo.join("nested")).unwrap();
+        std::fs::write(repo.join("nested/deep.encrypted"), "x").unwrap();
+
+        // `*` stays within one directory level — it must NOT reach nested/.
+        let mut top = expand_glob(repo, "*.encrypted");
+        top.sort();
+        assert_eq!(top, vec![repo.join(".env.encrypted")]);
+
+        // A literal directory segment followed by a wildcard.
+        assert_eq!(
+            expand_glob(repo, "config/*.encrypted.yaml"),
+            vec![repo.join("config/db.encrypted.yaml")]
+        );
+
+        // A fully literal pattern just checks existence.
+        assert_eq!(
+            expand_glob(repo, ".env.encrypted"),
+            vec![repo.join(".env.encrypted")]
+        );
+        assert!(expand_glob(repo, "missing.encrypted").is_empty());
+    }
+
+    #[test]
+    fn collect_encrypted_files_finds_artifacts_regardless_of_git_status() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        // Dotfile artifact and a same-prefix one that a greedy `.env.*`
+        // .gitignore would have hidden — both must be found (the join/approve
+        // re-key bug). Detection is filesystem-based, so git status is irrelevant.
+        std::fs::write(repo.join(".env.encrypted"), "A=ENC[x]\n").unwrap();
+        std::fs::write(repo.join(".env.example.encrypted"), "B=ENC[y]\n").unwrap();
+        std::fs::write(repo.join("plain.env"), "A=b\n").unwrap();
+        std::fs::write(repo.join(".sops.yaml"), "ENC[ignored]\n").unwrap();
+        std::fs::create_dir(repo.join("config")).unwrap();
+        std::fs::write(repo.join("config/db.encrypted.yaml"), "k: ENC[z]\n").unwrap();
+        // A `*.encrypted` file with no ENC marker must be excluded.
+        std::fs::write(repo.join("decoy.encrypted"), "not really encrypted\n").unwrap();
+
         let globs = vec![
             "*.encrypted".to_string(),
             "config/*.encrypted.yaml".to_string(),
         ];
-        // Glob matches the basename of a nested file.
-        assert!(matches_encrypted_glob(
-            Path::new("nested/deep.encrypted"),
-            &globs
-        ));
-        // Full-path glob.
-        assert!(matches_encrypted_glob(
-            Path::new("config/db.encrypted.yaml"),
-            &globs
-        ));
-        // Extension backstop catches anything ending in `.encrypted`.
-        assert!(matches_encrypted_glob(Path::new("a/b/c.encrypted"), &[]));
-        // Plain files are not artifacts.
-        assert!(!matches_encrypted_glob(Path::new("plain.env"), &globs));
-    }
-
-    #[test]
-    fn collect_encrypted_files_is_bounded_to_git_and_globs() {
-        let dir = TempDir::new().unwrap();
-        let repo = dir.path();
-        std::process::Command::new("git")
-            .arg("init")
-            .current_dir(repo)
-            .output()
-            .expect("git must be installed");
-
-        std::fs::write(repo.join("top.encrypted"), "A=ENC[x]\n").unwrap();
-        std::fs::write(repo.join("plain.env"), "A=b\n").unwrap();
-        std::fs::write(repo.join(".sops.yaml"), "ENC[ignored]\n").unwrap();
-        std::fs::create_dir(repo.join("nested")).unwrap();
-        std::fs::write(repo.join("nested/deep.encrypted"), "B=ENC[y]\n").unwrap();
-        // A gitignored artifact must be skipped even though it ends in .encrypted.
-        std::fs::write(repo.join(".gitignore"), "secret.encrypted\n").unwrap();
-        std::fs::write(repo.join("secret.encrypted"), "D=ENC[w]\n").unwrap();
-
-        let globs = vec!["*.encrypted".to_string()];
         let found = collect_encrypted_files(repo, &globs).unwrap();
         assert_eq!(
             found,
             vec![
-                repo.join("nested/deep.encrypted"),
-                repo.join("top.encrypted")
+                repo.join(".env.encrypted"),
+                repo.join(".env.example.encrypted"),
+                repo.join("config/db.encrypted.yaml"),
             ],
-            "expected the two ENC artifacts; plain, .sops.yaml and gitignored files excluded"
+            "all ENC artifacts matching the globs; plain/.sops.yaml/decoy excluded"
         );
     }
 }
