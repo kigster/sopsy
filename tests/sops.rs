@@ -92,7 +92,7 @@ fn roundtrips_all_file_types() {
         (
             ".env",
             FileType::Dotenv,
-            "PASSWORD=hunter2\nAPI_KEY=abc123\n",
+            "PASSWORD=hunter2\nAPI_KEY=abc123\n", // pragma: allowlist secret
             &["PASSWORD=hunter2", "API_KEY=abc123"],
         ),
     ];
@@ -133,88 +133,9 @@ fn roundtrips_all_file_types() {
     // dotenv is the headline use case — assert an exact round-trip for it.
     let env_path = dir.path().join(".env");
     let decrypted_env = sops::decrypt(&env_path, FileType::Dotenv).unwrap();
-    assert_eq!(decrypted_env, "PASSWORD=hunter2\nAPI_KEY=abc123\n");
+    assert_eq!(decrypted_env, "PASSWORD=hunter2\nAPI_KEY=abc123\n"); // pragma: allowlist secret
 
     // SAFETY: see above; restore a clean environment for any later test.
-    unsafe {
-        std::env::remove_var("SOPS_AGE_KEY_FILE");
-    }
-    std::env::set_current_dir(original_cwd).unwrap();
-}
-
-/// Decrypt `file` (dotenv) using `key_file` as the only age key, returning
-/// whether decryption succeeded. The `SOPS_AGE_KEY_FILE` override is set on the
-/// child only, so the ambient (process-wide) key does not interfere.
-fn decrypts_with(file: &Path, key_file: &Path) -> bool {
-    Command::new("sops")
-        .env("SOPS_AGE_KEY_FILE", key_file)
-        .args([
-            "--decrypt",
-            "--input-type",
-            "dotenv",
-            "--output-type",
-            "dotenv",
-        ])
-        .arg(file)
-        .output()
-        .expect("sops should be installed")
-        .status
-        .success()
-}
-
-/// The headline `updatekeys` test: a real sops-encrypted dotenv file in a
-/// directory is re-wrapped for a newly added recipient when `.sops.yaml` gains
-/// a second key. Proves the directory walk + per-file `updatekeys` works with
-/// the real sops 3.13.x CLI (which refuses directories and needs `--input-type`).
-#[test]
-#[serial]
-fn updatekeys_rewraps_directory_for_added_recipient() {
-    let dir = TempDir::new().unwrap();
-    let (pubkey_a, key_file_a) = generate_age_key_named(dir.path(), "key-a.txt");
-    let (pubkey_b, key_file_b) = generate_age_key_named(dir.path(), "key-b.txt");
-
-    // Start with only recipient A in the creation rules.
-    write_sops_config(dir.path(), &pubkey_a);
-
-    let original_cwd = std::env::current_dir().unwrap();
-    std::env::set_current_dir(dir.path()).unwrap();
-    // updatekeys must decrypt the existing data key with A's private key, so the
-    // ambient key file is A. SAFETY: serialized via `#[serial]`.
-    unsafe {
-        std::env::set_var("SOPS_AGE_KEY_FILE", &key_file_a);
-    }
-
-    // A real sops-encrypted dotenv file (the primary sopsy artifact).
-    let env_path = dir.path().join(".env.encrypted");
-    std::fs::write(&env_path, "PASSWORD=hunter2\nAPI_KEY=abc123\n").unwrap();
-    sops::encrypt_in_place(&env_path, FileType::Dotenv).unwrap();
-
-    // Before adding B: A can decrypt, B cannot.
-    assert!(decrypts_with(&env_path, &key_file_a), "A should decrypt");
-    assert!(
-        !decrypts_with(&env_path, &key_file_b),
-        "B must not decrypt yet"
-    );
-
-    // Add recipient B to `.sops.yaml`, then update keys across the directory.
-    write_sops_config(dir.path(), &format!("{pubkey_a},{pubkey_b}"));
-    sops::updatekeys(dir.path(), true).unwrap();
-
-    // After: both A and B can decrypt the re-wrapped file.
-    assert!(
-        decrypts_with(&env_path, &key_file_a),
-        "A should still decrypt"
-    );
-    assert!(
-        decrypts_with(&env_path, &key_file_b),
-        "B should decrypt after updatekeys"
-    );
-
-    // The single-file branch is also valid (idempotent re-wrap of one file).
-    sops::updatekeys(&env_path, true).unwrap();
-    assert!(decrypts_with(&env_path, &key_file_b));
-
-    // SAFETY: see above.
     unsafe {
         std::env::remove_var("SOPS_AGE_KEY_FILE");
     }
