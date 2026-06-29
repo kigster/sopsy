@@ -507,7 +507,7 @@ fn approve_proceeds_without_timestamp_and_warns_on_no_age_rule() {
         approve::run(
             &test_ui(),
             &ApproveArgs {
-                name: "bob".into(),
+                names: vec!["bob".into()],
                 force: false,
                 no_updatekeys: false,
             },
@@ -533,7 +533,7 @@ fn approve_handles_unparseable_and_future_timestamps() {
         approve::run(
             &test_ui(),
             &ApproveArgs {
-                name: "bob".into(),
+                names: vec!["bob".into()],
                 force: false,
                 no_updatekeys: false,
             },
@@ -562,7 +562,7 @@ fn approve_handles_unparseable_and_future_timestamps() {
         approve::run(
             &test_ui(),
             &ApproveArgs {
-                name: "bob".into(),
+                names: vec!["bob".into()],
                 force: false,
                 no_updatekeys: false,
             },
@@ -587,7 +587,7 @@ fn approve_stale_request_with_force_proceeds() {
         approve::run(
             &test_ui(),
             &ApproveArgs {
-                name: "bob".into(),
+                names: vec!["bob".into()],
                 force: true,
                 no_updatekeys: false,
             },
@@ -618,7 +618,7 @@ fn approve_non_interactive_without_optin_errors_at_vouch() {
         let err = approve::run(
             &test_ui(),
             &ApproveArgs {
-                name: "bob".into(),
+                names: vec!["bob".into()],
                 force: false,
                 no_updatekeys: false,
             },
@@ -659,7 +659,7 @@ fn approve_rolls_back_when_reencryption_fails() {
     let err = approve::run(
         &test_ui(),
         &ApproveArgs {
-            name: "bob".into(),
+            names: vec!["bob".into()],
             force: false,
             no_updatekeys: false,
         },
@@ -772,7 +772,7 @@ fn approve_activates_pending_member_and_rekeys() {
     approve::run(
         &test_ui(),
         &ApproveArgs {
-            name: "bob".into(),
+            names: vec!["bob".into()],
             force: false,
             no_updatekeys: false,
         },
@@ -817,7 +817,7 @@ fn approve_rejects_stale_request() {
         let err = approve::run(
             &test_ui(),
             &ApproveArgs {
-                name: "bob".into(),
+                names: vec!["bob".into()],
                 force: false,
                 no_updatekeys: false,
             },
@@ -838,7 +838,7 @@ fn approve_unknown_and_already_active_error() {
         let ghost = approve::run(
             &test_ui(),
             &ApproveArgs {
-                name: "ghost".into(),
+                names: vec!["ghost".into()],
                 force: false,
                 no_updatekeys: false,
             },
@@ -850,13 +850,112 @@ fn approve_unknown_and_already_active_error() {
         let active = approve::run(
             &test_ui(),
             &ApproveArgs {
-                name: "alice".into(),
+                names: vec!["alice".into()],
                 force: false,
                 no_updatekeys: false,
             },
         )
         .unwrap_err();
         assert!(matches!(active, Error::Validation(m) if m.contains("already an active member")));
+    });
+}
+
+#[test]
+#[serial]
+fn approve_batch_marks_all_named_members_active() {
+    with_repo(|dir| {
+        set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+        // alice active; bob and colin both pending (two onboarding PRs merged).
+        let sopsy = "recipients:\n  - name: alice\n    public_key: age1alice\n  \
+            - name: bob\n    public_key: age1bob\n    state: pending\n  \
+            - name: colin\n    public_key: age1colin\n    state: pending\n";
+        flow_repo(dir, Some(sopsy), Some(SOPS_ALICE_ONLY));
+        approve::run(
+            &test_ui(),
+            &ApproveArgs {
+                names: vec!["bob".into(), "colin".into()],
+                force: false,
+                no_updatekeys: true,
+            },
+        )
+        .expect("batch approve should succeed");
+        let cfg = Config::load_from_dir(dir).unwrap();
+        assert_eq!(cfg.recipient("bob").unwrap().state, MemberState::Active);
+        assert_eq!(cfg.recipient("colin").unwrap().state, MemberState::Active);
+        set_env("SOPSY_ASSUME_YES", None);
+    });
+}
+
+#[test]
+#[serial]
+fn join_then_batch_approve_handles_multiword_names() {
+    with_repo(|dir| {
+        set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+        // Start from a repo where alice is already an active member.
+        flow_repo(dir, Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+
+        // Two engineers request access using their full names (quoted on the CLI).
+        for (name, key) in [
+            ("Konstantin Gredeskoul", "age1konstantin"),
+            ("Colin Powell", "age1colin"),
+        ] {
+            join::run(
+                &test_ui(),
+                &JoinArgs {
+                    name: name.into(),
+                    sopsy_file: None,
+                    public_key: Some(key.into()),
+                    age_args: vec![],
+                },
+            )
+            .expect("join with a multi-word name should succeed");
+        }
+        let cfg = Config::load_from_dir(dir).unwrap();
+        assert!(cfg.recipient("Konstantin Gredeskoul").unwrap().is_pending());
+        assert!(cfg.recipient("Colin Powell").unwrap().is_pending());
+
+        // An existing engineer approves both in one shot.
+        approve::run(
+            &test_ui(),
+            &ApproveArgs {
+                names: vec!["Konstantin Gredeskoul".into(), "Colin Powell".into()],
+                force: false,
+                no_updatekeys: true,
+            },
+        )
+        .expect("batch approve of multi-word names should succeed");
+
+        let cfg = Config::load_from_dir(dir).unwrap();
+        assert_eq!(
+            cfg.recipient("Konstantin Gredeskoul").unwrap().state,
+            MemberState::Active
+        );
+        assert_eq!(
+            cfg.recipient("Colin Powell").unwrap().state,
+            MemberState::Active
+        );
+        set_env("SOPSY_ASSUME_YES", None);
+    });
+}
+
+#[test]
+#[serial]
+fn approve_with_no_pending_members_errors() {
+    with_repo(|dir| {
+        // SOPSY_TWO has only active members; bare `approve` finds nothing to do.
+        flow_repo(dir, Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+        let err = approve::run(
+            &test_ui(),
+            &ApproveArgs {
+                names: vec![],
+                force: false,
+                no_updatekeys: true,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::Validation(m) if m.contains("no pending requests to approve"))
+        );
     });
 }
 

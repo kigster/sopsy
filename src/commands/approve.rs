@@ -19,106 +19,201 @@ use crate::commands::recipient::{
     ConfigSnapshot, SOPS_CONFIG_FILE_NAME, add_key_to_sops_yaml, assume_yes, current_repo_root,
     load_config, rewrap_error, run_updatekeys, sops_config_path,
 };
-use crate::config::{CONFIG_FILE_NAME, MemberState};
+use crate::config::{CONFIG_FILE_NAME, Config, MemberState, Recipient};
 use crate::error::{Error, Result};
 use crate::ui::Ui;
 
 /// Run `sopsy approve`.
+///
+/// Approves one, several, or — interactively — every pending member. Each member
+/// is resolved and vouched for *before* anything is written, then all approved
+/// keys are added and a single `sops updatekeys` re-wraps the secrets once for
+/// the whole batch — so the approved set lands together, or rolls back together.
+///
+/// With explicit names, each must resolve to a pending member and a declined
+/// vouch aborts the run (strict). With no names, every pending member is walked
+/// interactively and a declined or stale member is skipped, not fatal.
 pub fn run(ui: &Ui, args: &ApproveArgs) -> Result<()> {
     ui.header("sopsy approve — granting membership");
 
     let repo = current_repo_root()?;
     let mut config = load_config(&repo)?;
     let sops_config = sops_config_path(&repo)?;
+    let ttl = config.resolved_request_ttl();
 
-    let name = args.name.trim().to_string();
-    let member = config.recipient(&name).cloned().ok_or_else(|| {
-        Error::Validation(format!(
-            "no member named `{name}` — did they run `sopsy join`?"
-        ))
-    })?;
-    if !member.is_pending() {
-        return Err(Error::Validation(format!(
-            "`{name}` is already an active member"
-        )));
+    let interactive = args.names.is_empty();
+    let candidates = resolve_candidates(&config, &args.names, interactive)?;
+    if candidates.is_empty() {
+        return Err(Error::Validation(
+            "no pending requests to approve found".into(),
+        ));
     }
 
-    // 1. Freshness: reject stale requests unless --force.
-    check_freshness(
-        ui,
-        member.requested_at.as_deref(),
-        config.resolved_request_ttl(),
-        args.force,
-    )?;
+    // Freshness + vouch, per member. Vouching is a human trust decision that no
+    // crypto replaces, so it is never batched away.
+    let mut approved: Vec<Recipient> = Vec::new();
+    for member in &candidates {
+        if !check_freshness(
+            ui,
+            &member.name,
+            member.requested_at.as_deref(),
+            ttl,
+            args.force,
+            interactive,
+        )? {
+            continue;
+        }
+        if confirm_vouch(ui, &member.name, &member.public_key)? {
+            approved.push(member.clone());
+        } else if interactive {
+            ui.info(format!("skipped `{}`", member.name));
+        } else {
+            return Err(Error::Validation(
+                "approval cancelled — nothing changed".into(),
+            ));
+        }
+    }
+    if approved.is_empty() {
+        return Err(Error::Validation(
+            "nothing approved — no changes made".into(),
+        ));
+    }
 
-    // 2. Vouch for identity. This is the human trust anchor no crypto replaces.
-    confirm_vouch(ui, &name, &member.public_key)?;
-
-    // 3+4. Snapshot, mutate both files, re-key; roll back on failure.
+    // Snapshot once, mark every approved member active, add their keys, re-key once.
     let snapshot = ConfigSnapshot::capture(&repo, &sops_config);
+    let approved_names: Vec<String> = approved.iter().map(|m| m.name.clone()).collect();
 
-    for recipient in config.recipients.iter_mut() {
-        if recipient.name == name {
-            recipient.state = MemberState::Active;
-            recipient.requested_at = None;
+    for member in &approved {
+        for recipient in config.recipients.iter_mut() {
+            if recipient.name == member.name {
+                recipient.state = MemberState::Active;
+                recipient.requested_at = None;
+            }
         }
     }
     config.save_to_dir(&repo)?;
-    ui.success(format!("marked `{name}` active in {CONFIG_FILE_NAME}"));
+    let names = approved_names
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    ui.success(format!("marked {names} active in {CONFIG_FILE_NAME}"));
 
-    let modified = add_key_to_sops_yaml(&sops_config, &member.public_key)?;
-    if modified == 0 {
-        ui.warn(format!(
-            "no `age:` creation_rules matched in {SOPS_CONFIG_FILE_NAME}; left unchanged"
-        ));
-    } else {
-        ui.success(format!(
-            "added the key to {modified} creation rule(s) in {SOPS_CONFIG_FILE_NAME}"
-        ));
+    for member in &approved {
+        let modified = add_key_to_sops_yaml(&sops_config, &member.public_key)?;
+        if modified == 0 {
+            ui.warn(format!(
+                "no `age:` creation_rules matched in {SOPS_CONFIG_FILE_NAME}; left unchanged"
+            ));
+        } else {
+            ui.success(format!(
+                "added `{}`'s key to {modified} creation rule(s) in {SOPS_CONFIG_FILE_NAME}",
+                member.name
+            ));
+        }
     }
 
+    // A single re-wrap for the whole batch; roll the whole thing back on failure.
     if let Err(err) = run_updatekeys(ui, &repo, args.no_updatekeys) {
         snapshot.restore()?;
-        ui.warn(format!("rolled back — `{name}` was not approved"));
+        ui.warn(format!("rolled back — {names} were not approved"));
         return Err(rewrap_error(err));
     }
 
-    ui.success(format!(
-        "`{name}` approved and added to all encrypted files"
-    ));
-    print_next_steps(ui, &name);
+    ui.success(format!("{names} approved and added to all encrypted files"));
+    print_next_steps(ui, &approved_names);
     Ok(())
 }
 
-/// Warn/refuse based on the age of the join request.
-fn check_freshness(ui: &Ui, requested_at: Option<&str>, ttl: Duration, force: bool) -> Result<()> {
+/// Resolve the candidate set of pending members. With no names (interactive),
+/// every pending member is a candidate. With explicit names, each must resolve
+/// to a pending member — unknown or already-active is an error — and duplicates
+/// are collapsed so `approve annie annie` is harmless.
+fn resolve_candidates(
+    config: &Config,
+    names: &[String],
+    interactive: bool,
+) -> Result<Vec<Recipient>> {
+    if interactive {
+        return Ok(config
+            .recipients
+            .iter()
+            .filter(|recipient| recipient.is_pending())
+            .cloned()
+            .collect());
+    }
+
+    let mut out = Vec::new();
+    let mut seen = Vec::new();
+    for raw in names {
+        let name = raw.trim().to_string();
+        if name.is_empty() || seen.contains(&name) {
+            continue;
+        }
+        let member = config.recipient(&name).cloned().ok_or_else(|| {
+            Error::Validation(format!(
+                "no member named `{name}` — did they run `sopsy join`?"
+            ))
+        })?;
+        if !member.is_pending() {
+            return Err(Error::Validation(format!(
+                "`{name}` is already an active member"
+            )));
+        }
+        seen.push(name);
+        out.push(member);
+    }
+    Ok(out)
+}
+
+/// Log a request's age and decide whether to proceed with it. Returns `Ok(false)`
+/// only in interactive mode for a stale request (it is skipped); in strict mode a
+/// stale request without `--force` is a hard error.
+fn check_freshness(
+    ui: &Ui,
+    name: &str,
+    requested_at: Option<&str>,
+    ttl: Duration,
+    force: bool,
+    interactive: bool,
+) -> Result<bool> {
     let Some(requested_at) = requested_at else {
-        ui.warn("request has no timestamp; cannot verify freshness");
-        return Ok(());
+        ui.warn(format!(
+            "`{name}` request has no timestamp; cannot verify freshness"
+        ));
+        return Ok(true);
     };
 
     match request_age(requested_at) {
         Ok(age) => {
             ui.info(format!(
-                "request submitted {} ago",
+                "`{name}` requested {} ago",
                 humantime::format_duration(Duration::from_secs(age.as_secs()))
             ));
             if age > ttl && !force {
+                if interactive {
+                    ui.warn(format!(
+                        "`{name}` request is stale; skipping (pass --force to approve stale requests)"
+                    ));
+                    return Ok(false);
+                }
                 return Err(Error::Validation(format!(
-                    "this request is older than the allowed window ({}); ask them to re-run \
+                    "`{name}`'s request is older than the allowed window ({}); ask them to re-run \
                      `sopsy join`, or pass --force to approve anyway",
                     humantime::format_duration(ttl)
                 )));
             }
             if age > ttl {
-                ui.warn("request is stale, but --force was given; approving anyway");
+                ui.warn(format!(
+                    "`{name}` request is stale, but --force was given; approving anyway"
+                ));
             }
         }
         Err(_) => ui.warn(format!(
             "could not parse request timestamp `{requested_at}`; proceeding"
         )),
     }
-    Ok(())
+    Ok(true)
 }
 
 /// How long ago `requested_at` (RFC3339) was, relative to now.
@@ -131,8 +226,10 @@ fn request_age(requested_at: &str) -> Result<Duration> {
         .or(Ok(Duration::ZERO))
 }
 
-/// Ask the approver to vouch that the key belongs to the named person.
-fn confirm_vouch(ui: &Ui, name: &str, public_key: &str) -> Result<()> {
+/// Ask the approver to vouch that the key belongs to the named person, returning
+/// whether they did. `SOPSY_ASSUME_YES` auto-vouches; a non-interactive terminal
+/// without it is an error (there is no safe way to vouch unattended).
+fn confirm_vouch(ui: &Ui, name: &str, public_key: &str) -> Result<bool> {
     ui.header("Verify before you vouch");
     ui.info(format!("name: {name}"));
     ui.info(format!("key:  {public_key}"));
@@ -140,7 +237,7 @@ fn confirm_vouch(ui: &Ui, name: &str, public_key: &str) -> Result<()> {
 
     if assume_yes() {
         ui.info("SOPSY_ASSUME_YES set — vouching automatically.");
-        return Ok(());
+        return Ok(true);
     }
     if !ui.is_interactive() {
         return Err(Error::NonInteractive {
@@ -148,28 +245,23 @@ fn confirm_vouch(ui: &Ui, name: &str, public_key: &str) -> Result<()> {
             flag: "an interactive terminal (or set SOPSY_ASSUME_YES for automation)".to_string(),
         });
     }
-    let vouched = ui.confirm(
+    ui.confirm(
         &format!("Do you vouch that this key belongs to `{name}`?"),
         "--non-interactive",
         false,
-    )?;
-    if !vouched {
-        return Err(Error::Validation(
-            "approval cancelled — nothing changed".into(),
-        ));
-    }
-    Ok(())
+    )
 }
 
-/// Print what the approver does next, and what the newcomer does after merge.
-fn print_next_steps(ui: &Ui, name: &str) {
+/// Print what the approver does next, and what the newcomer(s) do after merge.
+fn print_next_steps(ui: &Ui, names: &[String]) {
+    let joined = names.join(", ");
     ui.header("Next steps");
     ui.info("You (the approver):");
     ui.info(format!(
-        "  1. Commit the changes:  git add -A && git commit -m \"approve: {name}\""
+        "  1. Commit the changes:  git add -A && git commit -m \"approve: {joined}\""
     ));
     ui.info("  2. Push to the PR branch and merge it (rebase first if main moved).");
     ui.info(format!(
-        "{name} then pulls main and can `sopsy edit`/`sopsy decrypt` — Touch ID unlocks it."
+        "{joined} then pull main and can `sopsy edit`/`sopsy decrypt` — Touch ID unlocks it."
     ));
 }

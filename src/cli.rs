@@ -77,6 +77,7 @@ pub enum Command {
     Edit(EditArgs),
 
     /// Request membership: generate an identity and record a pending entry.
+    #[command(visible_alias = "request-access")]
     Join(JoinArgs),
 
     /// Approve a pending member: re-key secrets so they can decrypt.
@@ -175,10 +176,13 @@ pub struct JoinArgs {
 /// Arguments for `sopsy approve`.
 #[derive(Debug, Args)]
 pub struct ApproveArgs {
-    /// The pending member to approve.
-    pub name: String,
+    /// The pending member(s) to approve. Pass several to approve them together
+    /// and re-key once: `sopsy approve annie colin`. With no names, walk every
+    /// pending member interactively and approve the ones you confirm.
+    #[arg(num_args = 0..)]
+    pub names: Vec<String>,
 
-    /// Approve even if the join request is older than the configured window.
+    /// Approve even if a join request is older than the configured window.
     #[arg(long)]
     pub force: bool,
 
@@ -388,5 +392,47 @@ mod tests {
     fn yes_alias_enables_non_interactive() {
         let cli = Cli::try_parse_from(["sopsy", "-y", "doctor"]).unwrap();
         assert!(cli.global.non_interactive);
+    }
+
+    #[test]
+    fn request_access_is_an_alias_for_join() {
+        let cli = Cli::try_parse_from(["sopsy", "request-access", "annie"]).unwrap();
+        match cli.command {
+            Command::Join(args) => assert_eq!(args.name, "annie"),
+            _ => panic!("expected join"),
+        }
+    }
+
+    #[test]
+    fn approve_accepts_multiple_names() {
+        let cli = Cli::try_parse_from(["sopsy", "approve", "annie", "colin"]).unwrap();
+        match cli.command {
+            Command::Approve(args) => assert_eq!(args.names, ["annie", "colin"]),
+            _ => panic!("expected approve"),
+        }
+    }
+
+    #[test]
+    fn approve_accepts_no_names_for_interactive_mode() {
+        let cli = Cli::try_parse_from(["sopsy", "approve"]).unwrap();
+        match cli.command {
+            Command::Approve(args) => assert!(args.names.is_empty()),
+            _ => panic!("expected approve"),
+        }
+    }
+
+    #[test]
+    fn approve_keeps_multiword_names_intact() {
+        // The shell delivers each quoted name as one argv element, so spaces in a
+        // name must survive as a single positional, not split into extra names.
+        let cli =
+            Cli::try_parse_from(["sopsy", "approve", "Konstantin Gredeskoul", "Colin Powell"])
+                .unwrap();
+        match cli.command {
+            Command::Approve(args) => {
+                assert_eq!(args.names, ["Konstantin Gredeskoul", "Colin Powell"]);
+            }
+            _ => panic!("expected approve"),
+        }
     }
 }
