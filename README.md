@@ -277,33 +277,26 @@ flowchart TD
 ```mermaid
 sequenceDiagram
     actor Dev as Developer
-    participant Sopsy as sopsy init
+    participant Sopsy as sopsy
     participant Git as git
     participant SE as age-plugin-se
     participant Sops as sops
     participant FS as Repo files
 
-    Dev->>Sopsy: sopsy init
-    Sopsy->>Git: rev-parse --show-toplevel
-    Git-->>Sopsy: repo root (or error)
-    Sopsy->>Sops: ensure `sops` on PATH
+    Dev->>Sopsy: init
+    Sopsy->>Git: find repo root
     alt --public-key supplied
         Sopsy->>Sopsy: use existing age recipient
     else generate identity (default)
         Sopsy->>SE: age-plugin-se keygen
         SE-->>Sopsy: public key age1se1… (private key stays in Enclave)
     end
-    Sopsy->>Dev: print public recipient (animated)
-    Sopsy->>FS: write .sops.yaml creation rules
-    Sopsy->>FS: write .env.example
-    Sopsy->>FS: seed .env.encrypted (from .env or .env.example)
-    Sopsy->>Sops: --encrypt --in-place .env.encrypted (dotenv)
-    Sops-->>FS: encrypted .env.encrypted
-    Sopsy->>FS: update .gitignore (ignore plaintext secrets)
-    Sopsy->>FS: write .sopsy.yml (recipients, sops version)
+    Sopsy->>FS: scaffold .sops.yaml, .env.example, .sopsy.yml, .gitignore
+    Sopsy->>Sops: encrypt .env.encrypted (dotenv)
+    Sops-->>FS: write encrypted .env.encrypted
     opt break-glass (prompted, or --break-glass)
-        Sopsy->>Dev: generate portable key, "copy to 1Password", wait for ENTER
-        Sopsy->>FS: delete local key files; register break-glass + re-key
+        Sopsy->>Dev: generate portable key, copy to 1Password, wait for ENTER
+        Sopsy->>FS: delete local key files, register break-glass, re-key
     end
     Sopsy->>Dev: health summary
 ```
