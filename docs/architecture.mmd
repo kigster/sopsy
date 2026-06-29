@@ -1,0 +1,52 @@
+  flowchart TD
+      subgraph Binary
+          main["main.rs<br/>ExitCode mapping"]
+      end
+      subgraph Library["sopsy crate (lib.rs::run)"]
+          cli["cli.rs<br/>clap parser + flags"]
+          ui["ui.rs<br/>color, spinners, prompts"]
+          config["config.rs<br/>.sopsy.yml model"]
+          error["error.rs<br/>Error / Result"]
+
+          subgraph Commands["commands/"]
+              init["init"]
+              doctor["doctor"]
+              edit["edit"]
+              join["join"]
+              approve["approve"]
+              recipient["recipient<br/>add / remove / list<br/>keygen / break-glass"]
+              check["check"]
+          end
+
+          subgraph Helpers["external-tool wrappers"]
+              sops["sops/<br/>encrypt, decrypt, edit, updatekeys"]
+              enclave["enclave/<br/>age-plugin-se keygen"]
+              age["age<br/>age-keygen (portable keys)"]
+              git["git/<br/>repo root, tracked, ignored"]
+          end
+      end
+
+      subgraph External["External tools"]
+          sopsbin([sops])
+          agebin([age / age-keygen])
+          sebin([age-plugin-se])
+          gitbin([git])
+      end
+
+      main --> cli
+      cli --> Commands
+      Commands --> ui
+      Commands --> config
+      Commands --> error
+      init --> sops & enclave & git
+      doctor --> git
+      edit --> sops
+      join --> enclave & git
+      approve --> sops & git
+      recipient --> sops & enclave & age & git
+      check --> git & config
+      sops --> sopsbin
+      sopsbin --> agebin
+      enclave --> sebin
+      age --> agebin
+      git --> gitbin

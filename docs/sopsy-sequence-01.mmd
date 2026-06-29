@@ -1,0 +1,24 @@
+sequenceDiagram
+    actor Dev as Developer
+    participant Sopsy as sopsy
+    participant Git as git
+    participant SE as age-plugin-se
+    participant Sops as sops
+    participant FS as Repo files
+
+    Dev->>Sopsy: init
+    Sopsy->>Git: find repo root
+    alt --public-key supplied
+        Sopsy->>Sopsy: use existing age recipient
+    else generate identity (default)
+        Sopsy->>SE: age-plugin-se keygen
+        SE-->>Sopsy: public key age1se1… (private key stays in Enclave)
+    end
+    Sopsy->>FS: scaffold .sops.yaml, .env.example, .sopsy.yml, .gitignore
+    Sopsy->>Sops: encrypt .env.encrypted (dotenv)
+    Sops-->>FS: write encrypted .env.encrypted
+    opt break-glass (prompted, or --break-glass)
+        Sopsy->>Dev: generate portable key, copy to 1Password, wait for ENTER
+        Sopsy->>FS: delete local key files, register break-glass, re-key
+    end
+    Sopsy->>Dev: health summary
