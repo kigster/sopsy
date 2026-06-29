@@ -645,7 +645,7 @@ fn approve_rolls_back_when_reencryption_fails() {
         Some(&sopsy_with_pending_bob("")),
         Some(SOPS_ALICE_ONLY),
     );
-    std::fs::write(dir.path().join("secret.enc"), "FOO=ENC[x]\n").unwrap();
+    std::fs::write(dir.path().join("secret.encrypted"), "FOO=ENC[x]\n").unwrap();
     set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
 
     let fake = dir.path().join("fake-sops.sh");
@@ -1484,7 +1484,7 @@ fn updatekeys_failure_surfaces_process_error() {
     let dir = TempDir::new().unwrap();
     flow_repo(dir.path(), Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
     // An encrypted file so `run_updatekeys` actually invokes (the fake) sops.
-    std::fs::write(dir.path().join("secret.enc"), "FOO=ENC[x]\n").unwrap();
+    std::fs::write(dir.path().join("secret.encrypted"), "FOO=ENC[x]\n").unwrap();
 
     // Fake `sops` that always fails.
     let fake = dir.path().join("fake-sops.sh");

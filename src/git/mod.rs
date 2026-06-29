@@ -62,6 +62,34 @@ pub fn tracked_files(repo: &Path) -> Result<Vec<PathBuf>> {
         .collect())
 }
 
+/// List files git considers part of the repository: tracked files plus
+/// untracked files that are not ignored.
+///
+/// Runs `git -C <repo> ls-files --cached --others --exclude-standard`, which
+/// respects `.gitignore`, so caches, `node_modules`, build artifacts and the
+/// like are skipped. Returns one [`PathBuf`] per path, relative to `repo`. This
+/// is what bounds sopsy's "find the encrypted files" scan to the repo's own
+/// content instead of walking the entire filesystem subtree (which, when the
+/// repo root is e.g. `$HOME`, never finishes).
+pub fn listed_files(repo: &Path) -> Result<Vec<PathBuf>> {
+    let output = git(
+        repo,
+        &["ls-files", "--cached", "--others", "--exclude-standard"],
+    )?;
+    if !output.status.success() {
+        return Err(Error::ProcessFailed {
+            tool: GIT_BIN.to_string(),
+            code: output.status.code().unwrap_or(-1),
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .collect())
+}
+
 /// Report whether `path` is tracked by git.
 ///
 /// Runs `git -C <repo> ls-files --error-unmatch <path>`: exit 0 means tracked,

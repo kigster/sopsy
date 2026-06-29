@@ -541,11 +541,19 @@ pub(crate) fn run_updatekeys(ui: &Ui, repo: &Path, skip: bool) -> Result<()> {
         ui.info("skipping re-encryption (`--no-updatekeys`)");
         return Ok(());
     }
-    let files = collect_encrypted_files(repo)?;
+    // Bound the scan to files git knows about (tracked + untracked-not-ignored),
+    // filtered by the repo's encrypted globs. Falls back to the built-in default
+    // globs when `.sopsy.yml` is absent or unreadable (e.g. during `init`,
+    // before it is written).
+    let globs = load_config(repo)
+        .map(|c| c.encrypted_globs)
+        .unwrap_or_else(|_| Config::default().encrypted_globs);
+    let files = collect_encrypted_files(repo, &globs)?;
     if files.is_empty() {
         ui.info("no encrypted files found to re-encrypt");
         return Ok(());
     }
+    ui.info("re-encrypting secrets for the updated recipient set (Touch ID may prompt)…");
     for file in &files {
         updatekeys_file(file)?;
     }
@@ -561,7 +569,9 @@ pub(crate) fn run_updatekeys(ui: &Ui, repo: &Path, skip: bool) -> Result<()> {
 fn sops_command() -> Command {
     let bin =
         std::env::var_os(sops::SOPS_BIN_ENV).unwrap_or_else(|| OsString::from(sops::SOPS_BIN));
-    Command::new(bin)
+    let mut command = Command::new(bin);
+    crate::keystore::configure_sops_env(&mut command);
+    command
 }
 
 /// Run `sops updatekeys -y --input-type T <file>` for a single file.
@@ -583,31 +593,76 @@ fn updatekeys_file(file: &Path) -> Result<()> {
     })
 }
 
-/// Recursively collect sops-encrypted files under `repo`.
+/// Collect the sops-encrypted files in `repo` that need re-keying.
 ///
-/// A file is considered encrypted if it contains the `ENC[` marker that sops
-/// writes around every encrypted value. The `.git` directory and `.sops.yaml`
-/// itself are skipped.
-fn collect_encrypted_files(repo: &Path) -> Result<Vec<PathBuf>> {
-    let mut found = Vec::new();
-    let mut stack = vec![repo.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            let file_type = entry.file_type()?;
-            if file_type.is_dir() {
-                if path.file_name().is_some_and(|n| n == ".git") {
-                    continue;
-                }
-                stack.push(path);
-            } else if file_type.is_file() && is_encrypted_file(&path) {
-                found.push(path);
+/// Candidates come from `git ls-files` (tracked + untracked-not-ignored), so the
+/// scan is bounded to the repository's own content and respects `.gitignore` —
+/// it never walks into caches or `node_modules`, and never tries to read the
+/// entire filesystem when the repo root happens to be a huge directory. Each
+/// candidate must both match an `encrypted_globs` entry (the `.encrypted`
+/// convention) and actually contain the `ENC[` marker sops writes.
+fn collect_encrypted_files(repo: &Path, globs: &[String]) -> Result<Vec<PathBuf>> {
+    let mut found: Vec<PathBuf> = git::listed_files(repo)?
+        .into_iter()
+        .filter(|rel| matches_encrypted_glob(rel, globs))
+        .map(|rel| repo.join(rel))
+        .filter(|abs| is_encrypted_file(abs))
+        .collect();
+    found.sort();
+    found.dedup();
+    Ok(found)
+}
+
+/// Whether `rel` (a repo-relative path) is named like an encrypted artifact.
+///
+/// A path matches when any glob matches its full relative path or its file name,
+/// or — as a backstop — when it ends in `.encrypted`. Matching the file name too
+/// lets a simple `*.encrypted` glob catch nested files like
+/// `config/db.encrypted` without needing a `**` pattern.
+fn matches_encrypted_glob(rel: &Path, globs: &[String]) -> bool {
+    let full = rel.to_string_lossy();
+    let base = rel
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
+    globs
+        .iter()
+        .any(|g| glob_match(g, &full) || glob_match(g, &base))
+        || rel.extension().is_some_and(|e| e == "encrypted")
+}
+
+/// Minimal glob matcher: `*` matches any run of characters except `/`, `?`
+/// matches a single non-`/` character, everything else is literal. This avoids
+/// a glob-crate dependency; the encrypted-artifact patterns never need `**`.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    let (mut star, mut resume) = (None, 0usize);
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' && t[ti] != '/' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            resume = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            // Backtrack: let the last `*` consume one more char — but never `/`.
+            if t[resume] == '/' {
+                return false;
             }
+            pi = s + 1;
+            resume += 1;
+            ti = resume;
+        } else {
+            return false;
         }
     }
-    found.sort();
-    Ok(found)
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
 }
 
 /// Whether `path` looks like a sops-encrypted file (ignores `.sops.yaml`).
@@ -853,26 +908,69 @@ mod tests {
     }
 
     #[test]
-    fn collect_encrypted_files_walks_recursively_and_skips_git() {
+    fn glob_match_handles_stars_and_slashes() {
+        assert!(glob_match("*.encrypted", "deep.encrypted"));
+        assert!(glob_match(".env.encrypted", ".env.encrypted"));
+        assert!(glob_match(
+            "config/*.encrypted.yaml",
+            "config/db.encrypted.yaml"
+        ));
+        // `*` must not cross a path separator.
+        assert!(!glob_match("*.encrypted", "nested/deep.encrypted"));
+        assert!(!glob_match("*.encrypted", "deep.txt"));
+        assert!(!glob_match("config/*.yaml", "config/sub/db.yaml"));
+    }
+
+    #[test]
+    fn matches_encrypted_glob_uses_globs_basename_and_extension() {
+        let globs = vec![
+            "*.encrypted".to_string(),
+            "config/*.encrypted.yaml".to_string(),
+        ];
+        // Glob matches the basename of a nested file.
+        assert!(matches_encrypted_glob(
+            Path::new("nested/deep.encrypted"),
+            &globs
+        ));
+        // Full-path glob.
+        assert!(matches_encrypted_glob(
+            Path::new("config/db.encrypted.yaml"),
+            &globs
+        ));
+        // Extension backstop catches anything ending in `.encrypted`.
+        assert!(matches_encrypted_glob(Path::new("a/b/c.encrypted"), &[]));
+        // Plain files are not artifacts.
+        assert!(!matches_encrypted_glob(Path::new("plain.env"), &globs));
+    }
+
+    #[test]
+    fn collect_encrypted_files_is_bounded_to_git_and_globs() {
         let dir = TempDir::new().unwrap();
         let repo = dir.path();
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(repo)
+            .output()
+            .expect("git must be installed");
+
         std::fs::write(repo.join("top.encrypted"), "A=ENC[x]\n").unwrap();
         std::fs::write(repo.join("plain.env"), "A=b\n").unwrap();
         std::fs::write(repo.join(".sops.yaml"), "ENC[ignored]\n").unwrap();
         std::fs::create_dir(repo.join("nested")).unwrap();
         std::fs::write(repo.join("nested/deep.encrypted"), "B=ENC[y]\n").unwrap();
-        // A `.git` directory whose contents must be ignored.
-        std::fs::create_dir(repo.join(".git")).unwrap();
-        std::fs::write(repo.join(".git/obj.encrypted"), "C=ENC[z]\n").unwrap();
+        // A gitignored artifact must be skipped even though it ends in .encrypted.
+        std::fs::write(repo.join(".gitignore"), "secret.encrypted\n").unwrap();
+        std::fs::write(repo.join("secret.encrypted"), "D=ENC[w]\n").unwrap();
 
-        let found = collect_encrypted_files(repo).unwrap();
+        let globs = vec!["*.encrypted".to_string()];
+        let found = collect_encrypted_files(repo, &globs).unwrap();
         assert_eq!(
             found,
             vec![
                 repo.join("nested/deep.encrypted"),
                 repo.join("top.encrypted")
             ],
-            "expected the two ENC artifacts, sorted, with .git and .sops.yaml excluded"
+            "expected the two ENC artifacts; plain, .sops.yaml and gitignored files excluded"
         );
     }
 }

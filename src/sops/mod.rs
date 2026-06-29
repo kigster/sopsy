@@ -168,6 +168,7 @@ pub fn ensure_available() -> Result<()> {
 /// `Some`, the `EDITOR` environment variable is set for the child process.
 pub fn edit(file: &Path, editor: Option<&str>, sops_args: &[String]) -> Result<()> {
     let mut command = Command::new(sops_bin());
+    crate::keystore::configure_sops_env(&mut command);
     if let Some(editor) = editor {
         command.env("EDITOR", editor);
     }
@@ -194,7 +195,9 @@ pub fn edit(file: &Path, editor: Option<&str>, sops_args: &[String]) -> Result<(
 /// relying on `.sops.yaml` creation rules to supply the recipients.
 pub fn encrypt_in_place(file: &Path, file_type: FileType) -> Result<()> {
     let ty = file_type.as_sops_type();
-    let output = Command::new(sops_bin())
+    let mut command = Command::new(sops_bin());
+    crate::keystore::configure_sops_env(&mut command);
+    let output = command
         .args(["--encrypt", "--input-type", ty, "--output-type", ty])
         .arg("--in-place")
         .arg(file)
@@ -215,7 +218,9 @@ pub fn encrypt_to_string(
     filename_override: &Path,
 ) -> Result<String> {
     let ty = file_type.as_sops_type();
-    let output = Command::new(sops_bin())
+    let mut command = Command::new(sops_bin());
+    crate::keystore::configure_sops_env(&mut command);
+    let output = command
         .args(["--encrypt", "--input-type", ty, "--output-type", ty])
         .arg("--filename-override")
         .arg(filename_override)
@@ -231,7 +236,9 @@ pub fn encrypt_to_string(
 /// stdout as a UTF-8 string.
 pub fn decrypt(file: &Path, file_type: FileType) -> Result<String> {
     let ty = file_type.as_sops_type();
-    let output = Command::new(sops_bin())
+    let mut command = Command::new(sops_bin());
+    crate::keystore::configure_sops_env(&mut command);
+    let output = command
         .args(["--decrypt", "--input-type", ty, "--output-type", ty])
         .arg(file)
         .output()?;
@@ -271,6 +278,7 @@ pub fn updatekeys(dir_or_path: &Path, assume_yes: bool) -> Result<()> {
 fn updatekeys_file(file: &Path, assume_yes: bool) -> Result<()> {
     let ty = FileType::from_path(file).as_sops_type();
     let mut command = Command::new(sops_bin());
+    crate::keystore::configure_sops_env(&mut command);
     command.arg("updatekeys");
     if assume_yes {
         command.arg("-y");
