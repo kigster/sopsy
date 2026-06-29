@@ -888,6 +888,80 @@ fn approve_batch_marks_all_named_members_active() {
 
 #[test]
 #[serial]
+fn approve_interactive_approves_every_pending_member() {
+    with_repo(|dir| {
+        set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+        let sopsy = "recipients:\n  - name: alice\n    public_key: age1alice\n  \
+            - name: bob\n    public_key: age1bob\n    state: pending\n  \
+            - name: colin\n    public_key: age1colin\n    state: pending\n";
+        flow_repo(dir, Some(sopsy), Some(SOPS_ALICE_ONLY));
+        // No names => walk the whole pending queue and approve each.
+        approve::run(
+            &test_ui(),
+            &ApproveArgs {
+                names: vec![],
+                force: false,
+                no_updatekeys: true,
+            },
+        )
+        .expect("interactive approve of all pending should succeed");
+        let cfg = Config::load_from_dir(dir).unwrap();
+        assert_eq!(cfg.recipient("bob").unwrap().state, MemberState::Active);
+        assert_eq!(cfg.recipient("colin").unwrap().state, MemberState::Active);
+        set_env("SOPSY_ASSUME_YES", None);
+    });
+}
+
+#[test]
+#[serial]
+fn approve_interactive_skips_stale_and_errors_when_nothing_approved() {
+    with_repo(|dir| {
+        // bob's request is far older than the 1h window; with no --force the
+        // interactive walk skips him, leaving nothing to approve.
+        let sopsy = "recipients:\n  - name: alice\n    public_key: age1alice\n  \
+            - name: bob\n    public_key: age1bob\n    state: pending\n    \
+            requested_at: 2020-01-01T00:00:00Z\njoin_request_ttl: 1h\n";
+        flow_repo(dir, Some(sopsy), Some(SOPS_ALICE_ONLY));
+        let err = approve::run(
+            &test_ui(),
+            &ApproveArgs {
+                names: vec![],
+                force: false,
+                no_updatekeys: true,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, Error::Validation(m) if m.contains("nothing approved")));
+        // bob stays pending; nothing was written.
+        let cfg = Config::load_from_dir(dir).unwrap();
+        assert_eq!(cfg.recipient("bob").unwrap().state, MemberState::Pending);
+    });
+}
+
+#[test]
+#[serial]
+fn approve_deduplicates_repeated_names() {
+    with_repo(|dir| {
+        set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+        flow_repo(dir, Some(&sopsy_with_pending_bob("")), Some(SOPS_ALICE_ONLY));
+        // The same name passed twice collapses to a single approval.
+        approve::run(
+            &test_ui(),
+            &ApproveArgs {
+                names: vec!["bob".into(), "bob".into()],
+                force: false,
+                no_updatekeys: true,
+            },
+        )
+        .expect("repeated names should dedupe and succeed");
+        let cfg = Config::load_from_dir(dir).unwrap();
+        assert_eq!(cfg.recipient("bob").unwrap().state, MemberState::Active);
+        set_env("SOPSY_ASSUME_YES", None);
+    });
+}
+
+#[test]
+#[serial]
 fn join_then_batch_approve_handles_multiword_names() {
     with_repo(|dir| {
         set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));

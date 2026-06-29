@@ -397,28 +397,19 @@ mod tests {
     #[test]
     fn request_access_is_an_alias_for_join() {
         let cli = Cli::try_parse_from(["sopsy", "request-access", "annie"]).unwrap();
-        match cli.command {
-            Command::Join(args) => assert_eq!(args.name, "annie"),
-            _ => panic!("expected join"),
-        }
+        assert!(matches!(cli.command, Command::Join(args) if args.name == "annie"));
     }
 
     #[test]
     fn approve_accepts_multiple_names() {
         let cli = Cli::try_parse_from(["sopsy", "approve", "annie", "colin"]).unwrap();
-        match cli.command {
-            Command::Approve(args) => assert_eq!(args.names, ["annie", "colin"]),
-            _ => panic!("expected approve"),
-        }
+        assert!(matches!(cli.command, Command::Approve(args) if args.names == ["annie", "colin"]));
     }
 
     #[test]
     fn approve_accepts_no_names_for_interactive_mode() {
         let cli = Cli::try_parse_from(["sopsy", "approve"]).unwrap();
-        match cli.command {
-            Command::Approve(args) => assert!(args.names.is_empty()),
-            _ => panic!("expected approve"),
-        }
+        assert!(matches!(cli.command, Command::Approve(args) if args.names.is_empty()));
     }
 
     #[test]
@@ -428,11 +419,9 @@ mod tests {
         let cli =
             Cli::try_parse_from(["sopsy", "approve", "Konstantin Gredeskoul", "Colin Powell"])
                 .unwrap();
-        match cli.command {
-            Command::Approve(args) => {
-                assert_eq!(args.names, ["Konstantin Gredeskoul", "Colin Powell"]);
-            }
-            _ => panic!("expected approve"),
-        }
+        assert!(matches!(
+            cli.command,
+            Command::Approve(args) if args.names == ["Konstantin Gredeskoul", "Colin Powell"]
+        ));
     }
 }
