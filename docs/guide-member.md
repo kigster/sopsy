@@ -43,9 +43,12 @@ flowchart LR
 Install the toolchain and sopsy (macOS):
 
 ```bash
-brew install sops age age-plugin-se
+# Simplest:
+brew install kigster/homebrew-tap/sopsy
+
+# Requires Rust toolchain
 cargo install sopsy
-# many repos wrap this as: just setup
+sopsy deps # installs additional binaries
 ```
 
 Confirm your machine is ready:
