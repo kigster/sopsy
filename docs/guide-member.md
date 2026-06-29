@@ -44,7 +44,7 @@ Install the toolchain and sopsy (macOS):
 
 ```bash
 # Simplest:
-brew install kigster/homebrew-tap/sopsy
+brew install kigster/tap/sopsy
 
 # Requires Rust toolchain
 cargo install sopsy
