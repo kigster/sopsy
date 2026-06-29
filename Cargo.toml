@@ -1,11 +1,11 @@
 [package]
 name = "sopsy"
-version = "1.1.0"
+version = "1.1.2"
 edition = "2024"
 description = "The missing developer experience for SOPS"
 license = "MIT"
 repository = "https://github.com/kigster/sopsy.git"
-homepage = "https://github.com/kigster/sopsy.git"
+homepage = "https://sopsy-cli.dev"
 keywords = ["sops", "secrets", "age", "macos", "enclave"]
 categories = ["command-line-utilities", "config"]
 

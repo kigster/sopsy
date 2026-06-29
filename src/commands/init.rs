@@ -19,7 +19,7 @@ use crate::config::{Config, Recipient};
 use crate::error::{Error, Result};
 use crate::sops::{self, FileType};
 use crate::ui::Ui;
-use crate::{enclave, git};
+use crate::{enclave, git, keystore};
 
 /// Default recipient name when none is supplied.
 const DEFAULT_RECIPIENT_NAME: &str = "primary";
@@ -44,6 +44,7 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
             "sopsy init must run inside a git repository (run `git init` first)".to_string(),
         )
     })?;
+    guard_repo_root(ui, &cwd, &root, args)?;
     ui.success(format!("Git repository: {}", root.display()));
 
     // 2. Preflight the tools we depend on.
@@ -94,13 +95,16 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
     }
 
     // 8. Keep plaintext secrets out of git. `.env.*` is broad, so explicitly
-    //    un-ignore the two files we *do* want committed.
+    //    un-ignore the plaintext template and *all* encrypted artifacts — every
+    //    `*.encrypted` file (e.g. `.env.encrypted`, `.env.example.encrypted`,
+    //    `config/foo.encrypted`) is meant to be committed and must stay visible
+    //    to git, or membership changes can't re-key it.
     let mut gitignore_changed = false;
     for pattern in [
         ".env",
         ".env.*",
         "!.env.example",
-        "!.env.encrypted",
+        "!*.encrypted",
         "*.key",
         "*.pem",
         // Break-glass halves are written transiently and deleted after storage,
@@ -176,6 +180,51 @@ fn maybe_setup_break_glass(ui: &Ui, root: &Path, args: &InitArgs) -> Result<()> 
 /// (which errors, since no key is available), otherwise a generated Secure
 /// Enclave identity. In interactive mode the user may opt to paste a key
 /// instead of generating one.
+/// Refuse to silently adopt an *ancestor* git repository as the secrets repo.
+///
+/// If you run `sopsy init` in a directory you forgot to `git init`, git walks
+/// upward and finds the nearest enclosing repo — which can be your entire `$HOME`.
+/// sopsy would then write `.sops.yaml`/`.sopsy.yml` there and try to scan it.
+/// When the resolved root is not the current directory, warn (loudly if it is
+/// `$HOME`) and require confirmation (or `--force`).
+fn guard_repo_root(ui: &Ui, cwd: &Path, root: &Path, args: &InitArgs) -> Result<()> {
+    let same = std::fs::canonicalize(cwd).ok() == std::fs::canonicalize(root).ok();
+    if same {
+        return Ok(());
+    }
+
+    ui.warn(format!(
+        "{} is not a git repository; the nearest one is {}.",
+        cwd.display(),
+        root.display()
+    ));
+    if keystore::home_dir().and_then(|h| std::fs::canonicalize(h).ok())
+        == std::fs::canonicalize(root).ok()
+    {
+        ui.warn("That is your HOME directory — sopsy would manage all of it as a secrets repo.");
+    }
+    ui.warn("If you meant to start a new repo here, run `git init` in this directory first.");
+
+    let proceed = if args.force {
+        true
+    } else if ui.is_interactive() {
+        ui.confirm(
+            &format!("Initialise sopsy in {} anyway?", root.display()),
+            "--force",
+            false,
+        )?
+    } else {
+        false
+    };
+    if !proceed {
+        return Err(Error::Validation(format!(
+            "aborted: {} is not a git repository — run `git init` here first",
+            cwd.display()
+        )));
+    }
+    Ok(())
+}
+
 fn acquire_recipient(ui: &Ui, args: &InitArgs) -> Result<Recipient> {
     let name = args
         .recipient_name
@@ -224,6 +273,14 @@ fn acquire_recipient(ui: &Ui, args: &InitArgs) -> Result<Recipient> {
     let identity = identity?;
     ui.success("Created a Secure Enclave-backed identity.");
     ui.info("The private key stays in the Secure Enclave and never leaves this device.");
+
+    // Persist the identity handle so `sops` can find it to decrypt/re-key. The
+    // handle is not secret (it only works on this device, behind Touch ID), but
+    // without it `sops updatekeys` fails with "identity did not match any of the
+    // recipients" — which is exactly what breaks the break-glass step below.
+    let keys_path = keystore::store_identity(&name, &identity.public_key, &identity.identity)?;
+    ui.success(format!("Stored your identity in {}.", keys_path.display()));
+    ui.info("It is safe on disk: it only works on this device, behind Touch ID.");
 
     // Make it obvious a key was generated: show the public key, then pause so
     // the user can take it in before the bootstrap output scrolls on.

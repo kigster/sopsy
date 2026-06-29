@@ -198,6 +198,72 @@ fn init_seeds_from_env_example_when_no_dotenv() {
 }
 
 // ----------------------------------------------------------------------------
+// Legacy repo: a pre-existing .gitignore must not strand encrypted artifacts
+// ----------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn init_rescues_encrypted_artifacts_in_legacy_gitignore() {
+    let dir = TempDir::new().unwrap();
+    init_git_repo(dir.path());
+    let (public_key, _key_file) = generate_age_key(dir.path());
+
+    // The canonical real-world dotenv ignore: people almost always have these
+    // two lines (and no encrypted-rescue), so `.env.*` already hides every
+    // encrypted dotenv artifact.
+    std::fs::write(dir.path().join(".gitignore"), ".env\n.env.*\n").unwrap();
+
+    sopsy_in(dir.path())
+        .args([
+            "--non-interactive",
+            "init",
+            "--no-generate",
+            "--public-key",
+            &public_key,
+        ])
+        .assert()
+        .success();
+
+    let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+    // The negations are appended (after the pre-existing `.env.*`), and the
+    // legacy content is preserved (not duplicated).
+    assert!(gitignore.contains("!*.encrypted"), "{gitignore}");
+    assert_eq!(
+        gitignore.matches("\n.env.*").count() + usize::from(gitignore.starts_with(".env.*")),
+        1,
+        "must not duplicate the pre-existing rule:\n{gitignore}"
+    );
+
+    // `git check-ignore` exits 0 when ignored, 1 otherwise. Both the encrypted
+    // artifact and the plaintext template must stay committable despite `.env.*`.
+    for committable in [".env.example.encrypted", ".env.example"] {
+        std::fs::write(dir.path().join(committable), "x").unwrap();
+        let ignored = StdCommand::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["check-ignore", committable])
+            .status()
+            .unwrap()
+            .success();
+        assert!(
+            !ignored,
+            "{committable} must be committable, not gitignored"
+        );
+    }
+
+    // And a real plaintext dotenv stays ignored.
+    std::fs::write(dir.path().join(".env.local"), "x").unwrap();
+    let env_local_ignored = StdCommand::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["check-ignore", ".env.local"])
+        .status()
+        .unwrap()
+        .success();
+    assert!(env_local_ignored, ".env.local must still be ignored");
+}
+
+// ----------------------------------------------------------------------------
 // Idempotency
 // ----------------------------------------------------------------------------
 
@@ -283,9 +349,18 @@ fn init_generates_enclave_identity_with_fakes() {
     sopsy_in(dir.path())
         .env("SOPSY_AGE_PLUGIN_SE_BIN", &plugin)
         .env("SOPSY_SOPS_BIN", &sops)
+        // Keep the generated (fake) identity out of the real per-user keystore.
+        .env("SOPSY_KEYS_FILE", dir.path().join("age-keys.txt"))
         .args(["--non-interactive", "init"])
         .assert()
         .success();
+
+    // The fake identity was stored in the redirected keystore, not the real one.
+    let keys = std::fs::read_to_string(dir.path().join("age-keys.txt")).unwrap();
+    assert!(
+        keys.contains("AGE-PLUGIN-SE-1QFAKEIDENTITY"),
+        "identity should be persisted to the keystore so sops can decrypt"
+    );
 
     // The generated enclave public key is recorded in `.sopsy.yml`.
     let config = std::fs::read_to_string(dir.path().join(".sopsy.yml")).unwrap();

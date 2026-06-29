@@ -21,6 +21,7 @@ pub mod config;
 pub mod enclave;
 pub mod error;
 pub mod git;
+pub mod keystore;
 pub mod sops;
 pub mod ui;
 

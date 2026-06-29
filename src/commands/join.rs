@@ -18,6 +18,7 @@ use crate::commands::recipient;
 use crate::config::{CONFIG_FILE_NAME, Config, MemberState, Recipient};
 use crate::enclave;
 use crate::error::{Error, Result};
+use crate::keystore;
 use crate::ui::Ui;
 
 /// Run `sopsy join`.
@@ -109,6 +110,14 @@ fn acquire_public_key(ui: &Ui, args: &JoinArgs) -> Result<String> {
     let identity = identity?;
     ui.success("Created a Secure Enclave-backed identity.");
     ui.info("The private key stays in the Secure Enclave and never leaves this device.");
+
+    // Persist the identity handle now so that, once an approver grants access,
+    // `sopsy edit`/`secrets decrypt` can find it (behind Touch ID) to unlock the
+    // repo. The handle is not secret key material.
+    let keys_path =
+        keystore::store_identity(args.name.trim(), &identity.public_key, &identity.identity)?;
+    ui.success(format!("Stored your identity in {}.", keys_path.display()));
+
     ui.header("Your public key");
     ui.animated_line(&identity.public_key);
     Ok(identity.public_key)
