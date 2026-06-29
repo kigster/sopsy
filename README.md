@@ -29,6 +29,8 @@ secret sneaks in.
 - [Architecture](#architecture)
 - [How encryption flows](#how-encryption-flows)
 - [The Secure Enclave security model](#the-secure-enclave-security-model)
+  - [Where your identity lives](#where-your-identity-lives)
+  - [Console session, Touch ID, and one-laptop testing](#console-session-touch-id-and-one-laptop-testing)
 - [Break-glass keys](#break-glass-keys)
 - [Files sopsy manages](#files-sopsy-manages)
 - [Command Reference](#command-reference)
@@ -376,6 +378,60 @@ flowchart TB
 > losing that key**. The repository stays decryptable as long as *another*
 > recipient — a teammate or the break-glass key — can still read it. This is why
 > a break-glass key is mandatory in `sopsy check`.
+
+### Where your identity lives
+
+When `sopsy init` or `sopsy join` generates a Secure Enclave identity, the
+**identity handle** (`AGE-PLUGIN-SE-1…`) is written to your per-user `sops` age
+keys file:
+
+| Platform        | Location                                              |
+| --------------- | ---------------------------------------------------- |
+| macOS           | `~/Library/Application Support/sops/age/keys.txt`    |
+| Linux / others  | `${XDG_CONFIG_HOME:-~/.config}/sops/age/keys.txt`    |
+
+That handle is **not** secret key material — the private key never leaves the
+Secure Enclave, and the handle only works on *this* device, behind Touch ID — so
+keeping it on disk is safe. `sops` reads this file automatically (sopsy also
+points at it explicitly via `SOPS_AGE_KEY_FILE`), and that is what lets
+`sopsy edit` and `sopsy secrets decrypt` unlock your secrets. Override the path
+with `SOPSY_KEYS_FILE` if you keep identities elsewhere.
+
+> [!NOTE]
+> Lose this file and you lose the *reference* to your Enclave key — re-run
+> `sopsy join` (or `init`) to mint a fresh identity and get re-approved. The
+> portable **break-glass** key is the repo-wide safety net.
+
+### Console session, Touch ID, and one-laptop testing
+
+Secure Enclave keys can only be **used to decrypt** from the user's *active GUI
+login session*. `sudo`, `su`, and SSH cannot raise the Touch ID prompt, so
+decryption from those contexts fails with `no identity matched any of the
+recipients` — often with no prompt at all. Encryption and key generation are
+unaffected (they never touch the private key).
+
+You are prompted for Touch ID on every operation that **reads** a secret:
+`sopsy secrets decrypt`, `sopsy edit`, and `sopsy approve` (once per encrypted
+file — so approve can prompt more than once). There is no time-based "remember
+me"; to prompt less often, decrypt once per shell with [direnv](#sopsy-secrets).
+
+This matters when simulating a **team on a single Mac** — e.g. exercising the
+owner → member (`join` / `approve`) flow with two accounts:
+
+- Switch with **Fast User Switching** (log the second account in at the login
+  screen). Do **not** `sudo`/`su` into it — the Enclave won't be reachable.
+- Touch ID is enrolled **per macOS account**. The second user must add a
+  fingerprint in *System Settings → Touch ID & Password*, or the default
+  `any-biometry-or-passcode` policy falls back to that account's **login
+  password**.
+- Each account has its **own** keystore and its **own** Enclave keys — an
+  identity minted by one user cannot be unwrapped by another. That is the whole
+  point: every member holds a private key only they can use.
+
+> [!NOTE]
+> Because Enclave identities only work interactively at the console, they are
+> useless for CI, automation, and headless/SSH use — which is exactly what the
+> portable **break-glass** key (next section) is for.
 
 ## Break-glass keys
 
@@ -895,6 +951,8 @@ exec sopsy check
 | --------------------------- | ----------------------------------------------------------------------------- |
 | `EDITOR` / `VISUAL`         | Editor for `sopsy edit` (after `--editor`, before the `vi` default).          |
 | `NO_COLOR`                  | Disables colored output (same as `--no-color`).                               |
+| `SOPSY_KEYS_FILE`           | Override where sopsy stores/reads the age identity (default: the per-user `sops` keys file). |
+| `SOPS_AGE_KEY_FILE`         | Standard `sops` var for the age identity file; if you set it, sopsy honors it and stores there. |
 | `SOPSY_SOPS_BIN`            | Override the `sops` binary path (primarily for testing).                      |
 | `SOPSY_AGE_PLUGIN_SE_BIN`   | Override the `age-plugin-se` binary path (primarily for testing).             |
 | `SOPSY_AGE_KEYGEN_BIN`      | Override the `age-keygen` binary path (used by break-glass; for testing).     |
