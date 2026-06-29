@@ -283,9 +283,18 @@ fn init_generates_enclave_identity_with_fakes() {
     sopsy_in(dir.path())
         .env("SOPSY_AGE_PLUGIN_SE_BIN", &plugin)
         .env("SOPSY_SOPS_BIN", &sops)
+        // Keep the generated (fake) identity out of the real per-user keystore.
+        .env("SOPSY_KEYS_FILE", dir.path().join("age-keys.txt"))
         .args(["--non-interactive", "init"])
         .assert()
         .success();
+
+    // The fake identity was stored in the redirected keystore, not the real one.
+    let keys = std::fs::read_to_string(dir.path().join("age-keys.txt")).unwrap();
+    assert!(
+        keys.contains("AGE-PLUGIN-SE-1QFAKEIDENTITY"),
+        "identity should be persisted to the keystore so sops can decrypt"
+    );
 
     // The generated enclave public key is recorded in `.sopsy.yml`.
     let config = std::fs::read_to_string(dir.path().join(".sopsy.yml")).unwrap();

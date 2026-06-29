@@ -28,6 +28,10 @@ use crate::error::Result;
 pub const SOPS_AGE_KEY_FILE_ENV: &str = "SOPS_AGE_KEY_FILE";
 /// Environment variable `sops` reads for a literal age identity.
 pub const SOPS_AGE_KEY_ENV: &str = "SOPS_AGE_KEY";
+/// sopsy-specific override for the keystore path. Takes precedence over
+/// everything else; used by tests to keep identities out of the real per-user
+/// keys file, and available to anyone who wants sopsy to manage a separate file.
+pub const KEYS_FILE_ENV: &str = "SOPSY_KEYS_FILE";
 
 /// The user's home directory, if discoverable.
 pub(crate) fn home_dir() -> Option<PathBuf> {
@@ -38,11 +42,15 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
 
 /// Resolve the age identity file `sops` uses, mirroring its own lookup.
 ///
-/// Honors `SOPS_AGE_KEY_FILE` when set. Otherwise it returns the per-user
-/// default that `sops` derives from Go's `os.UserConfigDir`:
+/// Honors the sopsy-specific [`KEYS_FILE_ENV`] override first, then
+/// `SOPS_AGE_KEY_FILE`. Otherwise it returns the per-user default that `sops`
+/// derives from Go's `os.UserConfigDir`:
 /// `~/Library/Application Support/sops/age/keys.txt` on macOS, and
 /// `${XDG_CONFIG_HOME:-~/.config}/sops/age/keys.txt` elsewhere.
 pub fn keys_file() -> PathBuf {
+    if let Some(explicit) = std::env::var_os(KEYS_FILE_ENV) {
+        return PathBuf::from(explicit);
+    }
     if let Some(explicit) = std::env::var_os(SOPS_AGE_KEY_FILE_ENV) {
         return PathBuf::from(explicit);
     }

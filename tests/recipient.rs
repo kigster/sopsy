@@ -472,6 +472,8 @@ fn join_generates_enclave_identity_with_fake_plugin() {
     let output = assert_cmd::Command::cargo_bin("sopsy")
         .unwrap()
         .env("SOPSY_AGE_PLUGIN_SE_BIN", &plugin)
+        // Keep the generated (fake) identity out of the real per-user keystore.
+        .env("SOPSY_KEYS_FILE", dir.path().join("age-keys.txt"))
         .current_dir(dir.path())
         .args(["--non-interactive", "join", "newbie"])
         .output()
