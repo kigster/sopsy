@@ -198,6 +198,72 @@ fn init_seeds_from_env_example_when_no_dotenv() {
 }
 
 // ----------------------------------------------------------------------------
+// Legacy repo: a pre-existing .gitignore must not strand encrypted artifacts
+// ----------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn init_rescues_encrypted_artifacts_in_legacy_gitignore() {
+    let dir = TempDir::new().unwrap();
+    init_git_repo(dir.path());
+    let (public_key, _key_file) = generate_age_key(dir.path());
+
+    // The canonical real-world dotenv ignore: people almost always have these
+    // two lines (and no encrypted-rescue), so `.env.*` already hides every
+    // encrypted dotenv artifact.
+    std::fs::write(dir.path().join(".gitignore"), ".env\n.env.*\n").unwrap();
+
+    sopsy_in(dir.path())
+        .args([
+            "--non-interactive",
+            "init",
+            "--no-generate",
+            "--public-key",
+            &public_key,
+        ])
+        .assert()
+        .success();
+
+    let gitignore = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
+    // The negations are appended (after the pre-existing `.env.*`), and the
+    // legacy content is preserved (not duplicated).
+    assert!(gitignore.contains("!*.encrypted"), "{gitignore}");
+    assert_eq!(
+        gitignore.matches("\n.env.*").count() + usize::from(gitignore.starts_with(".env.*")),
+        1,
+        "must not duplicate the pre-existing rule:\n{gitignore}"
+    );
+
+    // `git check-ignore` exits 0 when ignored, 1 otherwise. Both the encrypted
+    // artifact and the plaintext template must stay committable despite `.env.*`.
+    for committable in [".env.example.encrypted", ".env.example"] {
+        std::fs::write(dir.path().join(committable), "x").unwrap();
+        let ignored = StdCommand::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["check-ignore", committable])
+            .status()
+            .unwrap()
+            .success();
+        assert!(
+            !ignored,
+            "{committable} must be committable, not gitignored"
+        );
+    }
+
+    // And a real plaintext dotenv stays ignored.
+    std::fs::write(dir.path().join(".env.local"), "x").unwrap();
+    let env_local_ignored = StdCommand::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["check-ignore", ".env.local"])
+        .status()
+        .unwrap()
+        .success();
+    assert!(env_local_ignored, ".env.local must still be ignored");
+}
+
+// ----------------------------------------------------------------------------
 // Idempotency
 // ----------------------------------------------------------------------------
 
