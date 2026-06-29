@@ -46,8 +46,3 @@ publish-dry-run:
 publish: fmt warnings test package publish-dry-run
     cargo publish
 
-release:
-    git tag -f "v{{version}}"
-    git push --tags
-    gh release create "v{{version}}" --generate-notes 
-
