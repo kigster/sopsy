@@ -105,6 +105,10 @@ installable with [Homebrew](https://brew.sh):
 brew install sops age age-plugin-se
 ```
 
+> [!TIP]
+> If you installed sopsy via `brew install kigster/tap/sopsy`, these are pulled
+> in automatically — you can skip this section.
+
 | Tool            | Purpose                                                      |
 | --------------- | ----------------------------------------------------------- |
 | `sops`          | The encryption engine sopsy drives for every crypto op.     |
@@ -123,13 +127,27 @@ brew install sops age age-plugin-se
 
 ## Install
 
-From [crates.io](https://crates.io/crates/sopsy):
+### Homebrew (recommended)
+
+```bash
+brew install kigster/tap/sopsy
+```
+
+This is the simplest path: it installs a **prebuilt binary** (no Rust toolchain
+required) **and** pulls the tools sopsy orchestrates — `sops`, `age`, and, on
+macOS, `age-plugin-se` — automatically. You can skip the [Prerequisites](#prerequisites)
+step entirely; Homebrew handles them.
+
+### From crates.io (requires Rust)
 
 ```bash
 cargo install sopsy
 ```
 
-Or build from source:
+You'll still need `sops`, `age`, and `age-plugin-se` on your `PATH` (see
+[Prerequisites](#prerequisites), or run `sopsy deps`).
+
+### From source
 
 ```bash
 git clone https://github.com/kigster/sopsy.git
