@@ -943,7 +943,11 @@ fn approve_interactive_skips_stale_and_errors_when_nothing_approved() {
 fn approve_deduplicates_repeated_names() {
     with_repo(|dir| {
         set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
-        flow_repo(dir, Some(&sopsy_with_pending_bob("")), Some(SOPS_ALICE_ONLY));
+        flow_repo(
+            dir,
+            Some(&sopsy_with_pending_bob("")),
+            Some(SOPS_ALICE_ONLY),
+        );
         // The same name passed twice collapses to a single approval.
         approve::run(
             &test_ui(),
