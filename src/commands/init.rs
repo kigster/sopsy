@@ -15,14 +15,17 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::cli::{InitArgs, RecipientBreakGlassArgs, RecipientCommand};
+use crate::commands::recipient::system_username;
 use crate::config::{Config, Recipient};
 use crate::error::{Error, Result};
 use crate::sops::{self, FileType};
 use crate::ui::Ui;
 use crate::{enclave, git, keystore};
 
-/// Default recipient name when none is supplied.
-const DEFAULT_RECIPIENT_NAME: &str = "primary";
+/// Default recipient name when none is supplied. The init-time recipient is
+/// the repository's *admin*: the first entry in `.sopsy.yml`, whose public key
+/// also anchors the `.sopsy.sha` integrity checksum.
+const DEFAULT_RECIPIENT_NAME: &str = "admin";
 
 /// Placeholder contents for a freshly created `.env.example`.
 const ENV_EXAMPLE_TEMPLATE: &str = "\
@@ -341,19 +344,6 @@ fn resolve_username(ui: &Ui, args: &InitArgs) -> Result<Option<String>> {
     }
 }
 
-/// Best-effort current system username from `$USER` / `$LOGNAME`.
-fn system_username() -> Option<String> {
-    for var in ["USER", "LOGNAME"] {
-        if let Ok(value) = std::env::var(var) {
-            let value = value.trim().to_string();
-            if !value.is_empty() {
-                return Some(value);
-            }
-        }
-    }
-    None
-}
-
 /// Render a `.sops.yaml` whose creation rules encrypt the project's encrypted
 /// files to `age_recipients` (a comma-separated list of age public keys).
 fn render_sops_yaml(age_recipients: &str) -> String {
@@ -424,37 +414,6 @@ mod tests {
         assert!(yaml.contains("creation_rules:"));
         assert!(yaml.contains("age1aaa,age1bbb"));
         assert!(yaml.contains(r"\.env\.encrypted$"));
-    }
-
-    #[test]
-    #[serial]
-    fn system_username_falls_back_to_none_when_unset() {
-        // Snapshot and clear both vars, then restore them afterwards.
-        let saved: Vec<(&str, Option<String>)> = ["USER", "LOGNAME"]
-            .iter()
-            .map(|k| (*k, std::env::var(k).ok()))
-            .collect();
-        // SAFETY: serialized via `#[serial]`.
-        unsafe {
-            std::env::remove_var("USER");
-            std::env::remove_var("LOGNAME");
-        }
-        assert_eq!(system_username(), None);
-        // An empty value is also treated as absent.
-        // SAFETY: serialized via `#[serial]`.
-        unsafe {
-            std::env::set_var("USER", "   ");
-        }
-        assert_eq!(system_username(), None);
-        // SAFETY: restore the original environment.
-        unsafe {
-            for (k, v) in saved {
-                match v {
-                    Some(val) => std::env::set_var(k, val),
-                    None => std::env::remove_var(k),
-                }
-            }
-        }
     }
 
     #[test]

@@ -6,7 +6,8 @@
 //!
 //! 1. verifies the join request is fresh (within `join_request_ttl`),
 //! 2. asks the approver to *vouch* that the key really belongs to the person,
-//! 3. adds the key to `.sops.yaml` and flips the member to `active`,
+//! 3. adds the key to `.sops.yaml`, flips the member to `active`, and records
+//!    the provenance (`approved_by`, `approved_at`; `requested_at` is kept),
 //! 4. runs `sops updatekeys` so every encrypted file gains a stanza the newcomer
 //!    can open (the file bodies are not re-encrypted, only the wrapped key).
 //!
@@ -83,11 +84,16 @@ pub fn run(ui: &Ui, args: &ApproveArgs) -> Result<()> {
     let snapshot = ConfigSnapshot::capture(&repo, &sops_config);
     let approved_names: Vec<String> = approved.iter().map(|m| m.name.clone()).collect();
 
+    // Provenance: who granted access and when. `requested_at` is deliberately
+    // kept — together the two timestamps record the full request→grant history.
+    let approver = resolve_approver(&config);
+    let approved_at = humantime::format_rfc3339_seconds(SystemTime::now()).to_string();
     for member in &approved {
         for recipient in config.recipients.iter_mut() {
             if recipient.name == member.name {
                 recipient.state = MemberState::Active;
-                recipient.requested_at = None;
+                recipient.approved_at = Some(approved_at.clone());
+                recipient.approved_by = approver.clone();
             }
         }
     }
@@ -123,6 +129,24 @@ pub fn run(ui: &Ui, args: &ApproveArgs) -> Result<()> {
     ui.success(format!("{names} approved and added to all encrypted files"));
     print_next_steps(ui, &approved_names);
     Ok(())
+}
+
+/// Identify the approver for the provenance record, as `"Full Name (username)"`.
+///
+/// The system username (`$USER`/`$LOGNAME`) is matched against the *active*
+/// recipients' `username` fields to recover the approver's recorded name; with
+/// no match the bare username is used. Like member roles, this is a soft
+/// audit record — Enclave age keys cannot sign, so it is not proof.
+fn resolve_approver(config: &Config) -> Option<String> {
+    let username = crate::commands::recipient::system_username()?;
+    let named = config
+        .recipients
+        .iter()
+        .find(|r| !r.is_pending() && r.username.as_deref() == Some(username.as_str()));
+    Some(match named {
+        Some(recipient) => format!("{} ({username})", recipient.name),
+        None => username,
+    })
 }
 
 /// Resolve the candidate set of pending members. With no names (interactive),

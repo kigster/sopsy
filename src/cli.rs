@@ -157,8 +157,13 @@ pub struct EditArgs {
 /// Arguments for `sopsy join`.
 #[derive(Debug, Args)]
 pub struct JoinArgs {
-    /// The member name to register (your handle, e.g. `alice`).
+    /// Your name as recorded in `.sopsy.yml` (full name or first name,
+    /// e.g. `"Konstantin Gredeskoul"` or `annie`).
     pub name: String,
+
+    /// System username recorded alongside the name (defaults to `$USER`).
+    #[arg(long)]
+    pub username: Option<String>,
 
     /// Path to the `.sopsy.yml` to update (defaults to the one in the repo root).
     #[arg(long)]
@@ -270,6 +275,10 @@ pub enum RecipientCommand {
 
     /// Generate a portable break-glass emergency key for offline storage.
     BreakGlass(RecipientBreakGlassArgs),
+
+    /// Generate a portable CI decryption key and register it as a recipient
+    /// (store the private half as a CI secret named `SOPS_AGE_KEY`).
+    Ci(RecipientCiArgs),
 }
 
 /// Arguments for `sopsy recipient keygen`.
@@ -290,6 +299,28 @@ pub struct RecipientBreakGlassArgs {
     pub output: PathBuf,
 
     /// Recipient name to record (defaults to `break-glass`).
+    #[arg(long = "name")]
+    pub name: Option<String>,
+
+    /// Overwrite the `<output>.private` / `<output>.public` files if they exist.
+    #[arg(long)]
+    pub force: bool,
+
+    /// Skip running `sops updatekeys` after editing `.sops.yaml`.
+    #[arg(long)]
+    pub no_updatekeys: bool,
+}
+
+/// Arguments for `sopsy recipient ci`.
+#[derive(Debug, Args)]
+pub struct RecipientCiArgs {
+    /// Output path prefix; writes `<output>.private` and `<output>.public`.
+    /// Both files are deleted from disk after you confirm the private key is
+    /// stored in your CI provider's secret store.
+    #[arg(short = 'o', long = "output", default_value = "ci")]
+    pub output: PathBuf,
+
+    /// Recipient name to record (defaults to `ci`).
     #[arg(long = "name")]
     pub name: Option<String>,
 
@@ -398,6 +429,25 @@ mod tests {
     fn request_access_is_an_alias_for_join() {
         let cli = Cli::try_parse_from(["sopsy", "request-access", "annie"]).unwrap();
         assert!(matches!(cli.command, Command::Join(args) if args.name == "annie"));
+    }
+
+    #[test]
+    fn join_accepts_username_flag() {
+        let cli = Cli::try_parse_from([
+            "sopsy",
+            "join",
+            "Konstantin Gredeskoul",
+            "--username",
+            "kig",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Join(args) => {
+                assert_eq!(args.name, "Konstantin Gredeskoul");
+                assert_eq!(args.username.as_deref(), Some("kig"));
+            }
+            _ => panic!("expected join"),
+        }
     }
 
     #[test]

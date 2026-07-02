@@ -20,8 +20,8 @@ use owo_colors::OwoColorize;
 use serde_yaml_ng::Value;
 
 use crate::cli::{
-    RecipientAddArgs, RecipientBreakGlassArgs, RecipientCommand, RecipientKeygenArgs,
-    RecipientRemoveArgs,
+    RecipientAddArgs, RecipientBreakGlassArgs, RecipientCiArgs, RecipientCommand,
+    RecipientKeygenArgs, RecipientRemoveArgs,
 };
 use crate::config::{CONFIG_FILE_NAME, Config, Recipient};
 use crate::error::{Error, Result};
@@ -41,6 +41,22 @@ pub(crate) fn assume_yes() -> bool {
     std::env::var_os(ASSUME_YES_ENV).is_some()
 }
 
+/// Best-effort current system username from `$USER` / `$LOGNAME`.
+///
+/// Shared by `init` (default key owner), `join` (recorded as the requester's
+/// `username`), and `approve` (identifies the approver for provenance).
+pub(crate) fn system_username() -> Option<String> {
+    for var in ["USER", "LOGNAME"] {
+        if let Ok(value) = std::env::var(var) {
+            let value = value.trim().to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
 /// Dispatch a `recipient` subcommand.
 pub fn run(ui: &Ui, command: &RecipientCommand) -> Result<()> {
     match command {
@@ -49,6 +65,7 @@ pub fn run(ui: &Ui, command: &RecipientCommand) -> Result<()> {
         RecipientCommand::List => list(ui),
         RecipientCommand::Keygen(args) => keygen(ui, args),
         RecipientCommand::BreakGlass(args) => break_glass(ui, args),
+        RecipientCommand::Ci(args) => ci(ui, args),
     }
 }
 
@@ -243,16 +260,19 @@ fn remove(ui: &Ui, args: &RecipientRemoveArgs) -> Result<()> {
 /// the existing secrets), restoring this snapshot keeps the repository
 /// consistent — it never lists a recipient the secrets were not re-wrapped for.
 pub(crate) struct ConfigSnapshot {
-    files: [(PathBuf, Option<Vec<u8>>); 2],
+    files: [(PathBuf, Option<Vec<u8>>); 3],
 }
 
 impl ConfigSnapshot {
-    /// Capture the current bytes of both config files (`None` if absent).
+    /// Capture the current bytes of the config files (`None` if absent):
+    /// `.sopsy.yml`, its `.sopsy.sha` integrity sidecar, and `.sops.yaml`.
     pub(crate) fn capture(repo: &Path, sops_config: &Path) -> Self {
         let sopsy = repo.join(CONFIG_FILE_NAME);
+        let sha = Config::checksum_path(&sopsy);
         ConfigSnapshot {
             files: [
                 (sopsy.clone(), std::fs::read(&sopsy).ok()),
+                (sha.clone(), std::fs::read(&sha).ok()),
                 (sops_config.to_path_buf(), std::fs::read(sops_config).ok()),
             ],
         }
@@ -307,54 +327,100 @@ fn list(ui: &Ui) -> Result<()> {
         return Ok(());
     }
 
-    let name_header = "NAME";
-    let key_header = "PUBLIC KEY";
-    let flag_header = "BREAK-GLASS";
-
-    let name_w = config
+    let headers = [
+        "NAME",
+        "USERNAME",
+        "PUBLIC KEY",
+        "BREAK-GLASS",
+        "APPROVED BY",
+    ];
+    let rows: Vec<[String; 5]> = config
         .recipients
         .iter()
-        .map(|r| r.name.chars().count())
-        .chain(std::iter::once(name_header.len()))
-        .max()
-        .unwrap_or(name_header.len());
-
-    let truncated: Vec<String> = config
-        .recipients
-        .iter()
-        .map(|r| truncate_key(&r.public_key))
+        .map(|r| {
+            [
+                truncate(&r.name, NAME_COL_MAX),
+                truncate(r.username.as_deref().unwrap_or(""), USERNAME_COL_MAX),
+                truncate(&r.public_key, KEY_COL_MAX),
+                if r.break_glass { "★ yes" } else { "" }.to_string(),
+                approved_cell(r),
+            ]
+        })
         .collect();
-    let key_w = truncated
-        .iter()
-        .map(|k| k.chars().count())
-        .chain(std::iter::once(key_header.len()))
-        .max()
-        .unwrap_or(key_header.len());
 
-    let header = format!("{name_header:<name_w$}  {key_header:<key_w$}  {flag_header}");
+    // Each column is as wide as its widest cell or header; cells and widths are
+    // measured in characters, matching how `format!` pads strings.
+    let mut widths = headers.map(str::len);
+    for row in &rows {
+        for (width, cell) in widths.iter_mut().zip(row.iter()) {
+            *width = (*width).max(cell.chars().count());
+        }
+    }
+    // The last column never needs trailing padding.
+    let pad = |cells: [&str; 5]| -> Vec<String> {
+        let mut out: Vec<String> = cells
+            .iter()
+            .zip(widths.iter())
+            .map(|(cell, w)| format!("{cell:<w$}"))
+            .collect();
+        out[4] = cells[4].to_string();
+        out
+    };
+
+    let header_cells = pad(headers);
     if ui.color_enabled() {
-        println!("{}", header.bold().cyan());
+        println!("{}", header_cells.join("  ").bold().cyan());
     } else {
-        println!("{header}");
+        println!("{}", header_cells.join("  "));
     }
 
-    for (recipient, key) in config.recipients.iter().zip(truncated.iter()) {
-        let marker = if recipient.break_glass { "★ yes" } else { "" };
-        let name_cell = format!("{:<name_w$}", recipient.name);
-        let key_cell = format!("{key:<key_w$}");
+    for row in &rows {
+        let cells = pad([&row[0], &row[1], &row[2], &row[3], &row[4]]);
         if ui.color_enabled() {
             println!(
-                "{}  {}  {}",
-                name_cell.green().bold(),
-                key_cell.dimmed(),
-                marker.yellow().bold()
+                "{}  {}  {}  {}  {}",
+                cells[0].green().bold(),
+                cells[1].cyan(),
+                cells[2].dimmed(),
+                cells[3].yellow().bold(),
+                cells[4]
             );
         } else {
-            println!("{name_cell}  {key_cell}  {marker}");
+            println!("{}", cells.join("  ").trim_end());
         }
     }
 
     Ok(())
+}
+
+/// Column caps (in characters) for `recipient list` cells; longer values are
+/// truncated with an ellipsis.
+const NAME_COL_MAX: usize = 21;
+const USERNAME_COL_MAX: usize = 12;
+const KEY_COL_MAX: usize = 24;
+
+/// Render the `APPROVED BY` cell: `"Full Name (username) on YYYY-MM-DD"`,
+/// degrading gracefully when either half of the provenance is missing. Pending
+/// members show `(pending)` so the audit column reads complete.
+fn approved_cell(recipient: &Recipient) -> String {
+    if recipient.is_pending() {
+        return "(pending)".to_string();
+    }
+    match (
+        recipient.approved_by.as_deref(),
+        recipient.approved_at.as_deref(),
+    ) {
+        (Some(by), Some(at)) => format!("{by} on {}", date_only(at)),
+        (Some(by), None) => by.to_string(),
+        (None, Some(at)) => format!("on {}", date_only(at)),
+        (None, None) => String::new(),
+    }
+}
+
+/// The `YYYY-MM-DD` prefix of an RFC3339 timestamp (the input unchanged when it
+/// has no time component).
+fn date_only(rfc3339: &str) -> &str {
+    rfc3339.split('T').next().unwrap_or(rfc3339)
 }
 
 /// Generate a fresh Secure Enclave identity and print it.
@@ -383,27 +449,95 @@ fn keygen(ui: &Ui, args: &RecipientKeygenArgs) -> Result<()> {
     Ok(())
 }
 
+/// The two portable-key ceremonies. Both generate an *exportable* age keypair
+/// (not a Secure Enclave identity), hand it to the operator for out-of-band
+/// storage, delete the local copies, and register the public key as a
+/// recipient — they differ only in where the private key is meant to live and
+/// how the recipient is marked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortableKeyKind {
+    /// Offline emergency key (e.g. 1Password); marked `break_glass`.
+    BreakGlass,
+    /// CI decryption key, stored in the CI provider's secret store and read by
+    /// `sops` via the `SOPS_AGE_KEY` environment variable.
+    Ci,
+}
+
+impl PortableKeyKind {
+    /// The recipient name used when `--name` is not given.
+    fn default_name(self) -> &'static str {
+        match self {
+            PortableKeyKind::BreakGlass => "break-glass",
+            PortableKeyKind::Ci => "ci",
+        }
+    }
+
+    /// Short human label used in progress and success messages.
+    fn label(self) -> &'static str {
+        match self {
+            PortableKeyKind::BreakGlass => "break-glass",
+            PortableKeyKind::Ci => "CI",
+        }
+    }
+}
+
 /// Generate a portable break-glass emergency key, hand it to the operator for
 /// offline storage, then delete it locally and register it as a recipient.
 ///
 /// The break-glass key is an ordinary (exportable) age key — *not* a Secure
 /// Enclave identity — precisely because it must survive the loss of any single
-/// device. The flow is deliberately interactive: we write the key to disk, wait
-/// for the operator to copy it into a secure store (e.g. 1Password), then remove
-/// the local copies so the only surviving private key lives offline.
+/// device.
 fn break_glass(ui: &Ui, args: &RecipientBreakGlassArgs) -> Result<()> {
-    ui.header("sopsy recipient break-glass");
+    portable_key_ceremony(
+        ui,
+        PortableKeyKind::BreakGlass,
+        &args.output,
+        args.name.as_deref(),
+        args.force,
+        args.no_updatekeys,
+    )
+}
+
+/// Generate a portable CI decryption key, hand it to the operator to store as
+/// a CI secret (`SOPS_AGE_KEY`), then delete it locally and register it as a
+/// recipient.
+///
+/// CI runners have no Secure Enclave, so this is how automation decrypts:
+/// `sops` reads the identity from `SOPS_AGE_KEY`, which sopsy never overrides
+/// (see [`crate::keystore::configure_sops_env`]).
+fn ci(ui: &Ui, args: &RecipientCiArgs) -> Result<()> {
+    portable_key_ceremony(
+        ui,
+        PortableKeyKind::Ci,
+        &args.output,
+        args.name.as_deref(),
+        args.force,
+        args.no_updatekeys,
+    )
+}
+
+/// The shared portable-key ceremony: generate → write to disk → operator
+/// stores it out-of-band → press ENTER → delete local copies → register the
+/// recipient and re-wrap secrets (rolling back atomically on failure).
+///
+/// The flow is deliberately interactive: the local files exist only for the
+/// operator to copy from, and are removed the moment storage is confirmed.
+fn portable_key_ceremony(
+    ui: &Ui,
+    kind: PortableKeyKind,
+    output: &Path,
+    name: Option<&str>,
+    force: bool,
+    no_updatekeys: bool,
+) -> Result<()> {
+    let label = kind.label();
+    ui.header(format!("sopsy recipient {}", kind.default_name()));
 
     let repo = current_repo_root()?;
     let mut config = load_config(&repo)?;
     let sops_config = sops_config_path(&repo)?;
 
-    let name = args
-        .name
-        .as_deref()
-        .unwrap_or("break-glass")
-        .trim()
-        .to_string();
+    let name = name.unwrap_or(kind.default_name()).trim().to_string();
     if name.is_empty() {
         return Err(Error::Validation("recipient name must not be empty".into()));
     }
@@ -419,16 +553,16 @@ fn break_glass(ui: &Ui, args: &RecipientBreakGlassArgs) -> Result<()> {
     let assume_yes = assume_yes();
     if !ui.is_interactive() && !assume_yes {
         return Err(Error::NonInteractive {
-            prompt: "press ENTER to confirm the break-glass key is stored safely".to_string(),
+            prompt: format!("press ENTER to confirm the {label} key is stored safely"),
             flag: format!("an interactive terminal (or set {ASSUME_YES_ENV} for automation)"),
         });
     }
 
     // Resolve the two output paths and refuse to clobber existing files.
-    let private_path = with_suffix(&args.output, "private");
-    let public_path = with_suffix(&args.output, "public");
+    let private_path = with_suffix(output, "private");
+    let public_path = with_suffix(output, "public");
     for path in [&private_path, &public_path] {
-        if path.exists() && !args.force {
+        if path.exists() && !force {
             return Err(Error::Validation(format!(
                 "{} already exists (pass --force to overwrite)",
                 path.display()
@@ -438,7 +572,7 @@ fn break_glass(ui: &Ui, args: &RecipientBreakGlassArgs) -> Result<()> {
 
     // Generate a portable age key pair.
     age::ensure_available()?;
-    let spinner = ui.spinner("Generating a portable age key pair for break-glass…");
+    let spinner = ui.spinner(format!("Generating a portable age key pair for {label}…"));
     let keypair = age::generate_keypair();
     spinner.finish_and_clear();
     let keypair = keypair?;
@@ -451,39 +585,65 @@ fn break_glass(ui: &Ui, args: &RecipientBreakGlassArgs) -> Result<()> {
     ui.success(format!("wrote public key to {}", public_path.display()));
 
     // Hand off to the operator and block until they confirm safe storage.
-    ui.header("ACTION REQUIRED — store the break-glass key offline");
-    ui.warn(
-        "Please copy these files and place them in 1Password (or another secure, offline store):",
-    );
-    ui.info(format!("  • {}", private_path.display()));
-    ui.info(format!("  • {}", public_path.display()));
+    let press_enter_prompt = match kind {
+        PortableKeyKind::BreakGlass => {
+            ui.header("ACTION REQUIRED — store the break-glass key offline");
+            ui.warn(
+                "Please copy these files and place them in 1Password (or another secure, offline store):",
+            );
+            ui.info(format!("  • {}", private_path.display()));
+            ui.info(format!("  • {}", public_path.display()));
+            "Please press ENTER when you copied the keys to a secure storage (eg 1Password):"
+        }
+        PortableKeyKind::Ci => {
+            ui.header("ACTION REQUIRED — add the CI key to your CI provider's secret store");
+            ui.warn("Go to your CI settings and add ONE secret:");
+            ui.info(format!(
+                "  • SOPS_AGE_KEY — the contents of {} (the name `sops` reads identities from)",
+                private_path.display()
+            ));
+            ui.info(format!(
+                "    GitHub CLI:  gh secret set SOPS_AGE_KEY < {}",
+                private_path.display()
+            ));
+            ui.info(
+                "    GitHub UI:   Settings → Secrets and variables → Actions → New repository secret",
+            );
+            ui.info(format!(
+                "The public half needs no CI secret: it is not sensitive and is being \
+                 committed to {CONFIG_FILE_NAME} and {SOPS_CONFIG_FILE_NAME} as the recipient."
+            ));
+            ui.warn(
+                "This key can decrypt ALL sopsy-managed secrets — treat a compromised runner \
+                 like a lost laptop: remove the recipient and rotate the secret values.",
+            );
+            "Please press ENTER once SOPS_AGE_KEY is stored in your CI secrets:"
+        }
+    };
     ui.warn("Both files will be DELETED from this machine as soon as you continue.");
     if assume_yes {
         ui.info(format!(
             "{ASSUME_YES_ENV} set — assuming the keys are stored; continuing."
         ));
     } else {
-        ui.press_enter(
-            "Please press ENTER when you copied the keys to a secure storage (eg 1Password):",
-        )?;
+        ui.press_enter(press_enter_prompt)?;
     }
 
-    // Remove the local copies; the only surviving private key is now offline.
+    // Remove the local copies; the only surviving private key now lives in the
+    // out-of-band store (vault or CI secrets).
     std::fs::remove_file(&private_path)?;
     std::fs::remove_file(&public_path)?;
     ui.success("removed the local key files");
 
-    // Register the break-glass recipient in both config files and re-wrap
-    // secrets, rolling back atomically if the re-encryption fails (see `add`).
+    // Register the recipient in both config files and re-wrap secrets, rolling
+    // back atomically if the re-encryption fails (see `add`).
     let snapshot = ConfigSnapshot::capture(&repo, &sops_config);
     config.recipients.push(Recipient {
-        break_glass: true,
+        break_glass: kind == PortableKeyKind::BreakGlass,
         ..Recipient::new(&name, &keypair.public_key)
     });
     config.save_to_dir(&repo)?;
-    ui.success(format!(
-        "recorded `{name}` (break-glass) in {CONFIG_FILE_NAME}"
-    ));
+    ui.success(format!("recorded `{name}` ({label}) in {CONFIG_FILE_NAME}"));
 
     let modified = add_key_to_sops_yaml(&sops_config, &keypair.public_key)?;
     if modified == 0 {
@@ -496,13 +656,21 @@ fn break_glass(ui: &Ui, args: &RecipientBreakGlassArgs) -> Result<()> {
         ));
     }
 
-    if let Err(err) = run_updatekeys(ui, &repo, args.no_updatekeys) {
+    if let Err(err) = run_updatekeys(ui, &repo, no_updatekeys) {
         snapshot.restore()?;
-        ui.warn("rolled back configuration changes — break-glass recipient was not added");
+        ui.warn(format!(
+            "rolled back configuration changes — {label} recipient was not added"
+        ));
         return Err(rewrap_error(err));
     }
 
-    ui.success(format!("break-glass recipient `{name}` added"));
+    ui.success(format!("{label} recipient `{name}` added"));
+    if kind == PortableKeyKind::Ci {
+        ui.info("Expose the secret to the jobs that decrypt, e.g. in GitHub Actions:");
+        ui.info("    env:");
+        ui.info("      SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}");
+        ui.info("Then decrypt with: sopsy secrets decrypt .env.encrypted");
+    }
     Ok(())
 }
 
@@ -695,14 +863,14 @@ fn is_encrypted_file(path: &Path) -> bool {
     }
 }
 
-/// Truncate a (long) age public key for display.
-fn truncate_key(key: &str) -> String {
-    const MAX: usize = 24;
-    if key.chars().count() > MAX {
-        let head: String = key.chars().take(MAX).collect();
+/// Truncate `text` to at most `max` characters for display, appending an
+/// ellipsis when something was cut.
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() > max {
+        let head: String = text.chars().take(max).collect();
         format!("{head}…")
     } else {
-        key.to_string()
+        text.to_string()
     }
 }
 
@@ -819,13 +987,74 @@ mod tests {
     }
 
     #[test]
-    fn truncate_key_shortens_only_long_keys() {
-        // Short keys pass through unchanged; long ones get an ellipsis.
-        assert_eq!(truncate_key("age1short"), "age1short");
+    fn truncate_shortens_only_long_values() {
+        // Short values pass through unchanged; long ones get an ellipsis.
+        assert_eq!(truncate("age1short", KEY_COL_MAX), "age1short");
         let long = "age1".to_string() + &"x".repeat(60);
-        let out = truncate_key(&long);
+        let out = truncate(&long, KEY_COL_MAX);
         assert!(out.ends_with('…'));
-        assert_eq!(out.chars().count(), 25); // 24 chars + ellipsis
+        assert_eq!(out.chars().count(), KEY_COL_MAX + 1); // cap + ellipsis
+        // The name/username caps requested for `recipient list`.
+        assert_eq!(truncate("Konstantin Gredeskoul", NAME_COL_MAX).len(), 21);
+        assert_eq!(
+            truncate("a-very-long-username", USERNAME_COL_MAX)
+                .chars()
+                .count(),
+            13
+        );
+    }
+
+    #[test]
+    fn approved_cell_renders_provenance_and_pending() {
+        let mut r = Recipient::new("annie", "age1annie");
+        assert_eq!(approved_cell(&r), "");
+
+        r.approved_by = Some("Konstantin Gredeskoul (kig)".into());
+        assert_eq!(approved_cell(&r), "Konstantin Gredeskoul (kig)");
+
+        r.approved_at = Some("2026-07-01T12:34:56Z".into());
+        assert_eq!(
+            approved_cell(&r),
+            "Konstantin Gredeskoul (kig) on 2026-07-01"
+        );
+
+        r.approved_by = None;
+        assert_eq!(approved_cell(&r), "on 2026-07-01");
+
+        // Pending members read as awaiting approval regardless of other fields.
+        let pending = Recipient::pending("bob", "age1bob", "2026-07-01T00:00:00Z");
+        assert_eq!(approved_cell(&pending), "(pending)");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn system_username_falls_back_to_none_when_unset() {
+        // Snapshot and clear both vars, then restore them afterwards.
+        let saved: Vec<(&str, Option<String>)> = ["USER", "LOGNAME"]
+            .iter()
+            .map(|k| (*k, std::env::var(k).ok()))
+            .collect();
+        // SAFETY: serialized via `#[serial]`.
+        unsafe {
+            std::env::remove_var("USER");
+            std::env::remove_var("LOGNAME");
+        }
+        assert_eq!(system_username(), None);
+        // An empty value is also treated as absent.
+        // SAFETY: serialized via `#[serial]`.
+        unsafe {
+            std::env::set_var("USER", "   ");
+        }
+        assert_eq!(system_username(), None);
+        // SAFETY: restore the original environment.
+        unsafe {
+            for (k, v) in saved {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
     }
 
     #[test]

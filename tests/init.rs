@@ -104,7 +104,7 @@ fn init_with_public_key_encrypts_real_env() {
             "--public-key",
             &public_key,
             "--recipient-name",
-            "primary",
+            "admin",
         ])
         .assert()
         .success();
@@ -148,7 +148,7 @@ fn init_with_public_key_encrypts_real_env() {
     assert!(gitignore.lines().any(|l| l == ".env"), "{gitignore}");
     let config = std::fs::read_to_string(dir.path().join(".sopsy.yml")).unwrap();
     assert!(config.contains(&public_key), "recipient key not recorded");
-    assert!(config.contains("primary"), "recipient name not recorded");
+    assert!(config.contains("admin"), "recipient name not recorded");
 }
 
 #[test]

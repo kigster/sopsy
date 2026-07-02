@@ -164,8 +164,8 @@ mod tests {
         unsafe { std::env::set_var(SOPS_AGE_KEY_FILE_ENV, &keys) };
 
         let id = "AGE-PLUGIN-SE-1QXAMPLE";
-        store_identity("primary", "age1se1abc", id).unwrap();
-        store_identity("primary", "age1se1abc", id).unwrap();
+        store_identity("admin", "age1se1abc", id).unwrap();
+        store_identity("admin", "age1se1abc", id).unwrap();
 
         let contents = std::fs::read_to_string(&keys).unwrap();
         assert_eq!(
