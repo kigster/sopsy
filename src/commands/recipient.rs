@@ -516,6 +516,67 @@ fn ci(ui: &Ui, args: &RecipientCiArgs) -> Result<()> {
     )
 }
 
+/// Paths to shred if the process is terminated by a signal mid-ceremony. A
+/// portable key's private half must never survive the ceremony, so it is
+/// registered here the moment it touches disk (see [`KeyFileGuard`]).
+static CEREMONY_CLEANUP: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Install a one-shot SIGINT/SIGTERM/SIGHUP handler that shreds every path
+/// registered in [`CEREMONY_CLEANUP`], then exits. Idempotent: installed at most
+/// once per process, so repeated ceremonies (e.g. in tests) reuse the handler.
+///
+/// `ctrlc` runs the handler on its own thread rather than in raw async-signal
+/// context, so file I/O and locking here are safe.
+fn arm_ceremony_signal_cleanup() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        // Best-effort: if a handler is somehow already installed, the
+        // `KeyFileGuard` Drop still covers every non-signal exit path.
+        let _ = ctrlc::set_handler(|| {
+            if let Ok(paths) = CEREMONY_CLEANUP.lock() {
+                for path in paths.iter() {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+            // 128 + SIGINT(2): conventional "terminated by Ctrl-C" exit status.
+            std::process::exit(130);
+        });
+    });
+}
+
+/// RAII guard ensuring the on-disk halves of a portable key never outlive the
+/// ceremony — the Rust equivalent of a shell `trap … EXIT` over the key files.
+///
+/// `Drop` shreds both halves on every normal return, error (`?`), and panic;
+/// the signal handler armed by [`arm_ceremony_signal_cleanup`] covers
+/// SIGINT/SIGTERM/SIGHUP, which terminate the process without running `Drop`.
+struct KeyFileGuard {
+    paths: [PathBuf; 2],
+}
+
+impl KeyFileGuard {
+    /// Register the two key-file paths for signal cleanup and arm the handler.
+    fn arm(private: &Path, public: &Path) -> Self {
+        arm_ceremony_signal_cleanup();
+        let paths = [private.to_path_buf(), public.to_path_buf()];
+        if let Ok(mut registry) = CEREMONY_CLEANUP.lock() {
+            registry.extend(paths.iter().cloned());
+        }
+        KeyFileGuard { paths }
+    }
+}
+
+impl Drop for KeyFileGuard {
+    fn drop(&mut self) {
+        for path in &self.paths {
+            let _ = std::fs::remove_file(path);
+        }
+        if let Ok(mut registry) = CEREMONY_CLEANUP.lock() {
+            registry.retain(|p| !self.paths.contains(p));
+        }
+    }
+}
+
 /// The shared portable-key ceremony: generate → write to disk → operator
 /// stores it out-of-band → press ENTER → delete local copies → register the
 /// recipient and re-wrap secrets (rolling back atomically on failure).
@@ -581,6 +642,13 @@ fn portable_key_ceremony(
     std::fs::write(&private_path, &keypair.identity)?;
     std::fs::write(&public_path, format!("{}\n", keypair.public_key))?;
     restrict_permissions(&private_path);
+
+    // The private key now exists on disk. Guarantee it never survives the
+    // ceremony: this guard shreds both halves on any normal/error return or
+    // panic, and the signal handler it arms shreds them on SIGINT/SIGTERM/SIGHUP
+    // (e.g. Ctrl-C at the prompt below), which bypass `Drop`.
+    let _cleanup = KeyFileGuard::arm(&private_path, &public_path);
+
     ui.success(format!("wrote private key to {}", private_path.display()));
     ui.success(format!("wrote public key to {}", public_path.display()));
 

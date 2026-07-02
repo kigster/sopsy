@@ -83,25 +83,13 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
         ui.success("Created .env.example.");
     }
 
-    // 7. `.env.encrypted`, seeded from `.env` if present else `.env.example`.
-    let env_encrypted = root.join(".env.encrypted");
-    if env_encrypted.exists() && !args.force {
-        ui.info(".env.encrypted already present; leaving it untouched (pass --force to recreate).");
-    } else {
-        let seed = read_seed(&root)?;
-        std::fs::write(&env_encrypted, seed)?;
-        let spinner = ui.spinner("Encrypting .env.encrypted with sops…");
-        let result = sops::encrypt_in_place(&env_encrypted, FileType::Dotenv);
-        spinner.finish_and_clear();
-        result?;
-        ui.success("Encrypted .env.encrypted.");
-    }
-
-    // 8. Keep plaintext secrets out of git. `.env.*` is broad, so explicitly
-    //    un-ignore the plaintext template and *all* encrypted artifacts — every
-    //    `*.encrypted` file (e.g. `.env.encrypted`, `.env.example.encrypted`,
-    //    `config/foo.encrypted`) is meant to be committed and must stay visible
-    //    to git, or membership changes can't re-key it.
+    // 7. Keep plaintext secrets out of git *before* any ciphertext is created,
+    //    so even a crash mid-encryption lands in an ignored-by-default state.
+    //    `.env.*` is broad, so explicitly un-ignore the plaintext template and
+    //    *all* encrypted artifacts — every `*.encrypted` file (e.g.
+    //    `.env.encrypted`, `.env.example.encrypted`, `config/foo.encrypted`) is
+    //    meant to be committed and must stay visible to git, or membership
+    //    changes can't re-key it.
     let mut gitignore_changed = false;
     for pattern in [
         ".env",
@@ -121,6 +109,30 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
         ui.success("Updated .gitignore to keep plaintext secrets out of git.");
     } else {
         ui.info(".gitignore already protects plaintext secrets.");
+    }
+
+    // 8. `.env.encrypted`, seeded from `.env` if present else `.env.example`.
+    //    The seed is encrypted from a private temp file straight to a string, so
+    //    plaintext is *never* written to the committable artifact path — a failed
+    //    `sops` run can no longer leave a plaintext `.env.encrypted` behind (and
+    //    `!*.encrypted` un-ignores that path, so a leak there would be
+    //    committable). The ciphertext is written only on success.
+    let env_encrypted = root.join(".env.encrypted");
+    if env_encrypted.exists() && !args.force {
+        ui.info(".env.encrypted already present; leaving it untouched (pass --force to recreate).");
+    } else {
+        let seed = read_seed(&root)?;
+        // NamedTempFile is created 0600 in the system temp dir (outside the repo)
+        // and removed when it drops, so the plaintext seed never lands anywhere
+        // committable.
+        let seed_file = tempfile::NamedTempFile::new()?;
+        std::fs::write(seed_file.path(), &seed)?;
+        let spinner = ui.spinner("Encrypting .env.encrypted with sops…");
+        let ciphertext =
+            sops::encrypt_to_string(seed_file.path(), FileType::Dotenv, &env_encrypted);
+        spinner.finish_and_clear();
+        std::fs::write(&env_encrypted, ciphertext?)?;
+        ui.success("Encrypted .env.encrypted.");
     }
 
     // 9. Record sopsy's own state in `.sopsy.yml`.
