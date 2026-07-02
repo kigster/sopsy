@@ -21,6 +21,13 @@ use crate::error::{Error, Result};
 /// Default file name for sopsy's internal configuration.
 pub const CONFIG_FILE_NAME: &str = ".sopsy.yml";
 
+/// Sidecar file holding the SHA-256 integrity checksum of `.sopsy.yml`
+/// (see [`Config::compute_checksum`]). Committed alongside the config so a
+/// hand-edit shows up as a mismatch. This is tamper *evidence*, not proof —
+/// anyone can recompute it (Enclave age keys cannot sign); git history remains
+/// the real audit trail.
+pub const CHECKSUM_FILE_NAME: &str = ".sopsy.sha";
+
 /// Fallback join-request validity window when `.sopsy.yml` does not set one.
 const DEFAULT_REQUEST_TTL: Duration = Duration::from_secs(72 * 3600);
 
@@ -56,9 +63,19 @@ pub struct Recipient {
     #[serde(default, skip_serializing_if = "is_active")]
     pub state: MemberState,
     /// RFC3339 timestamp of when a pending join request was made. Used by
-    /// `sopsy approve` to reject stale requests. Cleared once approved.
+    /// `sopsy approve` to reject stale requests, then kept after approval as
+    /// the audit record of when access was requested.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_at: Option<String>,
+    /// RFC3339 timestamp of when access was granted (`sopsy approve`). Kept as
+    /// the audit record of when this member became able to decrypt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_at: Option<String>,
+    /// Who granted access, as `"Full Name (username)"` (or a bare username when
+    /// the approver has no recipient entry). A provenance record, not an
+    /// enforcement mechanism — like roles, it is a soft guardrail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_by: Option<String>,
     /// Whether this recipient is the emergency "break-glass" key that is stored
     /// offline (e.g. in 1Password) rather than on a developer's machine.
     #[serde(default)]
@@ -74,6 +91,8 @@ impl Recipient {
             username: None,
             state: MemberState::Active,
             requested_at: None,
+            approved_at: None,
+            approved_by: None,
             break_glass: false,
         }
     }
@@ -182,20 +201,75 @@ impl Config {
             .unwrap_or(DEFAULT_REQUEST_TTL)
     }
 
-    /// Load configuration from `path`.
+    /// The public key the integrity checksum is bound to: the repository's
+    /// admin — by convention the first recipient recorded (the one `sopsy init`
+    /// creates, named `admin` by default).
+    pub fn admin_public_key(&self) -> Option<&str> {
+        self.recipients.first().map(|r| r.public_key.as_str())
+    }
+
+    /// Compute the integrity checksum for `raw` (the exact on-disk bytes of a
+    /// `.sopsy.yml`): the SHA-256, in lowercase hex, of
+    /// `raw + "\n" + admin public key`.
     ///
-    /// Returns [`Error::FileNotFound`] if the file does not exist and
-    /// [`Error::Parse`] if it cannot be deserialized.
+    /// The result lives in the sidecar file [`CHECKSUM_FILE_NAME`], never
+    /// inside `.sopsy.yml` itself — hashing the raw bytes avoids any
+    /// self-reference and catches *every* edit, formatting included.
+    pub fn compute_checksum(&self, raw: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let admin_key = self.admin_public_key().unwrap_or("");
+        let digest = Sha256::digest(format!("{raw}\n{admin_key}").as_bytes());
+        digest.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// The sidecar checksum path for the config at `config_path`
+    /// (`.sopsy.sha` in the same directory).
+    pub fn checksum_path(config_path: &Path) -> PathBuf {
+        config_path.with_file_name(CHECKSUM_FILE_NAME)
+    }
+
+    /// Load configuration from `path`, verifying it against the `.sopsy.sha`
+    /// sidecar when one exists.
+    ///
+    /// Returns [`Error::FileNotFound`] if the file does not exist,
+    /// [`Error::Parse`] if it cannot be deserialized, and [`Error::Validation`]
+    /// if the sidecar checksum does not match (tamper evidence). A missing
+    /// sidecar is accepted — repos initialised by older sopsy versions have
+    /// none; `sopsy doctor` writes it.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let (config, raw) = Self::load_unverified(path)?;
+        if let Ok(stored) = std::fs::read_to_string(Self::checksum_path(path))
+            && stored.trim() != config.compute_checksum(&raw)
+        {
+            return Err(Error::Validation(format!(
+                "{} failed its integrity check against {CHECKSUM_FILE_NAME} — \
+                 it was edited outside sopsy. If the changes are intentional, \
+                 run `sopsy doctor` to repair the checksum; otherwise inspect \
+                 `git diff {CONFIG_FILE_NAME}`",
+                path.display()
+            )));
+        }
+        Ok(config)
+    }
+
+    /// Load configuration from `path` **without** checksum verification,
+    /// returning the parsed config together with the raw file contents.
+    ///
+    /// Reserved for `sopsy doctor`, which must be able to read a tampered or
+    /// legacy file in order to repair its checksum. Everything else goes
+    /// through [`Config::load`].
+    pub fn load_unverified(path: impl AsRef<Path>) -> Result<(Self, String)> {
         let path = path.as_ref();
         if !path.exists() {
             return Err(Error::FileNotFound(path.to_path_buf()));
         }
         let raw = std::fs::read_to_string(path)?;
-        serde_yaml_ng::from_str(&raw).map_err(|source| Error::Parse {
+        let config = serde_yaml_ng::from_str(&raw).map_err(|source| Error::Parse {
             path: path.to_path_buf(),
             source,
-        })
+        })?;
+        Ok((config, raw))
     }
 
     /// Load configuration from the conventional `.sopsy.yml` inside `dir`.
@@ -203,10 +277,17 @@ impl Config {
         Self::load(dir.as_ref().join(CONFIG_FILE_NAME))
     }
 
-    /// Serialize and write the configuration to `path`.
+    /// Serialize and write the configuration to `path`, then recompute and
+    /// write the `.sopsy.sha` sidecar from the exact bytes written — every
+    /// save refreshes both files together.
     pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
         let yaml = serde_yaml_ng::to_string(self)?;
-        std::fs::write(path.as_ref(), yaml)?;
+        std::fs::write(path, &yaml)?;
+        std::fs::write(
+            Self::checksum_path(path),
+            format!("{}\n", self.compute_checksum(&yaml)),
+        )?;
         Ok(())
     }
 
@@ -299,6 +380,32 @@ mod tests {
     }
 
     #[test]
+    fn approval_provenance_round_trips_and_is_omitted_when_absent() {
+        let mut cfg = Config::default();
+        cfg.recipients.push(Recipient {
+            requested_at: Some("2026-06-27T00:00:00Z".into()),
+            approved_at: Some("2026-06-28T10:00:00Z".into()),
+            approved_by: Some("Konstantin Gredeskoul (kig)".into()),
+            ..Recipient::new("annie", "age1annie")
+        });
+        cfg.recipients.push(Recipient::new("bob", "age1bob"));
+
+        let dir = assert_fs::TempDir::new().unwrap();
+        let path = cfg.save_to_dir(dir.path()).unwrap();
+
+        // Provenance is written for annie and skipped entirely for bob.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("approved_at: 2026-06-28T10:00:00Z"));
+        assert!(raw.contains("approved_by: Konstantin Gredeskoul (kig)"));
+        assert!(raw.contains("requested_at: 2026-06-27T00:00:00Z"));
+        assert_eq!(raw.matches("approved_by:").count(), 1);
+
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(cfg, loaded);
+        assert!(loaded.recipient("bob").unwrap().approved_by.is_none());
+    }
+
+    #[test]
     fn resolved_request_ttl_parses_and_falls_back() {
         let mut cfg = Config {
             join_request_ttl: Some("2h".into()),
@@ -311,6 +418,62 @@ mod tests {
         assert_eq!(cfg.resolved_request_ttl(), Duration::from_secs(72 * 3600));
         cfg.join_request_ttl = None;
         assert_eq!(cfg.resolved_request_ttl(), Duration::from_secs(72 * 3600));
+    }
+
+    #[test]
+    fn save_writes_checksum_sidecar_that_load_verifies() {
+        let mut cfg = Config::default();
+        cfg.recipients.push(Recipient::new("admin", "age1admin"));
+
+        let dir = assert_fs::TempDir::new().unwrap();
+        let path = cfg.save_to_dir(dir.path()).unwrap();
+
+        // The sidecar exists and holds the checksum of the exact bytes written
+        // bound to the admin (first) recipient's public key.
+        let sha_path = Config::checksum_path(&path);
+        let stored = std::fs::read_to_string(&sha_path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(stored.trim(), cfg.compute_checksum(&raw));
+
+        // A clean round-trip verifies.
+        assert_eq!(Config::load(&path).unwrap(), cfg);
+    }
+
+    #[test]
+    fn tampered_config_fails_integrity_check() {
+        let mut cfg = Config::default();
+        cfg.recipients.push(Recipient::new("admin", "age1admin"));
+        let dir = assert_fs::TempDir::new().unwrap();
+        let path = cfg.save_to_dir(dir.path()).unwrap();
+
+        // Simulate a hand edit swapping in an attacker's key.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, raw.replace("age1admin", "age1attacker")).unwrap();
+
+        let err = Config::load(&path).unwrap_err();
+        assert!(
+            matches!(&err, Error::Validation(m) if m.contains("integrity")),
+            "tampering must fail the integrity check: {err}"
+        );
+
+        // `load_unverified` (doctor's path) still reads it.
+        let (unverified, _raw) = Config::load_unverified(&path).unwrap();
+        assert_eq!(
+            unverified.recipient("admin").unwrap().public_key,
+            "age1attacker"
+        );
+    }
+
+    #[test]
+    fn missing_checksum_sidecar_is_accepted_as_legacy() {
+        let mut cfg = Config::default();
+        cfg.recipients.push(Recipient::new("admin", "age1admin"));
+        let dir = assert_fs::TempDir::new().unwrap();
+        let path = cfg.save_to_dir(dir.path()).unwrap();
+        std::fs::remove_file(Config::checksum_path(&path)).unwrap();
+
+        // Repos written before the sidecar existed must keep loading.
+        assert_eq!(Config::load(&path).unwrap(), cfg);
     }
 
     #[test]

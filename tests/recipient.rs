@@ -17,8 +17,8 @@ use std::process::Command;
 use assert_fs::TempDir;
 use serial_test::serial;
 use sopsy::cli::{
-    ApproveArgs, JoinArgs, RecipientAddArgs, RecipientBreakGlassArgs, RecipientCommand,
-    RecipientRemoveArgs,
+    ApproveArgs, JoinArgs, RecipientAddArgs, RecipientBreakGlassArgs, RecipientCiArgs,
+    RecipientCommand, RecipientRemoveArgs,
 };
 use sopsy::commands::{approve, join, recipient};
 use sopsy::config::{Config, MemberState};
@@ -335,6 +335,101 @@ fn break_glass_non_interactive_without_optin_fails_before_writing() {
     restore_cwd(&original);
 }
 
+// ---------------------------------------------------------------------------
+// `recipient ci` — portable CI decryption key (real age-keygen + sops).
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn ci_ceremony_generates_registers_and_deletes_local_files() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let (repo, key_a, _key_b) = setup_repo(dir.path());
+
+    // updatekeys must decrypt the existing secret with the admin key A.
+    set_age_key_file(Some(&key_a.file));
+    // Non-interactively confirm the (simulated) CI-secret upload.
+    set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+
+    let out_prefix = repo.join("ci");
+    recipient::run(
+        &test_ui(),
+        &RecipientCommand::Ci(RecipientCiArgs {
+            output: out_prefix.clone(),
+            name: None,
+            force: false,
+            no_updatekeys: false,
+        }),
+    )
+    .expect("recipient ci should succeed");
+
+    // The local key files were deleted after confirmation.
+    assert!(
+        !with_suffix_test(&out_prefix, "private").exists(),
+        "private key file must be deleted"
+    );
+    assert!(
+        !with_suffix_test(&out_prefix, "public").exists(),
+        "public key file must be deleted"
+    );
+
+    // The CI recipient is recorded — active, and NOT break-glass.
+    let config = Config::load_from_dir(&repo).unwrap();
+    let ci = config
+        .recipient("ci")
+        .expect("ci recipient should be recorded");
+    assert!(!ci.break_glass, "the CI key is not the break-glass key");
+    assert!(!ci.is_pending(), "the CI recipient is active immediately");
+    assert!(
+        ci.public_key.starts_with("age1"),
+        "a real age public key should be recorded; got {}",
+        ci.public_key
+    );
+
+    // Its key is also in `.sops.yaml`, and the secret still decrypts with key A.
+    let sops_yaml = std::fs::read_to_string(repo.join(".sops.yaml")).unwrap();
+    assert!(
+        sops_yaml.contains(&ci.public_key),
+        "CI key should be in .sops.yaml"
+    );
+    let decrypted = sops::decrypt(&repo.join(".env.encrypted"), FileType::Dotenv).unwrap();
+    assert!(decrypted.contains("FOO=bar"), "key A should still decrypt");
+
+    set_env("SOPSY_ASSUME_YES", None);
+    set_age_key_file(None);
+    restore_cwd(&original);
+}
+
+#[test]
+#[serial]
+fn ci_non_interactive_without_optin_fails_before_writing() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let (repo, _key_a, _key_b) = setup_repo(dir.path());
+
+    // No SOPSY_ASSUME_YES and a non-interactive UI: must fail fast.
+    let out_prefix = repo.join("ci");
+    let err = recipient::run(
+        &test_ui(),
+        &RecipientCommand::Ci(RecipientCiArgs {
+            output: out_prefix.clone(),
+            name: None,
+            force: false,
+            no_updatekeys: false,
+        }),
+    )
+    .expect_err("recipient ci must refuse to run non-interactively");
+    assert!(matches!(err, Error::NonInteractive { .. }));
+
+    // Nothing was written and no recipient was added.
+    assert!(!with_suffix_test(&out_prefix, "private").exists());
+    assert!(!with_suffix_test(&out_prefix, "public").exists());
+    let config = Config::load_from_dir(&repo).unwrap();
+    assert!(config.recipient("ci").is_none());
+
+    restore_cwd(&original);
+}
+
 /// A `.sopsy.yml` with alice (active) and bob (pending), with an optional extra
 /// line appended to bob's entry (e.g. a `requested_at` or `state`).
 fn sopsy_with_pending_bob(bob_extra: &str) -> String {
@@ -353,6 +448,7 @@ fn join_empty_name_rejected() {
             &test_ui(),
             &JoinArgs {
                 name: "   ".into(),
+                username: None,
                 sopsy_file: None,
                 public_key: Some("age1x".into()),
                 age_args: vec![],
@@ -376,6 +472,7 @@ fn join_rejects_duplicate_pending_request() {
             &test_ui(),
             &JoinArgs {
                 name: "bob".into(),
+                username: None,
                 sopsy_file: None,
                 public_key: Some("age1bobnew".into()),
                 age_args: vec![],
@@ -396,6 +493,7 @@ fn join_rejects_duplicate_public_key() {
             &test_ui(),
             &JoinArgs {
                 name: "carol".into(),
+                username: None,
                 sopsy_file: None,
                 public_key: Some("age1alice".into()),
                 age_args: vec![],
@@ -421,6 +519,7 @@ fn join_with_sopsy_file_targets_custom_path() {
         &test_ui(),
         &JoinArgs {
             name: "bob".into(),
+            username: None,
             sopsy_file: Some(file.clone()),
             public_key: Some("age1bobkey".into()),
             age_args: vec![],
@@ -440,6 +539,7 @@ fn join_with_missing_sopsy_file_errors() {
         &test_ui(),
         &JoinArgs {
             name: "bob".into(),
+            username: None,
             sopsy_file: Some("/nonexistent/dir/custom.yml".into()),
             public_key: Some("age1bobkey".into()),
             age_args: vec![],
@@ -705,7 +805,8 @@ fn join_records_pending_member_without_granting_access() {
     join::run(
         &test_ui(),
         &JoinArgs {
-            name: "bob".into(),
+            name: "Bob McMember".into(),
+            username: Some("bob".into()),
             sopsy_file: None,
             public_key: Some(key_b.public.clone()),
             age_args: vec![],
@@ -714,9 +815,16 @@ fn join_records_pending_member_without_granting_access() {
     .expect("join should succeed");
 
     let config = Config::load_from_dir(&repo).unwrap();
-    let bob = config.recipient("bob").expect("bob should be recorded");
+    let bob = config
+        .recipient("Bob McMember")
+        .expect("bob should be recorded");
     assert_eq!(bob.state, MemberState::Pending);
     assert!(bob.requested_at.is_some(), "join should stamp a timestamp");
+    assert_eq!(
+        bob.username.as_deref(),
+        Some("bob"),
+        "join should record the username alongside the name"
+    );
 
     // A pending member grants nothing: the key must NOT be in `.sops.yaml`.
     let sops_yaml = std::fs::read_to_string(repo.join(".sops.yaml")).unwrap();
@@ -737,6 +845,7 @@ fn join_rejects_existing_member() {
             &test_ui(),
             &JoinArgs {
                 name: "alice".into(),
+                username: None,
                 sopsy_file: None,
                 public_key: Some("age1x".into()),
                 age_args: vec![],
@@ -759,6 +868,7 @@ fn approve_activates_pending_member_and_rekeys() {
         &test_ui(),
         &JoinArgs {
             name: "bob".into(),
+            username: None,
             sopsy_file: None,
             public_key: Some(key_b.public.clone()),
             age_args: vec![],
@@ -783,8 +893,13 @@ fn approve_activates_pending_member_and_rekeys() {
     let bob = config.recipient("bob").unwrap();
     assert_eq!(bob.state, MemberState::Active);
     assert!(
-        bob.requested_at.is_none(),
-        "timestamp is cleared on approval"
+        bob.requested_at.is_some(),
+        "requested_at is kept as the audit record of the request"
+    );
+    assert!(bob.approved_at.is_some(), "approval must stamp approved_at");
+    assert!(
+        bob.approved_by.is_some(),
+        "approval must record the approver"
     );
 
     let sops_yaml = std::fs::read_to_string(repo.join(".sops.yaml")).unwrap();
@@ -981,6 +1096,7 @@ fn join_then_batch_approve_handles_multiword_names() {
                 &test_ui(),
                 &JoinArgs {
                     name: name.into(),
+                    username: None,
                     sopsy_file: None,
                     public_key: Some(key.into()),
                     age_args: vec![],
@@ -1014,6 +1130,141 @@ fn join_then_batch_approve_handles_multiword_names() {
         );
         set_env("SOPSY_ASSUME_YES", None);
     });
+}
+
+#[test]
+#[serial]
+fn join_defaults_username_to_system_user() {
+    with_repo(|dir| {
+        flow_repo(dir, Some(SOPSY_TWO), Some(SOPS_ALICE_ONLY));
+        let saved_user = std::env::var("USER").ok();
+        set_env("USER", Some(Path::new("kig")));
+
+        join::run(
+            &test_ui(),
+            &JoinArgs {
+                name: "Konstantin Gredeskoul".into(),
+                username: None,
+                sopsy_file: None,
+                public_key: Some("age1konstantin".into()),
+                age_args: vec![],
+            },
+        )
+        .expect("join should succeed");
+
+        let cfg = Config::load_from_dir(dir).unwrap();
+        assert_eq!(
+            cfg.recipient("Konstantin Gredeskoul")
+                .unwrap()
+                .username
+                .as_deref(),
+            Some("kig"),
+            "with no --username, join records $USER"
+        );
+
+        match &saved_user {
+            Some(u) => set_env("USER", Some(Path::new(u))),
+            None => set_env("USER", None),
+        }
+    });
+}
+
+#[test]
+#[serial]
+fn approve_records_approver_provenance() {
+    with_repo(|dir| {
+        // The approver's $USER matches an active member's `username`, so the
+        // provenance reads "Full Name (username)".
+        let sopsy = "recipients:\n  \
+            - name: Konstantin Gredeskoul\n    public_key: age1kig\n    username: kig\n  \
+            - name: bob\n    public_key: age1bob\n    state: pending\n";
+        flow_repo(dir, Some(sopsy), Some(SOPS_ALICE_ONLY));
+        set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+        let saved_user = std::env::var("USER").ok();
+        set_env("USER", Some(Path::new("kig")));
+
+        approve::run(
+            &test_ui(),
+            &ApproveArgs {
+                names: vec!["bob".into()],
+                force: false,
+                no_updatekeys: true,
+            },
+        )
+        .expect("approve should succeed");
+
+        let cfg = Config::load_from_dir(dir).unwrap();
+        let bob = cfg.recipient("bob").unwrap();
+        assert_eq!(
+            bob.approved_by.as_deref(),
+            Some("Konstantin Gredeskoul (kig)"),
+            "approver resolves to `Full Name (username)`"
+        );
+        assert!(bob.approved_at.is_some(), "approval date must be recorded");
+
+        match &saved_user {
+            Some(u) => set_env("USER", Some(Path::new(u))),
+            None => set_env("USER", None),
+        }
+        set_env("SOPSY_ASSUME_YES", None);
+    });
+}
+
+#[test]
+#[serial]
+fn list_shows_username_and_approval_provenance() {
+    let dir = TempDir::new().unwrap();
+    git_init(dir.path());
+    // A hand-written fixture (no `.sopsy.sha` — legacy configs must still
+    // list): one approved member with long name/username to exercise the
+    // column caps, and one pending member.
+    let body = "recipients:\n  \
+        - name: A Very Long Recipient Name Indeed\n    public_key: age1admin\n    \
+        username: konstantingredeskoul\n    \
+        approved_by: Konstantin Gredeskoul (kig)\n    \
+        approved_at: 2026-07-01T12:00:00Z\n  \
+        - name: bob\n    public_key: age1bob\n    state: pending\n";
+    std::fs::write(dir.path().join(".sopsy.yml"), body).unwrap();
+
+    let output = assert_cmd::Command::cargo_bin("sopsy")
+        .unwrap()
+        .args(["recipient", "list"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "recipient list should exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    for header in [
+        "NAME",
+        "USERNAME",
+        "PUBLIC KEY",
+        "BREAK-GLASS",
+        "APPROVED BY",
+    ] {
+        assert!(
+            stdout.contains(header),
+            "missing {header} column:\n{stdout}"
+        );
+    }
+    // Names cap at 21 chars, usernames at 12 — both marked with an ellipsis.
+    assert!(
+        stdout.contains("A Very Long Recipient…"),
+        "name should truncate at 21 chars:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("konstantingr…"),
+        "username should truncate at 12 chars:\n{stdout}"
+    );
+    // Provenance renders as `Full Name (username) on YYYY-MM-DD`.
+    assert!(
+        stdout.contains("Konstantin Gredeskoul (kig) on 2026-07-01"),
+        "approved-by cell should show approver and date:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("(pending)"),
+        "pending members should read as awaiting approval:\n{stdout}"
+    );
 }
 
 #[test]

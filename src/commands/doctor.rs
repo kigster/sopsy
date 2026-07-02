@@ -19,7 +19,7 @@
 
 use std::path::Path;
 
-use crate::config::{CONFIG_FILE_NAME, Config};
+use crate::config::{CHECKSUM_FILE_NAME, CONFIG_FILE_NAME, Config};
 use crate::error::Result;
 use crate::git;
 use crate::ui::Ui;
@@ -228,11 +228,14 @@ fn repo_checks(ui: &Ui) {
     }
 
     // `.sopsy.yml` — sopsy's own metadata; parse it into the typed `Config`.
+    // Loaded *unverified*: the doctor is the one place allowed to read a file
+    // whose checksum is stale, because its job is to repair the checksum.
     let sopsy_yml = root.join(CONFIG_FILE_NAME);
     if sopsy_yml.exists() {
-        match Config::load(&sopsy_yml) {
-            Ok(config) => {
+        match Config::load_unverified(&sopsy_yml) {
+            Ok((config, raw)) => {
                 ui.success(format!("{CONFIG_FILE_NAME} present and parses"));
+                checksum_check(ui, &sopsy_yml, &config, &raw);
                 recipient_checks(ui, &config);
             }
             Err(err) => {
@@ -243,6 +246,36 @@ fn repo_checks(ui: &Ui) {
         }
     } else {
         ui.warn(format!("{CONFIG_FILE_NAME} missing (run `sopsy init`)"));
+    }
+}
+
+/// Verify the `.sopsy.sha` integrity sidecar against the current bytes of
+/// `.sopsy.yml`, writing a fresh checksum when it is missing or stale.
+///
+/// This is the doctor's only mutation, and deliberately so: `Config::load`
+/// refuses a mismatched checksum, so running the doctor is how an operator
+/// blesses a legitimate manual edit.
+fn checksum_check(ui: &Ui, config_path: &Path, config: &Config, raw: &str) {
+    let expected = config.compute_checksum(raw);
+    let sha_path = Config::checksum_path(config_path);
+    let stored = std::fs::read_to_string(&sha_path).ok();
+    if stored.as_deref().map(str::trim) == Some(expected.as_str()) {
+        ui.success(format!("{CHECKSUM_FILE_NAME} integrity checksum verified"));
+        return;
+    }
+    let reason = if stored.is_none() {
+        "missing"
+    } else {
+        "stale (file was edited outside sopsy)"
+    };
+    match std::fs::write(&sha_path, format!("{expected}\n")) {
+        Ok(()) => ui.warn(format!(
+            "{CHECKSUM_FILE_NAME} was {reason} — repaired; review `git diff \
+             {CONFIG_FILE_NAME}` and commit both files together"
+        )),
+        Err(err) => ui.failure(format!(
+            "{CHECKSUM_FILE_NAME} was {reason} and could not be repaired: {err}"
+        )),
     }
 }
 
@@ -318,6 +351,34 @@ mod tests {
 
         // A missing file surfaces an I/O error rather than panicking.
         assert!(parse_yaml(&dir.path().join("missing.yaml")).is_err());
+    }
+
+    #[test]
+    fn checksum_check_verifies_and_repairs() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let mut cfg = Config::default();
+        cfg.recipients.push(Recipient::new("admin", "age1admin"));
+        let path = cfg.save_to_dir(dir.path()).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let sha_path = Config::checksum_path(&path);
+
+        // Fresh save → verified, sidecar untouched.
+        checksum_check(&ui(), &path, &cfg, &raw);
+        let good = std::fs::read_to_string(&sha_path).unwrap();
+
+        // Missing sidecar → repaired (rewritten identically).
+        std::fs::remove_file(&sha_path).unwrap();
+        checksum_check(&ui(), &path, &cfg, &raw);
+        assert_eq!(std::fs::read_to_string(&sha_path).unwrap(), good);
+
+        // Stale sidecar (hand edit happened) → repaired to match current bytes.
+        std::fs::write(&sha_path, "0000\n").unwrap();
+        checksum_check(&ui(), &path, &cfg, &raw);
+        assert_eq!(std::fs::read_to_string(&sha_path).unwrap(), good);
+        assert!(
+            Config::load(&path).is_ok(),
+            "a repaired checksum must satisfy the strict loader"
+        );
     }
 
     #[test]

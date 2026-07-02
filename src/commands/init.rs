@@ -15,14 +15,17 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::cli::{InitArgs, RecipientBreakGlassArgs, RecipientCommand};
+use crate::commands::recipient::system_username;
 use crate::config::{Config, Recipient};
 use crate::error::{Error, Result};
 use crate::sops::{self, FileType};
 use crate::ui::Ui;
 use crate::{enclave, git, keystore};
 
-/// Default recipient name when none is supplied.
-const DEFAULT_RECIPIENT_NAME: &str = "primary";
+/// Default recipient name when none is supplied. The init-time recipient is
+/// the repository's *admin*: the first entry in `.sopsy.yml`, whose public key
+/// also anchors the `.sopsy.sha` integrity checksum.
+const DEFAULT_RECIPIENT_NAME: &str = "admin";
 
 /// Placeholder contents for a freshly created `.env.example`.
 const ENV_EXAMPLE_TEMPLATE: &str = "\
@@ -80,25 +83,13 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
         ui.success("Created .env.example.");
     }
 
-    // 7. `.env.encrypted`, seeded from `.env` if present else `.env.example`.
-    let env_encrypted = root.join(".env.encrypted");
-    if env_encrypted.exists() && !args.force {
-        ui.info(".env.encrypted already present; leaving it untouched (pass --force to recreate).");
-    } else {
-        let seed = read_seed(&root)?;
-        std::fs::write(&env_encrypted, seed)?;
-        let spinner = ui.spinner("Encrypting .env.encrypted with sops…");
-        let result = sops::encrypt_in_place(&env_encrypted, FileType::Dotenv);
-        spinner.finish_and_clear();
-        result?;
-        ui.success("Encrypted .env.encrypted.");
-    }
-
-    // 8. Keep plaintext secrets out of git. `.env.*` is broad, so explicitly
-    //    un-ignore the plaintext template and *all* encrypted artifacts — every
-    //    `*.encrypted` file (e.g. `.env.encrypted`, `.env.example.encrypted`,
-    //    `config/foo.encrypted`) is meant to be committed and must stay visible
-    //    to git, or membership changes can't re-key it.
+    // 7. Keep plaintext secrets out of git *before* any ciphertext is created,
+    //    so even a crash mid-encryption lands in an ignored-by-default state.
+    //    `.env.*` is broad, so explicitly un-ignore the plaintext template and
+    //    *all* encrypted artifacts — every `*.encrypted` file (e.g.
+    //    `.env.encrypted`, `.env.example.encrypted`, `config/foo.encrypted`) is
+    //    meant to be committed and must stay visible to git, or membership
+    //    changes can't re-key it.
     let mut gitignore_changed = false;
     for pattern in [
         ".env",
@@ -118,6 +109,30 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
         ui.success("Updated .gitignore to keep plaintext secrets out of git.");
     } else {
         ui.info(".gitignore already protects plaintext secrets.");
+    }
+
+    // 8. `.env.encrypted`, seeded from `.env` if present else `.env.example`.
+    //    The seed is encrypted from a private temp file straight to a string, so
+    //    plaintext is *never* written to the committable artifact path — a failed
+    //    `sops` run can no longer leave a plaintext `.env.encrypted` behind (and
+    //    `!*.encrypted` un-ignores that path, so a leak there would be
+    //    committable). The ciphertext is written only on success.
+    let env_encrypted = root.join(".env.encrypted");
+    if env_encrypted.exists() && !args.force {
+        ui.info(".env.encrypted already present; leaving it untouched (pass --force to recreate).");
+    } else {
+        let seed = read_seed(&root)?;
+        // NamedTempFile is created 0600 in the system temp dir (outside the repo)
+        // and removed when it drops, so the plaintext seed never lands anywhere
+        // committable.
+        let seed_file = tempfile::NamedTempFile::new()?;
+        std::fs::write(seed_file.path(), &seed)?;
+        let spinner = ui.spinner("Encrypting .env.encrypted with sops…");
+        let ciphertext =
+            sops::encrypt_to_string(seed_file.path(), FileType::Dotenv, &env_encrypted);
+        spinner.finish_and_clear();
+        std::fs::write(&env_encrypted, ciphertext?)?;
+        ui.success("Encrypted .env.encrypted.");
     }
 
     // 9. Record sopsy's own state in `.sopsy.yml`.
@@ -341,19 +356,6 @@ fn resolve_username(ui: &Ui, args: &InitArgs) -> Result<Option<String>> {
     }
 }
 
-/// Best-effort current system username from `$USER` / `$LOGNAME`.
-fn system_username() -> Option<String> {
-    for var in ["USER", "LOGNAME"] {
-        if let Ok(value) = std::env::var(var) {
-            let value = value.trim().to_string();
-            if !value.is_empty() {
-                return Some(value);
-            }
-        }
-    }
-    None
-}
-
 /// Render a `.sops.yaml` whose creation rules encrypt the project's encrypted
 /// files to `age_recipients` (a comma-separated list of age public keys).
 fn render_sops_yaml(age_recipients: &str) -> String {
@@ -424,37 +426,6 @@ mod tests {
         assert!(yaml.contains("creation_rules:"));
         assert!(yaml.contains("age1aaa,age1bbb"));
         assert!(yaml.contains(r"\.env\.encrypted$"));
-    }
-
-    #[test]
-    #[serial]
-    fn system_username_falls_back_to_none_when_unset() {
-        // Snapshot and clear both vars, then restore them afterwards.
-        let saved: Vec<(&str, Option<String>)> = ["USER", "LOGNAME"]
-            .iter()
-            .map(|k| (*k, std::env::var(k).ok()))
-            .collect();
-        // SAFETY: serialized via `#[serial]`.
-        unsafe {
-            std::env::remove_var("USER");
-            std::env::remove_var("LOGNAME");
-        }
-        assert_eq!(system_username(), None);
-        // An empty value is also treated as absent.
-        // SAFETY: serialized via `#[serial]`.
-        unsafe {
-            std::env::set_var("USER", "   ");
-        }
-        assert_eq!(system_username(), None);
-        // SAFETY: restore the original environment.
-        unsafe {
-            for (k, v) in saved {
-                match v {
-                    Some(val) => std::env::set_var(k, val),
-                    None => std::env::remove_var(k),
-                }
-            }
-        }
     }
 
     #[test]

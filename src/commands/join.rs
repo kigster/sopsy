@@ -15,7 +15,7 @@ use std::time::SystemTime;
 
 use crate::cli::JoinArgs;
 use crate::commands::recipient;
-use crate::config::{CONFIG_FILE_NAME, Config, MemberState, Recipient};
+use crate::config::{CHECKSUM_FILE_NAME, CONFIG_FILE_NAME, Config, MemberState, Recipient};
 use crate::enclave;
 use crate::error::{Error, Result};
 use crate::keystore;
@@ -57,10 +57,21 @@ pub fn run(ui: &Ui, args: &JoinArgs) -> Result<()> {
         )));
     }
 
+    // Record both halves of the requester's identity: the human name (the
+    // positional argument) and the system username (`--username` or `$USER`).
+    let username = args
+        .username
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(str::to_string)
+        .or_else(recipient::system_username);
+
     let now = humantime::format_rfc3339_seconds(SystemTime::now()).to_string();
-    config
-        .recipients
-        .push(Recipient::pending(&name, &public_key, &now));
+    config.recipients.push(Recipient {
+        username,
+        ..Recipient::pending(&name, &public_key, &now)
+    });
     config.save(&config_path)?;
     ui.success(format!(
         "recorded `{name}` as pending in {}",
@@ -128,7 +139,7 @@ fn print_next_steps(ui: &Ui, name: &str, config: &Config) {
     ui.header("Next steps");
     ui.info("You (the new member):");
     ui.info(format!(
-        "  1. Commit the change:  git add {CONFIG_FILE_NAME} && git commit -m \"join: request access for {name}\""
+        "  1. Commit the change:  git add {CONFIG_FILE_NAME} {CHECKSUM_FILE_NAME} && git commit -m \"join: request access for {name}\""
     ));
     ui.info("  2. Push the branch and open a pull request.");
     ui.info("  3. Ask any current member to approve you.");

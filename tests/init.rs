@@ -104,7 +104,7 @@ fn init_with_public_key_encrypts_real_env() {
             "--public-key",
             &public_key,
             "--recipient-name",
-            "primary",
+            "admin",
         ])
         .assert()
         .success();
@@ -148,7 +148,7 @@ fn init_with_public_key_encrypts_real_env() {
     assert!(gitignore.lines().any(|l| l == ".env"), "{gitignore}");
     let config = std::fs::read_to_string(dir.path().join(".sopsy.yml")).unwrap();
     assert!(config.contains(&public_key), "recipient key not recorded");
-    assert!(config.contains("primary"), "recipient name not recorded");
+    assert!(config.contains("admin"), "recipient name not recorded");
 }
 
 #[test]
@@ -332,7 +332,8 @@ fn init_generates_enclave_identity_with_fakes() {
     );
 
     // Fake `sops`: answers --version, otherwise records the invocation and
-    // writes a marker into the (last-arg) target file to simulate encryption.
+    // emits ciphertext on stdout (init encrypts to a string via
+    // `--filename-override`, capturing stdout — it no longer encrypts in place).
     let record = dir.path().join("sops-invocations.log");
     let sops = dir.path().join("sops");
     write_script(
@@ -340,8 +341,7 @@ fn init_generates_enclave_identity_with_fakes() {
         &format!(
             "case \"$1\" in\n  --version) echo 'sops 9.9.9 (fake)'; exit 0;;\nesac\n\
              echo \"$@\" >> '{record}'\n\
-             for a in \"$@\"; do f=\"$a\"; done\n\
-             echo 'ENC[fake-sops]' > \"$f\"\n",
+             echo 'ENC[fake-sops]'\n",
             record = record.display()
         ),
     );
@@ -369,15 +369,83 @@ fn init_generates_enclave_identity_with_fakes() {
         "enclave identity not recorded in .sopsy.yml:\n{config}"
     );
 
-    // sops was actually invoked to encrypt `.env.encrypted`.
+    // sops was actually invoked to encrypt, resolving recipients by the
+    // artifact name via `--filename-override` (not in-place on the artifact).
     let log = std::fs::read_to_string(&record).unwrap();
     assert!(log.contains("--encrypt"), "sops encrypt not invoked: {log}");
-    assert!(log.contains("--in-place"), "sops not run in place: {log}");
+    assert!(
+        log.contains("--filename-override"),
+        "sops should resolve recipients via --filename-override: {log}"
+    );
+    assert!(
+        log.contains(".env.encrypted"),
+        "the override name should be the .env.encrypted artifact: {log}"
+    );
+    // The captured ciphertext (stdout) is what lands in the artifact.
     let encrypted = std::fs::read_to_string(dir.path().join(".env.encrypted")).unwrap();
     assert!(
         encrypted.contains("ENC[fake-sops]"),
-        "fake sops did not encrypt"
+        "captured ciphertext should be written to .env.encrypted"
     );
+}
+
+// ----------------------------------------------------------------------------
+// CRITICAL regression: a failed encryption must NOT leave plaintext on disk
+// ----------------------------------------------------------------------------
+
+/// If `sops` fails during `init`, the seed plaintext must never be left at the
+/// committable `.env.encrypted` path (it is un-ignored by `!*.encrypted`). The
+/// fix encrypts from a private temp file straight to a string and writes the
+/// artifact only on success, so a failure leaves no artifact at all.
+#[test]
+#[serial]
+fn init_failed_encryption_leaves_no_plaintext_artifact() {
+    let dir = TempDir::new().unwrap();
+    init_git_repo(dir.path());
+    let (public_key, _key_file) = generate_age_key(dir.path());
+
+    // A real `.env` with a real secret as the seed.
+    std::fs::write(dir.path().join(".env"), "PASSWORD=supersecret\n").unwrap();
+
+    // Fake `sops`: reports a version (so init preflight/detect pass) but fails
+    // on any encrypt invocation, printing nothing usable to stdout.
+    let sops = dir.path().join("sops");
+    write_script(
+        &sops,
+        "case \"$1\" in\n  --version) echo 'sops 9.9.9 (fake)'; exit 0;;\nesac\n\
+         echo 'boom: cannot encrypt' >&2\nexit 1\n",
+    );
+
+    sopsy_in(dir.path())
+        .env("SOPSY_SOPS_BIN", &sops)
+        .args([
+            "--non-interactive",
+            "init",
+            "--no-generate",
+            "--public-key",
+            &public_key,
+        ])
+        .assert()
+        .failure();
+
+    // The artifact must not exist at all — and certainly must not contain the
+    // plaintext secret.
+    let artifact = dir.path().join(".env.encrypted");
+    assert!(
+        !artifact.exists(),
+        "failed encryption must not leave a .env.encrypted artifact"
+    );
+
+    // Defense in depth: even if some future change reintroduced the file, the
+    // plaintext secret must never be committable. `.gitignore` is written before
+    // encryption, but `!*.encrypted` un-ignores this path — so the real
+    // guarantee is that the plaintext is never written here in the first place.
+    if let Ok(contents) = std::fs::read_to_string(&artifact) {
+        assert!(
+            !contents.contains("supersecret"),
+            "plaintext secret leaked into .env.encrypted:\n{contents}"
+        );
+    }
 }
 
 // ----------------------------------------------------------------------------
