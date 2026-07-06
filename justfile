@@ -12,7 +12,6 @@ setup:
     brew bundle --no-upgrade
     lefthook install
     
-
 secrets-scan:
     @echo "Scanning the full working tree"
     @gitleaks dir \
@@ -24,6 +23,8 @@ build: fmt warnings
 
 install: build
     cargo install --path .
+
+
 
 fmt: 
     cargo fmt

@@ -73,13 +73,29 @@ pub fn run(ui: &Ui, args: &JoinArgs) -> Result<()> {
         ..Recipient::pending(&name, &public_key, &now)
     });
     config.save(&config_path)?;
-    ui.success(format!(
+    ui.banner_success(format!(
         "recorded `{name}` as pending in {}",
         config_path.display()
     ));
     ui.info(format!("requested at {now}"));
 
-    print_next_steps(ui, &name, &config);
+    let staged = ui.stage_requested();
+    if staged {
+        // `join` touches only its `.sopsy.yml` and the `.sopsy.sha` sidecar. Stage
+        // relative to that file's directory (the repo root, or wherever an
+        // explicit `--sopsy-file` lives).
+        let repo = config_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let files = [config_path.clone(), Config::checksum_path(&config_path)];
+        crate::git::stage_and_advise(
+            ui,
+            repo,
+            &files,
+            &format!("Request sopsy access for {name}"),
+        )?;
+    }
+    print_next_steps(ui, &name, &config, staged);
     Ok(())
 }
 
@@ -115,8 +131,23 @@ fn acquire_public_key(ui: &Ui, args: &JoinArgs) -> Result<String> {
     }
 
     enclave::ensure_available()?;
-    let spinner = ui.spinner("Generating Secure Enclave identity (Touch ID may prompt)…");
-    let identity = enclave::generate_identity_with_args(&args.age_args);
+
+    // `--without-touch-id` maps to age-plugin-se's `--access-control none`, so the
+    // Enclave key needs no biometric/passcode to unlock. It is prepended to any
+    // trailing `-- <age flags>`, letting an explicit `--access-control=...` there
+    // still win (age-plugin-se takes the last value).
+    let mut keygen_args: Vec<String> = Vec::new();
+    if args.without_touch_id {
+        keygen_args.push("--access-control=none".to_string());
+    }
+    keygen_args.extend(args.age_args.iter().cloned());
+
+    let spinner = ui.spinner(if args.without_touch_id {
+        "Generating Secure Enclave identity (no Touch ID)…"
+    } else {
+        "Generating Secure Enclave identity (Touch ID may prompt)…"
+    });
+    let identity = enclave::generate_identity_with_args(&keygen_args);
     spinner.finish_and_clear();
     let identity = identity?;
     ui.success("Created a Secure Enclave-backed identity.");
@@ -135,12 +166,21 @@ fn acquire_public_key(ui: &Ui, args: &JoinArgs) -> Result<String> {
 }
 
 /// Print what the newcomer does next, and what an approver will do.
-fn print_next_steps(ui: &Ui, name: &str, config: &Config) {
+///
+/// When `staged` is set (the `--git` flow), the commit/push commands were
+/// already printed by [`crate::git::stage_and_advise`], so step 1 points at them
+/// instead of repeating a manual `git add`.
+fn print_next_steps(ui: &Ui, name: &str, config: &Config, staged: bool) {
     ui.header("Next steps");
     ui.info("You (the new member):");
-    ui.info(format!(
-        "  1. Commit the change:  git add {CONFIG_FILE_NAME} {CHECKSUM_FILE_NAME} && git commit -m \"join: request access for {name}\""
-    ));
+    if staged {
+        ui.info("  1. Commit and push the staged change (commands shown above).");
+    } else {
+        ui.info(format!(
+            "  1. Commit the change:  git add {CONFIG_FILE_NAME} {CHECKSUM_FILE_NAME} && git commit -m \"join: request access for {name}\""
+        ));
+        ui.info("     (or re-run with --git to stage it automatically)");
+    }
     ui.info("  2. Push the branch and open a pull request.");
     ui.info("  3. Ask any current member to approve you.");
     ui.info("An approver (any active member) then runs, on your PR branch:");

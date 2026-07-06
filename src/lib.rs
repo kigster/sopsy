@@ -8,6 +8,7 @@
 //! ## Module map
 //!
 //! - [`cli`] — clap definition for every command and flag.
+//! - [`help`] — colorizer for the clap-rendered help screens.
 //! - [`ui`] — colorful output + interactive/non-interactive prompting.
 //! - [`config`] — serde model for `.sopsy.yml`.
 //! - [`error`] — the library [`Error`](error::Error) enum and [`Result`].
@@ -21,13 +22,14 @@ pub mod config;
 pub mod enclave;
 pub mod error;
 pub mod git;
+pub mod help;
 pub mod keystore;
 pub mod sops;
 pub mod ui;
 
 use clap::Parser;
 
-use crate::cli::{Cli, Command};
+use crate::cli::{Cli, Command, SecretsCommand};
 use crate::error::Result;
 use crate::ui::Ui;
 
@@ -36,13 +38,42 @@ use crate::ui::Ui;
 /// This is the single entry point used by the binary. It returns a
 /// [`Result`]; the binary maps the error to a process exit code.
 pub fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => return handle_parse_error(err),
+    };
     let ui = Ui::new(
         cli.global.resolve_color(),
         cli.global.verbose,
         cli.global.resolve_interactive(),
-    );
+    )
+    .with_git(cli.global.git);
     dispatch(&ui, cli.command)
+}
+
+/// Handle a clap parse error, routing help screens through the
+/// [`help`] colorizer while preserving clap's exit semantics.
+///
+/// `Cli::parse` would print clap's own (single-style) help; we intercept it so
+/// commands, options, and headings can carry distinct colors.
+fn handle_parse_error(err: clap::Error) -> Result<()> {
+    use clap::error::ErrorKind;
+    match err.kind() {
+        // `--help` / `help <cmd>`: colorized help on stdout, exit 0.
+        ErrorKind::DisplayHelp => {
+            print!("{}", help::render(&err.to_string(), help::color_wanted()));
+            Ok(())
+        }
+        // Bare `sopsy` (or a bare subcommand group): clap prints help to
+        // stderr and exits 2 — keep that contract, but colorized.
+        ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+            eprint!("{}", help::render(&err.to_string(), help::color_wanted()));
+            std::process::exit(2);
+        }
+        // Version requests and genuine usage errors keep clap's rendering,
+        // output stream, and exit codes.
+        _ => err.exit(),
+    }
 }
 
 /// Dispatch a parsed [`Command`] using the given [`Ui`].
@@ -57,6 +88,10 @@ fn dispatch(ui: &Ui, command: Command) -> Result<()> {
         Command::Approve(args) => commands::approve::run(ui, &args),
         Command::Recipient(cmd) => commands::recipient::run(ui, &cmd),
         Command::Secrets(cmd) => commands::secrets::run(ui, &cmd),
+        // `sopsy encrypt`/`sopsy decrypt` are shorthands for the `secrets`
+        // subcommands, routed through the same handler.
+        Command::Encrypt(args) => commands::secrets::run(ui, &SecretsCommand::Encrypt(args)),
+        Command::Decrypt(args) => commands::secrets::run(ui, &SecretsCommand::Decrypt(args)),
         Command::ListSupportedTypes => {
             commands::secrets::list_supported_types(ui);
             Ok(())
@@ -70,7 +105,7 @@ fn dispatch(ui: &Ui, command: Command) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::InitArgs;
+    use crate::cli::{CompletionArgs, DepsArgs, InitArgs, SecretsDecryptArgs, SecretsEncryptArgs};
 
     fn test_ui() -> Ui {
         Ui::new(false, false, false)
@@ -79,6 +114,61 @@ mod tests {
     #[test]
     fn dispatch_doctor_is_ok() {
         assert!(dispatch(&test_ui(), Command::Doctor).is_ok());
+    }
+
+    #[test]
+    fn dispatch_deps_and_completion_are_ok() {
+        let ui = test_ui();
+        // `--dry-run` only prints the would-be `brew install` line.
+        assert!(
+            dispatch(
+                &ui,
+                Command::Deps(DepsArgs {
+                    check: false,
+                    dry_run: true,
+                })
+            )
+            .is_ok()
+        );
+        assert!(
+            dispatch(
+                &ui,
+                Command::Completion(CompletionArgs {
+                    shell: clap_complete::Shell::Bash,
+                })
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn dispatch_encrypt_decrypt_shorthands_route_to_secrets() {
+        // Both arms route through `commands::secrets::run`; a nonexistent
+        // input file proves the arm is taken and the shared validation
+        // rejects it before any external tool is invoked.
+        let ui = test_ui();
+        assert!(
+            dispatch(
+                &ui,
+                Command::Encrypt(SecretsEncryptArgs {
+                    file: "no-such-file.env".into(),
+                    output: None,
+                    file_type: None,
+                })
+            )
+            .is_err()
+        );
+        assert!(
+            dispatch(
+                &ui,
+                Command::Decrypt(SecretsDecryptArgs {
+                    file: "no-such-file.env.encrypted".into(),
+                    output: None,
+                    file_type: None,
+                })
+            )
+            .is_err()
+        );
     }
 
     #[test]

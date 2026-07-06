@@ -38,6 +38,11 @@ pub struct Ui {
     /// Whether interactive prompting is allowed. When `false`, prompt helpers
     /// return [`Error::NonInteractive`] rather than blocking.
     interactive: bool,
+    /// Whether the user asked sopsy to stage its changes with `git add` and print
+    /// commit/PR instructions (the global `--git` flag). Carried here because it
+    /// is a resolved global flag like the others; consumed by
+    /// [`crate::git::stage_and_advise`].
+    git: bool,
 }
 
 impl Ui {
@@ -68,7 +73,33 @@ impl Ui {
             verbose,
             // Interactive prompting only makes sense on a real terminal.
             interactive: interactive && stdout_tty,
+            // Enabled explicitly via `with_git`; off by default so every test and
+            // nested call starts without staging behavior.
+            git: false,
         }
+    }
+
+    /// Enable the `--git` staging behavior on this handle. Consuming builder,
+    /// used once in [`crate::run`] from the parsed global flag.
+    pub fn with_git(mut self, git: bool) -> Self {
+        self.git = git;
+        self
+    }
+
+    /// A clone of this handle with `--git` disabled, for nested command calls
+    /// that must not emit their own staging advice — e.g. `sopsy init` invoking
+    /// the break-glass ceremony, since `init` stages the whole file set once at
+    /// the end.
+    pub fn without_git(&self) -> Self {
+        Self {
+            git: false,
+            ..self.clone()
+        }
+    }
+
+    /// Whether the user requested `git add` + commit/PR advice (`--git`).
+    pub fn stage_requested(&self) -> bool {
+        self.git
     }
 
     /// Whether color output is currently enabled.
@@ -137,6 +168,77 @@ impl Ui {
         if self.verbose {
             println!("{}", self.paint(msg.as_ref(), Style::new().dimmed()));
         }
+    }
+
+    /// Print a copy-pasteable shell command, indented and highlighted.
+    ///
+    /// Unlike [`Ui::info`] it carries no leading status glyph, so the line can be
+    /// selected and run as-is. Used to present the `git`/`gh` commands the
+    /// `--git` flow suggests.
+    pub fn command(&self, cmd: impl AsRef<str>) {
+        println!("  {}", self.paint(cmd.as_ref(), Style::new().bold().cyan()));
+    }
+
+    // ----- Full-width banner boxes -----------------------------------------
+
+    /// Print a green full-width success banner (major happy endings: `init`
+    /// finished, members approved, all checks passed).
+    pub fn banner_success(&self, msg: impl AsRef<str>) {
+        self.banner("✔", msg.as_ref(), Style::new().black().on_green().bold());
+    }
+
+    /// Print a blue full-width informational banner.
+    pub fn banner_info(&self, msg: impl AsRef<str>) {
+        self.banner("ℹ", msg.as_ref(), Style::new().white().on_blue().bold());
+    }
+
+    /// Print a yellow full-width warning banner (action required, but nothing
+    /// is broken).
+    pub fn banner_warn(&self, msg: impl AsRef<str>) {
+        self.banner("⚠", msg.as_ref(), Style::new().black().on_yellow().bold());
+    }
+
+    /// Print a red full-width alert banner (something failed or is unsafe).
+    pub fn banner_alert(&self, msg: impl AsRef<str>) {
+        self.banner("✗", msg.as_ref(), Style::new().white().on_red().bold());
+    }
+
+    /// Render a screen-wide banner box: with color, padded lines on a solid
+    /// background; without color (pipes, CI, `NO_COLOR`), a plain bordered box
+    /// so the emphasis still survives in logs. The message is word-wrapped to
+    /// the terminal width.
+    fn banner(&self, glyph: &str, msg: &str, style: Style) {
+        let width = term_width().max(20);
+        let lines = wrap_text(msg, width - 6);
+        println!();
+        if self.color {
+            let pad = " ".repeat(width);
+            println!("{}", self.paint(&pad, style));
+            for (i, line) in lines.iter().enumerate() {
+                let lead = if i == 0 {
+                    format!("  {glyph} ")
+                } else {
+                    "    ".into()
+                };
+                let used = lead.chars().count() + line.chars().count();
+                let text = format!("{lead}{line}{}", " ".repeat(width.saturating_sub(used)));
+                println!("{}", self.paint(&text, style));
+            }
+            println!("{}", self.paint(&pad, style));
+        } else {
+            println!("┌{}┐", "─".repeat(width - 2));
+            for (i, line) in lines.iter().enumerate() {
+                let lead = if i == 0 {
+                    format!("{glyph} ")
+                } else {
+                    "  ".into()
+                };
+                let used = 4 + lead.chars().count() + line.chars().count();
+                println!("│ {lead}{line}{} │", " ".repeat(width.saturating_sub(used)));
+            }
+            println!("└{}┘", "─".repeat(width - 2));
+        }
+        println!();
     }
 
     /// Print a bold, underlined section header with surrounding spacing.
@@ -302,6 +404,48 @@ impl Ui {
     }
 }
 
+/// The terminal width in columns, falling back to 80 when stdout is not a
+/// terminal (pipes, CI logs) so banners stay a sane width in captured output.
+fn term_width() -> usize {
+    terminal_size::terminal_size()
+        .map(|(w, _)| w.0 as usize)
+        .unwrap_or(80)
+}
+
+/// Word-wrap `text` to at most `max` characters per line, preserving explicit
+/// newlines and hard-splitting words longer than a whole line.
+fn wrap_text(text: &str, max: usize) -> Vec<String> {
+    let max = max.max(1);
+    let mut lines = Vec::new();
+    for raw in text.lines() {
+        let mut current = String::new();
+        let mut count = 0usize;
+        for word in raw.split_whitespace() {
+            // Hard-split words that cannot fit on any line by themselves.
+            let chars: Vec<char> = word.chars().collect();
+            for piece in chars.chunks(max) {
+                let piece: String = piece.iter().collect();
+                let sep = usize::from(count > 0);
+                if count + sep + piece.chars().count() > max {
+                    lines.push(std::mem::take(&mut current));
+                    count = 0;
+                }
+                if count > 0 {
+                    current.push(' ');
+                    count += 1;
+                }
+                count += piece.chars().count();
+                current.push_str(&piece);
+            }
+        }
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
 /// Convert an `inquire` (or any standard) error into our catch-all
 /// [`Error::Other`] variant.
 ///
@@ -325,6 +469,7 @@ mod tests {
             color: false,
             verbose: false,
             interactive: false,
+            git: false,
         }
     }
 
@@ -338,6 +483,7 @@ mod tests {
             color: true,
             verbose: true,
             interactive: true,
+            git: false,
         }
     }
 
@@ -381,6 +527,26 @@ mod tests {
         assert!(ui.color_enabled());
         assert!(ui.is_verbose());
         assert!(ui.is_interactive());
+    }
+
+    #[test]
+    fn git_flag_is_off_by_default_and_toggled_by_builder() {
+        // Fresh handles never stage; `with_git` opts in; `without_git` opts a
+        // clone back out (the nested-call path) while preserving other flags.
+        assert!(!color_ui().stage_requested());
+        let staging = color_ui().with_git(true);
+        assert!(staging.stage_requested());
+        let nested = staging.without_git();
+        assert!(!nested.stage_requested());
+        assert!(nested.color_enabled());
+        assert!(nested.is_interactive());
+    }
+
+    #[test]
+    fn command_prints_without_a_status_glyph() {
+        // Smoke test for the copy-pasteable command line in both color modes.
+        noninteractive_ui().command("git commit -m \"x\"");
+        color_ui().command("git push -u origin HEAD");
     }
 
     #[test]
@@ -493,6 +659,42 @@ mod tests {
     #[test]
     fn flush_does_not_panic() {
         noninteractive_ui().flush();
+    }
+
+    #[test]
+    fn wrap_text_wraps_at_word_boundaries() {
+        assert_eq!(wrap_text("a bb ccc", 5), vec!["a bb", "ccc"]);
+        // A short message stays on one line.
+        assert_eq!(wrap_text("hello", 80), vec!["hello"]);
+        // Explicit newlines (and blank lines) are preserved.
+        assert_eq!(wrap_text("one\n\ntwo", 80), vec!["one", "", "two"]);
+        // Empty input still yields a single (blank) banner line.
+        assert_eq!(wrap_text("", 80), vec![""]);
+    }
+
+    #[test]
+    fn wrap_text_hard_splits_overlong_words() {
+        assert_eq!(wrap_text("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        // ...also when surrounded by normal words.
+        assert_eq!(wrap_text("x abcdefgh y", 4), vec!["x", "abcd", "efgh", "y"]);
+    }
+
+    #[test]
+    fn banners_render_in_both_color_modes() {
+        // Smoke tests: every banner kind must render without panicking, both as
+        // a bordered box (no color) and as a background-painted block (color),
+        // including messages long enough to wrap.
+        let plain = noninteractive_ui();
+        let color = color_ui();
+        for ui in [&plain, &color] {
+            ui.banner_success("all set");
+            ui.banner_info("for your information");
+            ui.banner_warn("action required — store the key offline");
+            ui.banner_alert(
+                "this message is intentionally long enough that it must wrap onto \
+                 several lines inside the banner box regardless of terminal width",
+            );
+        }
     }
 
     #[test]

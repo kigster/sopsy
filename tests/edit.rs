@@ -62,6 +62,26 @@ fn write_appender_editor(path: &Path, line: &str) {
     }
 }
 
+/// Turn `dir` into a real git repository with a stable identity and a `main`
+/// default branch, plus one initial commit so the index diffs cleanly.
+fn init_git_repo(dir: &Path) {
+    let run = |args: &[&str]| {
+        let status = StdCommand::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .status()
+            .expect("git should be available");
+        assert!(status.success(), "git {args:?} failed in {}", dir.display());
+    };
+    run(&["init", "-q", "-b", "main"]);
+    run(&["config", "user.email", "test@example.com"]);
+    run(&["config", "user.name", "Sopsy Test"]);
+    std::fs::write(dir.join("README.md"), "test repo\n").unwrap();
+    run(&["add", "README.md"]);
+    run(&["commit", "-q", "-m", "initial"]);
+}
+
 /// Build a `Command` for the compiled `sopsy` binary.
 fn sopsy() -> AssertCommand {
     AssertCommand::cargo_bin("sopsy").expect("binary `sopsy` should build")
@@ -167,6 +187,79 @@ fn edit_roundtrips_an_encrypted_dotenv() {
     assert!(
         plaintext.contains("BAZ=qux"),
         "appended value missing after edit; got:\n{plaintext}"
+    );
+}
+
+#[test]
+#[serial]
+fn edit_with_git_stages_the_encrypted_file() {
+    let dir = TempDir::new().unwrap();
+    init_git_repo(dir.path());
+    let (public_key, key_file) = generate_age_key(dir.path());
+    write_sops_config(dir.path(), &public_key);
+
+    // Create a real encrypted dotenv file containing `FOO=bar`.
+    let encrypted = dir.path().join(".env.encrypted");
+    std::fs::write(&encrypted, "FOO=bar\n").unwrap();
+    let enc = StdCommand::new("sops")
+        .args([
+            "-e",
+            "--input-type",
+            "dotenv",
+            "--output-type",
+            "dotenv",
+            "-i",
+        ])
+        .arg(&encrypted)
+        .current_dir(dir.path())
+        .env("SOPS_AGE_KEY_FILE", &key_file)
+        .output()
+        .expect("sops should be installed");
+    assert!(
+        enc.status.success(),
+        "sops encrypt failed: {}",
+        String::from_utf8_lossy(&enc.stderr)
+    );
+
+    // An "editor" that appends `BAZ=qux` to whatever file sops opens.
+    let editor = dir.path().join("appender.sh");
+    write_appender_editor(&editor, "BAZ=qux");
+
+    // `--git` must stage the edited ciphertext and print commit/PR advice
+    // (including the success line for the edit itself).
+    sopsy()
+        .arg("--non-interactive")
+        .arg("--git")
+        .arg("edit")
+        .arg(".env.encrypted")
+        .current_dir(dir.path())
+        .env("EDITOR", &editor)
+        .env("SOPS_AGE_KEY_FILE", &key_file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("saved changes to .env.encrypted"))
+        .stdout(predicate::str::contains("Staged for you"))
+        .stdout(predicate::str::contains("git add .env.encrypted"))
+        .stdout(predicate::str::contains(
+            "Next: commit and open a pull request",
+        ))
+        .stdout(predicate::str::contains(
+            "git commit -m \"Update encrypted .env.encrypted\"",
+        ))
+        .stdout(predicate::str::contains("git push -u origin main"));
+
+    // The file really is in the git index afterwards.
+    let staged = StdCommand::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["diff", "--cached", "--name-only"])
+        .output()
+        .expect("git should be available");
+    assert!(staged.status.success());
+    let staged_files = String::from_utf8_lossy(&staged.stdout);
+    assert!(
+        staged_files.lines().any(|line| line == ".env.encrypted"),
+        "edited file not staged; index diff:\n{staged_files}"
     );
 }
 

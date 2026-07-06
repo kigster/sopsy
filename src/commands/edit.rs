@@ -62,6 +62,27 @@ pub fn run(ui: &Ui, args: &EditArgs) -> Result<()> {
     })?;
 
     ui.success(format!("saved changes to {}", args.file.display()));
+
+    if ui.stage_requested() {
+        // Stage just the edited ciphertext, relative to its own directory so this
+        // works whether or not the file sits at the repo root.
+        let repo = args
+            .file
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let name = args
+            .file
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| args.file.display().to_string());
+        crate::git::stage_and_advise(
+            ui,
+            repo,
+            std::slice::from_ref(&args.file),
+            &format!("Update encrypted {name}"),
+        )?;
+    }
     Ok(())
 }
 

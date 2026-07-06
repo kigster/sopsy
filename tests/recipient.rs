@@ -451,6 +451,7 @@ fn join_empty_name_rejected() {
                 username: None,
                 sopsy_file: None,
                 public_key: Some("age1x".into()),
+                without_touch_id: false,
                 age_args: vec![],
             },
         )
@@ -475,6 +476,7 @@ fn join_rejects_duplicate_pending_request() {
                 username: None,
                 sopsy_file: None,
                 public_key: Some("age1bobnew".into()),
+                without_touch_id: false,
                 age_args: vec![],
             },
         )
@@ -496,6 +498,7 @@ fn join_rejects_duplicate_public_key() {
                 username: None,
                 sopsy_file: None,
                 public_key: Some("age1alice".into()),
+                without_touch_id: false,
                 age_args: vec![],
             },
         )
@@ -522,6 +525,7 @@ fn join_with_sopsy_file_targets_custom_path() {
             username: None,
             sopsy_file: Some(file.clone()),
             public_key: Some("age1bobkey".into()),
+            without_touch_id: false,
             age_args: vec![],
         },
     )
@@ -542,6 +546,7 @@ fn join_with_missing_sopsy_file_errors() {
             username: None,
             sopsy_file: Some("/nonexistent/dir/custom.yml".into()),
             public_key: Some("age1bobkey".into()),
+            without_touch_id: false,
             age_args: vec![],
         },
     )
@@ -590,6 +595,177 @@ fn join_generates_enclave_identity_with_fake_plugin() {
     assert_eq!(m.public_key, fake_pub);
 
     restore_cwd(&original);
+}
+
+#[test]
+#[serial]
+fn join_with_git_flag_stages_the_sopsy_files() {
+    let dir = TempDir::new().unwrap();
+    git_init(dir.path());
+    std::fs::write(
+        dir.path().join(".sopsy.yml"),
+        "recipients:\n  - name: alice\n    public_key: age1alice\n",
+    )
+    .unwrap();
+
+    // Drive the real binary so the global `--git` flag resolves onto the Ui and
+    // the "Staged for you" narrative is observable on stdout.
+    let output = assert_cmd::Command::cargo_bin("sopsy")
+        .unwrap()
+        .current_dir(dir.path())
+        .args([
+            "--non-interactive",
+            "--git",
+            "join",
+            "bob",
+            "--public-key",
+            "age1bobkey",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "join --git should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Staged for you"),
+        "--git should report the staged files; got:\n{stdout}"
+    );
+    // The staged branch of the next-steps points at the commands printed above
+    // instead of a manual `git add`.
+    assert!(
+        stdout.contains("Commit and push the staged change"),
+        "next steps should reference the staged commands; got:\n{stdout}"
+    );
+
+    // `join` touches only `.sopsy.yml` and its checksum sidecar; both must be in
+    // the git index afterwards.
+    let staged = staged_files(dir.path());
+    for expected in [".sopsy.yml", ".sopsy.sha"] {
+        assert!(
+            staged.iter().any(|p| p == expected),
+            "`{expected}` should be staged after join --git; staged: {staged:?}"
+        );
+    }
+
+    let cfg = Config::load_from_dir(dir.path()).unwrap();
+    assert!(
+        cfg.recipient("bob").unwrap().is_pending(),
+        "bob should be recorded as pending"
+    );
+}
+
+#[test]
+#[serial]
+fn join_without_touch_id_passes_access_control_none() {
+    let dir = TempDir::new().unwrap();
+    git_init(dir.path());
+    std::fs::write(
+        dir.path().join(".sopsy.yml"),
+        "recipients:\n  - name: alice\n    public_key: age1alice\n",
+    )
+    .unwrap();
+
+    let fake_pub = "age1se1qg8vwwqhztnh3vpt2nf2xwn7famktxlmp0nmkfltp8lkvzp8nafkqleh258";
+    // A fake `age-plugin-se` that records its args (the only observable channel,
+    // since sopsy captures the plugin's output) and emits a canned identity file.
+    let record = dir.path().join("plugin-args.log");
+    let plugin = dir.path().join("age-plugin-se");
+    write_script(
+        &plugin,
+        &format!(
+            "echo \"$@\" >> '{record}'\n\
+             cat <<'EOF'\n# public key: {fake_pub}\nAGE-PLUGIN-SE-1QFAKE\nEOF\n",
+            record = record.display()
+        ),
+    );
+
+    let output = assert_cmd::Command::cargo_bin("sopsy")
+        .unwrap()
+        .env("SOPSY_AGE_PLUGIN_SE_BIN", &plugin)
+        // Keep the generated (fake) identity out of the real per-user keystore.
+        .env("SOPSY_KEYS_FILE", dir.path().join("age-keys.txt"))
+        .current_dir(dir.path())
+        .args(["--non-interactive", "join", "newbie", "--without-touch-id"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "join --without-touch-id should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // `--without-touch-id` maps to age-plugin-se's `--access-control=none`.
+    let logged = std::fs::read_to_string(&record).unwrap();
+    assert!(
+        logged.contains("keygen") && logged.contains("--access-control=none"),
+        "join should forward --access-control=none to `keygen`; got:\n{logged}"
+    );
+
+    let cfg = Config::load_from_dir(dir.path()).unwrap();
+    let m = cfg.recipient("newbie").expect("newbie recorded");
+    assert!(m.is_pending());
+    assert_eq!(m.public_key, fake_pub);
+
+    // The identity handle landed in the redirected keystore, not the real one.
+    let keys = std::fs::read_to_string(dir.path().join("age-keys.txt")).unwrap();
+    assert!(
+        keys.contains("AGE-PLUGIN-SE-1QFAKE"),
+        "identity should be stored in SOPSY_KEYS_FILE; got:\n{keys}"
+    );
+}
+
+#[test]
+#[serial]
+fn approve_with_git_flag_stages_the_membership_files() {
+    let dir = TempDir::new().unwrap();
+    git_init(dir.path());
+    std::fs::write(dir.path().join(".sopsy.yml"), sopsy_with_pending_bob("")).unwrap();
+    std::fs::write(dir.path().join(".sops.yaml"), SOPS_ALICE_ONLY).unwrap();
+    // A managed encrypted file: the (fake) `updatekeys` re-wraps it, and `--git`
+    // must stage it alongside the three config files.
+    std::fs::write(dir.path().join("secret.encrypted"), "FOO=ENC[x]\n").unwrap();
+
+    // A fake `sops` whose `updatekeys` always succeeds.
+    let fake = dir.path().join("fake-sops.sh");
+    write_script(&fake, "exit 0\n");
+
+    let output = assert_cmd::Command::cargo_bin("sopsy")
+        .unwrap()
+        .env("SOPSY_SOPS_BIN", &fake)
+        .env("SOPSY_ASSUME_YES", "1")
+        .current_dir(dir.path())
+        .args(["--non-interactive", "--git", "approve", "bob"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "approve --git should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Staged for you"),
+        "--git should report the staged files; got:\n{stdout}"
+    );
+    // The staged branch of the approver's next-steps.
+    assert!(
+        stdout.contains("Commit and push the staged changes"),
+        "next steps should reference the staged commands; got:\n{stdout}"
+    );
+
+    let staged = staged_files(dir.path());
+    for expected in [".sops.yaml", ".sopsy.yml", ".sopsy.sha", "secret.encrypted"] {
+        assert!(
+            staged.iter().any(|p| p == expected),
+            "`{expected}` should be staged after approve --git; staged: {staged:?}"
+        );
+    }
+
+    let cfg = Config::load_from_dir(dir.path()).unwrap();
+    assert_eq!(cfg.recipient("bob").unwrap().state, MemberState::Active);
 }
 
 #[test]
@@ -809,6 +985,7 @@ fn join_records_pending_member_without_granting_access() {
             username: Some("bob".into()),
             sopsy_file: None,
             public_key: Some(key_b.public.clone()),
+            without_touch_id: false,
             age_args: vec![],
         },
     )
@@ -848,6 +1025,7 @@ fn join_rejects_existing_member() {
                 username: None,
                 sopsy_file: None,
                 public_key: Some("age1x".into()),
+                without_touch_id: false,
                 age_args: vec![],
             },
         )
@@ -871,6 +1049,7 @@ fn approve_activates_pending_member_and_rekeys() {
             username: None,
             sopsy_file: None,
             public_key: Some(key_b.public.clone()),
+            without_touch_id: false,
             age_args: vec![],
         },
     )
@@ -1099,6 +1278,7 @@ fn join_then_batch_approve_handles_multiword_names() {
                     username: None,
                     sopsy_file: None,
                     public_key: Some(key.into()),
+                    without_touch_id: false,
                     age_args: vec![],
                 },
             )
@@ -1147,6 +1327,7 @@ fn join_defaults_username_to_system_user() {
                 username: None,
                 sopsy_file: None,
                 public_key: Some("age1konstantin".into()),
+                without_touch_id: false,
                 age_args: vec![],
             },
         )
@@ -1335,6 +1516,81 @@ fn add_registers_recipient_and_rewraps_secrets() {
         with_a.contains("FOO=bar"),
         "key A should still decrypt; got {with_a}"
     );
+
+    set_age_key_file(None);
+    restore_cwd(&original_cwd);
+}
+
+/// The files `git add`ed into the index of `repo`, as relative path strings.
+fn staged_files(repo: &Path) -> Vec<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["diff", "--cached", "--name-only"])
+        .output()
+        .expect("git should be available");
+    assert!(output.status.success());
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+#[serial]
+fn add_with_git_flag_stages_the_membership_files() {
+    let original_cwd = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let (repo, key_a, key_b) = setup_repo(dir.path());
+    set_age_key_file(Some(&key_a.file));
+
+    // Same as a plain `add`, but with the global `--git` flag resolved onto the
+    // Ui: afterwards every file the command touched must sit in the git index.
+    recipient::run(
+        &test_ui().with_git(true),
+        &add_command("second", &key_b.public, false, false),
+    )
+    .expect("recipient add --git should succeed");
+
+    let staged = staged_files(&repo);
+    for expected in [".sops.yaml", ".sopsy.yml", ".sopsy.sha", ".env.encrypted"] {
+        assert!(
+            staged.iter().any(|p| p == expected),
+            "`{expected}` should be staged after --git; staged: {staged:?}"
+        );
+    }
+
+    set_age_key_file(None);
+    restore_cwd(&original_cwd);
+}
+
+#[test]
+#[serial]
+fn remove_with_git_flag_stages_the_membership_files() {
+    let original_cwd = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let (repo, key_a, key_b) = setup_repo(dir.path());
+    set_age_key_file(Some(&key_a.file));
+
+    // Register a second recipient first (plain add), then revoke it with `--git`:
+    // the revocation touches all three config files plus the re-wrapped secret,
+    // and every one of them must sit in the git index afterwards.
+    recipient::run(
+        &test_ui(),
+        &add_command("second", &key_b.public, false, false),
+    )
+    .expect("recipient add should succeed");
+
+    recipient::run(&test_ui().with_git(true), &remove_command("second", false))
+        .expect("recipient remove --git should succeed");
+
+    let staged = staged_files(&repo);
+    for expected in [".sops.yaml", ".sopsy.yml", ".sopsy.sha", ".env.encrypted"] {
+        assert!(
+            staged.iter().any(|p| p == expected),
+            "`{expected}` should be staged after remove --git; staged: {staged:?}"
+        );
+    }
 
     set_age_key_file(None);
     restore_cwd(&original_cwd);
@@ -1547,6 +1803,127 @@ fn add_rolls_back_when_reencryption_fails() {
     assert!(
         !sops_yaml.contains(new_key),
         ".sops.yaml must not list the new key after rollback"
+    );
+
+    unsafe {
+        std::env::remove_var("SOPSY_SOPS_BIN");
+    }
+    restore_cwd(&original_cwd);
+}
+
+/// A fake `sops` that re-wraps every file *except* one ending in `b.encrypted`
+/// (which it fails on), letting a test drive a mid-loop `updatekeys` failure. On
+/// success it overwrites the target with a sentinel, so a test can prove the
+/// pre-command bytes were restored (not the re-wrapped ones).
+const SELECTIVE_FAKE_SOPS: &str = "for f in \"$@\"; do target=\"$f\"; done\n\
+     case \"$target\" in\n\
+     \x20 *b.encrypted) echo 'cannot get data key' >&2; exit 1 ;;\n\
+     \x20 *) printf 'REWRAPPED-BY-FAKE\\n' > \"$target\"; exit 0 ;;\n\
+     esac\n";
+
+#[test]
+#[serial]
+fn add_rollback_restores_already_rewrapped_bodies() {
+    let original_cwd = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+
+    let (a_pub, _a_file) = generate_age_key(dir.path(), "keyA.txt");
+    git_init(dir.path());
+    write_sops_yaml(dir.path(), &a_pub);
+    write_sopsy_yml(dir.path(), &a_pub);
+
+    // Two managed encrypted files (both match the default `*.encrypted` glob and
+    // carry the `ENC[` marker). `collect_encrypted_files` sorts, so `a.encrypted`
+    // is re-wrapped (by the fake `sops`) *before* `b.encrypted` fails.
+    std::fs::write(dir.path().join("a.encrypted"), "A=ENC[a]\n").unwrap();
+    std::fs::write(dir.path().join("b.encrypted"), "B=ENC[b]\n").unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let fake = dir.path().join("fake-sops.sh");
+    write_script(&fake, SELECTIVE_FAKE_SOPS);
+    unsafe {
+        std::env::set_var("SOPSY_SOPS_BIN", &fake);
+    }
+
+    let new_key = "age1rollbackkeyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+    let err = recipient::run(&test_ui(), &add_command("second", new_key, false, false))
+        .expect_err("recipient add must fail when re-encryption fails");
+    assert!(matches!(err, Error::Validation(m) if m.contains("rolled back")));
+
+    // The already-re-wrapped `a.encrypted` must be rolled back to its original
+    // bytes — not left carrying the fake's re-wrap (the bug this test guards).
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.encrypted")).unwrap(),
+        "A=ENC[a]\n",
+        "a.encrypted must be restored to its pre-command bytes after rollback"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("b.encrypted")).unwrap(),
+        "B=ENC[b]\n"
+    );
+
+    // And the config files are rolled back as before.
+    let config = Config::load_from_dir(dir.path()).unwrap();
+    assert!(config.recipient("second").is_none());
+    let sops_yaml = std::fs::read_to_string(dir.path().join(".sops.yaml")).unwrap();
+    assert!(!sops_yaml.contains(new_key));
+
+    unsafe {
+        std::env::remove_var("SOPSY_SOPS_BIN");
+    }
+    restore_cwd(&original_cwd);
+}
+
+#[test]
+#[serial]
+fn remove_rollback_restores_already_rewrapped_bodies() {
+    let original_cwd = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+
+    let (a_pub, _a_file) = generate_age_key(dir.path(), "keyA.txt");
+    git_init(dir.path());
+    write_sops_yaml(dir.path(), &a_pub);
+    write_sopsy_yml(dir.path(), &a_pub);
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    // Register a second recipient (config-only, no re-key) so `remove` clears the
+    // "last recipient" safety rail.
+    let second_key = "age1secondkeyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+    recipient::run(&test_ui(), &add_command("second", second_key, false, true))
+        .expect("recipient add (--no-updatekeys) should succeed");
+
+    std::fs::write(dir.path().join("a.encrypted"), "A=ENC[a]\n").unwrap();
+    std::fs::write(dir.path().join("b.encrypted"), "B=ENC[b]\n").unwrap();
+
+    let fake = dir.path().join("fake-sops.sh");
+    write_script(&fake, SELECTIVE_FAKE_SOPS);
+    unsafe {
+        std::env::set_var("SOPSY_SOPS_BIN", &fake);
+    }
+
+    let err = recipient::run(&test_ui(), &remove_command("second", false))
+        .expect_err("recipient remove must fail when re-encryption fails");
+    assert!(matches!(err, Error::Validation(m) if m.contains("rolled back")));
+
+    // The already-re-wrapped `a.encrypted` must be restored — otherwise the
+    // removed recipient is silently stripped from a subset of files (a partial
+    // revocation) while the config claims they are still a member.
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.encrypted")).unwrap(),
+        "A=ENC[a]\n",
+        "a.encrypted must be restored to its pre-command bytes after rollback"
+    );
+
+    // `second` is rolled back into both config files.
+    let config = Config::load_from_dir(dir.path()).unwrap();
+    assert!(
+        config.recipient("second").is_some(),
+        "`second` must remain a recipient after rollback"
+    );
+    let sops_yaml = std::fs::read_to_string(dir.path().join(".sops.yaml")).unwrap();
+    assert!(
+        sops_yaml.contains(second_key),
+        ".sops.yaml must still list `second`'s key after rollback"
     );
 
     unsafe {

@@ -1,0 +1,178 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# sopsy — full team demo  (record with:  vhs src/demo/vhs.txt)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# THE EMULATION TRICK
+#   A real team has one macOS account per developer, each with its own Secure
+#   Enclave keystore. We emulate several developers inside ONE account by giving
+#   each of them their OWN keystore file and switching SOPSY_KEYS_FILE to "become"
+#   that person. Switching the variable is like switching users.
+#
+# WHY --without-touch-id
+#   Touch ID is a system dialog that can't be captured or automated in a
+#   recording. The teammates are minted with `--without-touch-id` (the private
+#   key still never leaves the Enclave, it just doesn't prompt), so decrypt/edit
+#   run hands-free. In real life you'd drop that flag and unlock with your thumb.
+#
+# WHY `approve --no-updatekeys`
+#   The admin identity IS Touch-ID-gated (there's no --without-touch-id on
+#   `init`). Re-keying during approve would decrypt with the admin key and prompt.
+#   We skip it, then encrypt the real secret AFTER everyone is a recipient — so
+#   the file is written for the whole team at once, no re-key needed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+Output sopsy-demo.gif
+
+Require sopsy
+Require git
+Require sops
+Require age-plugin-se
+Require bat
+
+Set Shell "bash"
+Set FontSize 18
+Set Width 1380
+Set Height 860
+Set Padding 15
+Set Margin 16
+Set BorderRadius 10
+Set WindowBar Colorful
+Set Theme "Ayu Mirage"
+Set TypingSpeed 30ms
+
+# ── off-camera setup: throwaway workspace, per-user keystores, clean prompt ──
+Hide
+Type "export PS1='\033[38;5;170m❯\033[0m '"
+Enter
+Type "export BAT_PAGER=cat BAT_STYLE=numbers,grid CLICOLOR_FORCE=1"
+Enter
+Type "export D=$(mktemp -d) && mkdir -p $D/keys"
+Enter
+Type "export KADMIN=$D/keys/admin.keys KALAN=$D/keys/alan.keys KGRACE=$D/keys/grace.keys"
+Enter
+Type "cd $D"
+Enter
+Type "clear"
+Enter
+Show
+
+Sleep 1s
+
+# ── 1. Bootstrap a brand-new repo ────────────────────────────────────────────
+Type "# 1) Bootstrap a brand-new git repo with sopsy"
+Enter
+Sleep 800ms
+Type "git init -q sopsy-demo && cd sopsy-demo"
+Enter
+Sleep 800ms
+
+Type "# the admin's Enclave key lives in its own keystore file"
+Enter
+Sleep 800ms
+Type "export SOPSY_KEYS_FILE=$KADMIN"
+Enter
+Type "sopsy init -y --recipient-name 'Konstantin (admin)' --no-break-glass"
+Enter
+Sleep 2500ms
+
+Type "# sopsy wrote the config: .sops.yaml (recipients) and .sopsy.yml (its ledger)"
+Enter
+Type "bat .sops.yaml .sopsy.yml"
+Enter
+Sleep 3s
+
+# ── 2. Two teammates mint their own keys (hands-free for the demo) ────────────
+Type "# 2) Two teammates request access — each mints their OWN key"
+Enter
+Type "# ── acting as Alan (his own keystore) ──"
+Enter
+Type "export SOPSY_KEYS_FILE=$KALAN"
+Enter
+Type "sopsy join 'Alan Turing' --without-touch-id"
+Enter
+Sleep 2500ms
+
+Type "# ── acting as Grace ──"
+Enter
+Type "export SOPSY_KEYS_FILE=$KGRACE"
+Enter
+Type "sopsy join 'Grace Hopper' --without-touch-id"
+Enter
+Sleep 2500ms
+
+# ── 3. Admin approves them ───────────────────────────────────────────────────
+Type "# 3) Admin approves both (adds their public keys to .sops.yaml)"
+Enter
+Type "# ── back to admin ──"
+Enter
+Type "export SOPSY_KEYS_FILE=$KADMIN"
+Enter
+Type "SOPSY_ASSUME_YES=1 sopsy approve 'Alan Turing' 'Grace Hopper' --no-updatekeys"
+Enter
+Sleep 2500ms
+
+Type "# who can decrypt now? (note the audit trail: who asked, who approved, when)"
+Enter
+Type "sopsy recipient list"
+Enter
+Sleep 3s
+
+# ── 4. Add a real secret, encrypt it for the whole team ──────────────────────
+Type "# 4) Drop in a real secret and encrypt it — for everyone at once"
+Enter
+Type "printf 'OPENAI_API_KEY=sk-demo-DO-NOT-USE-0xC0FFEE\n' > .env"
+Enter
+Type "bat .env"
+Enter
+Sleep 1500ms
+
+Type "sopsy secrets encrypt .env -o .env.encrypted"
+Enter
+Sleep 2s
+
+Type "# committed as ciphertext — values sealed, keys still readable in a diff"
+Enter
+Type "bat -l ini .env.encrypted"
+Enter
+Sleep 3500ms
+
+# ── 5. A teammate decrypts (their key, no Touch ID) ──────────────────────────
+Type "# 5) Alan reads it with HIS key — no shared password, no Touch ID prompt"
+Enter
+Type "export SOPSY_KEYS_FILE=$KALAN"
+Enter
+Type "sopsy decrypt .env.encrypted"
+Enter
+Sleep 3s
+
+# ── 6. Another teammate edits it in $EDITOR ──────────────────────────────────
+Type "# 6) Grace edits it in her editor — decrypts in, re-encrypts on save"
+Enter
+Type "export SOPSY_KEYS_FILE=$KGRACE"
+Enter
+Type "EDITOR=vim sopsy edit .env.encrypted"
+Enter
+Sleep 2s
+# drive vim: jump to the end, open a line, add a key, save & quit
+Type "G"
+Sleep 400ms
+Type "o"
+Sleep 300ms
+Type "STRIPE_API_KEY=sk_live_demo_added_by_grace"
+Escape
+Sleep 400ms
+Type ":wq"
+Enter
+Sleep 2500ms
+
+Type "# re-encrypted for the whole team — Alan sees Grace's addition"
+Enter
+Type "export SOPSY_KEYS_FILE=$KALAN"
+Enter
+Type "sopsy decrypt .env.encrypted"
+Enter
+Sleep 3s
+
+Type "# Secrets in git, per-developer hardware keys, no shared password.  ✨"
+Enter
+Sleep 3s

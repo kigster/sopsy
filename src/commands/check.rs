@@ -162,9 +162,10 @@ pub fn run(ui: &Ui) -> Result<()> {
     );
 
     if failures.is_empty() {
-        ui.success("all checks passed");
+        ui.banner_success("all checks passed");
         Ok(())
     } else {
+        ui.banner_alert(format!("{} check(s) failed", failures.len()));
         Err(Error::Validation(format!(
             "{} check(s) failed: {}",
             failures.len(),
