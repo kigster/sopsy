@@ -8,6 +8,7 @@
 //! ## Module map
 //!
 //! - [`cli`] — clap definition for every command and flag.
+//! - [`help`] — colorizer for the clap-rendered help screens.
 //! - [`ui`] — colorful output + interactive/non-interactive prompting.
 //! - [`config`] — serde model for `.sopsy.yml`.
 //! - [`error`] — the library [`Error`](error::Error) enum and [`Result`].
@@ -21,6 +22,7 @@ pub mod config;
 pub mod enclave;
 pub mod error;
 pub mod git;
+pub mod help;
 pub mod keystore;
 pub mod sops;
 pub mod ui;
@@ -36,7 +38,10 @@ use crate::ui::Ui;
 /// This is the single entry point used by the binary. It returns a
 /// [`Result`]; the binary maps the error to a process exit code.
 pub fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => return handle_parse_error(err),
+    };
     let ui = Ui::new(
         cli.global.resolve_color(),
         cli.global.verbose,
@@ -44,6 +49,31 @@ pub fn run() -> Result<()> {
     )
     .with_git(cli.global.git);
     dispatch(&ui, cli.command)
+}
+
+/// Handle a clap parse error, routing help screens through the
+/// [`help`] colorizer while preserving clap's exit semantics.
+///
+/// `Cli::parse` would print clap's own (single-style) help; we intercept it so
+/// commands, options, and headings can carry distinct colors.
+fn handle_parse_error(err: clap::Error) -> Result<()> {
+    use clap::error::ErrorKind;
+    match err.kind() {
+        // `--help` / `help <cmd>`: colorized help on stdout, exit 0.
+        ErrorKind::DisplayHelp => {
+            print!("{}", help::render(&err.to_string(), help::color_wanted()));
+            Ok(())
+        }
+        // Bare `sopsy` (or a bare subcommand group): clap prints help to
+        // stderr and exits 2 — keep that contract, but colorized.
+        ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+            eprint!("{}", help::render(&err.to_string(), help::color_wanted()));
+            std::process::exit(2);
+        }
+        // Version requests and genuine usage errors keep clap's rendering,
+        // output stream, and exit codes.
+        _ => err.exit(),
+    }
 }
 
 /// Dispatch a parsed [`Command`] using the given [`Ui`].

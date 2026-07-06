@@ -20,9 +20,12 @@ use crate::sops::FileType;
 #[command(version)]
 #[command(about = "The missing developer experience for SOPS")]
 #[command(propagate_version = true)]
-// Wrap help output at 80 columns (capped, so narrower terminals still wrap to
+// Wrap help output at 100 columns (capped, so narrower terminals still wrap to
 // their width). Set on the root command, this applies to every subcommand too.
-#[command(max_term_width = 80)]
+#[command(max_term_width = 100)]
+// The canonical shape shown at the top of `sopsy --help`; rendering (own line,
+// bold yellow) is handled by `crate::help`.
+#[command(override_usage = "sopsy [OPTIONS] command [COMMAND-OPTIONS]")]
 pub struct Cli {
     /// Global flags shared by every subcommand.
     #[command(flatten)]
@@ -106,6 +109,7 @@ pub enum Command {
     Decrypt(SecretsDecryptArgs),
 
     /// List the file types sopsy understands (for `--type`).
+    #[command(name = "types", visible_alias = "list-supported-types")]
     ListSupportedTypes,
 
     /// CI gate: verify the repo's encrypted-secrets hygiene (exit 0/1).

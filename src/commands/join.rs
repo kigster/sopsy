@@ -73,7 +73,7 @@ pub fn run(ui: &Ui, args: &JoinArgs) -> Result<()> {
         ..Recipient::pending(&name, &public_key, &now)
     });
     config.save(&config_path)?;
-    ui.success(format!(
+    ui.banner_success(format!(
         "recorded `{name}` as pending in {}",
         config_path.display()
     ));

@@ -42,7 +42,7 @@ ______________________________________________________________________
   - [`sopsy approve`](#sopsy-approve)
   - [`sopsy recipient`](#sopsy-recipient)
   - [`sopsy encrypt` / `sopsy decrypt`](#sopsy-encrypt--sopsy-decrypt)
-  - [`sopsy list-supported-types`](#sopsy-list-supported-types)
+  - [`sopsy types`](#sopsy-types)
   - [`sopsy check`](#sopsy-check)
   - [`sopsy deps`](#sopsy-deps)
   - [`sopsy completion`](#sopsy-completion)
@@ -84,6 +84,8 @@ The killer property: the secret values live in Git in *encrypted* form, while th
 - **Config integrity checksum** — `.sopsy.sha` (SHA-256 of `.sopsy.yml` + the admin public key) is refreshed on every write and verified on every read, so hand edits are surfaced instead of silently trusted; `sopsy doctor` repairs it.
 - **SOPS key rotation** — every membership change re-wraps the existing secrets via `sops updatekeys`.
 - **Safe defaults & a CI gate** — `sopsy check` enforces seven hygiene invariants and exits non-zero on any violation.
+- **`--git` staging** — a global flag that `git add`s exactly the files a command changed and prints ready-to-paste commit/push/PR instructions ([details](#global-flags)).
+- **Readable, colorful output** — key moments (init complete, members approved, ceremony hand-offs, check failures) render as full-width colored banners; with `--no-color`, pipes, or `NO_COLOR` they degrade to plain bordered boxes so logs stay clean.
 
 ______________________________________________________________________
 
@@ -716,12 +718,12 @@ sopsy decrypt config.json.encrypted -o config.json
 >
 > Structured formats (`dotenv`/`yaml`/`json`/`ini`) encrypt **values only**, so keys and structure stay readable and diffable in Git. Everything else is `binary` (the whole file is encrypted as one opaque blob).
 
-### `sopsy list-supported-types`
+### `sopsy types`
 
-Print the file formats sopsy understands (the valid values for `--type`) and which extensions auto-detect to each. Takes no flags.
+Print the file formats sopsy understands (the valid values for `--type`) and which extensions auto-detect to each. Takes no flags. Also available under its longer alias, `sopsy list-supported-types`.
 
 ```bash
-sopsy list-supported-types
+sopsy types
 #   dotenv   .env, .env.*, *.env
 #   yaml     .yaml, .yml
 #   json     .json

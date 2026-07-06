@@ -126,7 +126,7 @@ pub fn run(ui: &Ui, args: &ApproveArgs) -> Result<()> {
         return Err(rewrap_error(err));
     }
 
-    ui.success(format!("{names} approved and added to all encrypted files"));
+    ui.banner_success(format!("{names} approved and added to all encrypted files"));
 
     // Stage first (so "commands shown above" in the next-steps refers to them),
     // then print the human narrative.

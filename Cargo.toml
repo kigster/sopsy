@@ -25,6 +25,8 @@ humantime = "2.2"
 indicatif = "0.18.4"
 inquire = "0.9.4"
 owo-colors = "4.3.0"
+# Terminal width detection for the full-width banner boxes in `ui.rs`.
+terminal_size = "0.4"
 serde = { version = "1.0.228", features = ["derive"] }
 # SHA-256 for the `.sopsy.yml` integrity checksum (tamper evidence, not
 # encryption — all encryption remains delegated to the external `sops`).

@@ -417,7 +417,7 @@ fn detect_sops_version() -> Option<String> {
 
 /// Print the closing health summary and the break-glass reminder.
 fn print_summary(ui: &Ui, recipient: &Recipient) {
-    ui.header("All set — your repository is ready");
+    ui.banner_success("All set — your repository is ready");
     ui.success("sops configured (.sops.yaml)");
     ui.success("plaintext .env ignored by git");
     ui.success("secrets encrypted (.env.encrypted)");
@@ -425,11 +425,12 @@ fn print_summary(ui: &Ui, recipient: &Recipient) {
         "recipient `{}` recorded in .sopsy.yml",
         recipient.name
     ));
-    println!();
-    ui.warn("> [!IMPORTANT] Break-glass: create a separate emergency age key pair and");
-    ui.warn("> store it offline (e.g. in 1Password), shared with only a few admins, then");
-    ui.warn("> register it via `sopsy recipient add break-glass --break-glass`. Without it,");
-    ui.warn("> losing your Secure Enclave device means losing access to every secret.");
+    ui.banner_warn(
+        "IMPORTANT — Break-glass: create a separate emergency age key pair and store it \
+         offline (e.g. in 1Password), shared with only a few admins, then register it via \
+         `sopsy recipient add break-glass --break-glass`. Without it, losing your Secure \
+         Enclave device means losing access to every secret.",
+    );
     ui.animated_line("Happy encrypting!");
 }
 

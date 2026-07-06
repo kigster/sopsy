@@ -179,6 +179,68 @@ impl Ui {
         println!("  {}", self.paint(cmd.as_ref(), Style::new().bold().cyan()));
     }
 
+    // ----- Full-width banner boxes -----------------------------------------
+
+    /// Print a green full-width success banner (major happy endings: `init`
+    /// finished, members approved, all checks passed).
+    pub fn banner_success(&self, msg: impl AsRef<str>) {
+        self.banner("✔", msg.as_ref(), Style::new().black().on_green().bold());
+    }
+
+    /// Print a blue full-width informational banner.
+    pub fn banner_info(&self, msg: impl AsRef<str>) {
+        self.banner("ℹ", msg.as_ref(), Style::new().white().on_blue().bold());
+    }
+
+    /// Print a yellow full-width warning banner (action required, but nothing
+    /// is broken).
+    pub fn banner_warn(&self, msg: impl AsRef<str>) {
+        self.banner("⚠", msg.as_ref(), Style::new().black().on_yellow().bold());
+    }
+
+    /// Print a red full-width alert banner (something failed or is unsafe).
+    pub fn banner_alert(&self, msg: impl AsRef<str>) {
+        self.banner("✗", msg.as_ref(), Style::new().white().on_red().bold());
+    }
+
+    /// Render a screen-wide banner box: with color, padded lines on a solid
+    /// background; without color (pipes, CI, `NO_COLOR`), a plain bordered box
+    /// so the emphasis still survives in logs. The message is word-wrapped to
+    /// the terminal width.
+    fn banner(&self, glyph: &str, msg: &str, style: Style) {
+        let width = term_width().max(20);
+        let lines = wrap_text(msg, width - 6);
+        println!();
+        if self.color {
+            let pad = " ".repeat(width);
+            println!("{}", self.paint(&pad, style));
+            for (i, line) in lines.iter().enumerate() {
+                let lead = if i == 0 {
+                    format!("  {glyph} ")
+                } else {
+                    "    ".into()
+                };
+                let used = lead.chars().count() + line.chars().count();
+                let text = format!("{lead}{line}{}", " ".repeat(width.saturating_sub(used)));
+                println!("{}", self.paint(&text, style));
+            }
+            println!("{}", self.paint(&pad, style));
+        } else {
+            println!("┌{}┐", "─".repeat(width - 2));
+            for (i, line) in lines.iter().enumerate() {
+                let lead = if i == 0 {
+                    format!("{glyph} ")
+                } else {
+                    "  ".into()
+                };
+                let used = 4 + lead.chars().count() + line.chars().count();
+                println!("│ {lead}{line}{} │", " ".repeat(width.saturating_sub(used)));
+            }
+            println!("└{}┘", "─".repeat(width - 2));
+        }
+        println!();
+    }
+
     /// Print a bold, underlined section header with surrounding spacing.
     pub fn header(&self, title: impl AsRef<str>) {
         println!();
@@ -340,6 +402,48 @@ impl Ui {
             })
         }
     }
+}
+
+/// The terminal width in columns, falling back to 80 when stdout is not a
+/// terminal (pipes, CI logs) so banners stay a sane width in captured output.
+fn term_width() -> usize {
+    terminal_size::terminal_size()
+        .map(|(w, _)| w.0 as usize)
+        .unwrap_or(80)
+}
+
+/// Word-wrap `text` to at most `max` characters per line, preserving explicit
+/// newlines and hard-splitting words longer than a whole line.
+fn wrap_text(text: &str, max: usize) -> Vec<String> {
+    let max = max.max(1);
+    let mut lines = Vec::new();
+    for raw in text.lines() {
+        let mut current = String::new();
+        let mut count = 0usize;
+        for word in raw.split_whitespace() {
+            // Hard-split words that cannot fit on any line by themselves.
+            let chars: Vec<char> = word.chars().collect();
+            for piece in chars.chunks(max) {
+                let piece: String = piece.iter().collect();
+                let sep = usize::from(count > 0);
+                if count + sep + piece.chars().count() > max {
+                    lines.push(std::mem::take(&mut current));
+                    count = 0;
+                }
+                if count > 0 {
+                    current.push(' ');
+                    count += 1;
+                }
+                count += piece.chars().count();
+                current.push_str(&piece);
+            }
+        }
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 /// Convert an `inquire` (or any standard) error into our catch-all
@@ -555,6 +659,42 @@ mod tests {
     #[test]
     fn flush_does_not_panic() {
         noninteractive_ui().flush();
+    }
+
+    #[test]
+    fn wrap_text_wraps_at_word_boundaries() {
+        assert_eq!(wrap_text("a bb ccc", 5), vec!["a bb", "ccc"]);
+        // A short message stays on one line.
+        assert_eq!(wrap_text("hello", 80), vec!["hello"]);
+        // Explicit newlines (and blank lines) are preserved.
+        assert_eq!(wrap_text("one\n\ntwo", 80), vec!["one", "", "two"]);
+        // Empty input still yields a single (blank) banner line.
+        assert_eq!(wrap_text("", 80), vec![""]);
+    }
+
+    #[test]
+    fn wrap_text_hard_splits_overlong_words() {
+        assert_eq!(wrap_text("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
+        // ...also when surrounded by normal words.
+        assert_eq!(wrap_text("x abcdefgh y", 4), vec!["x", "abcd", "efgh", "y"]);
+    }
+
+    #[test]
+    fn banners_render_in_both_color_modes() {
+        // Smoke tests: every banner kind must render without panicking, both as
+        // a bordered box (no color) and as a background-painted block (color),
+        // including messages long enough to wrap.
+        let plain = noninteractive_ui();
+        let color = color_ui();
+        for ui in [&plain, &color] {
+            ui.banner_success("all set");
+            ui.banner_info("for your information");
+            ui.banner_warn("action required — store the key offline");
+            ui.banner_alert(
+                "this message is intentionally long enough that it must wrap onto \
+                 several lines inside the banner box regardless of terminal width",
+            );
+        }
     }
 
     #[test]

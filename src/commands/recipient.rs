@@ -715,7 +715,7 @@ fn portable_key_ceremony(
     // Hand off to the operator and block until they confirm safe storage.
     let press_enter_prompt = match kind {
         PortableKeyKind::BreakGlass => {
-            ui.header("ACTION REQUIRED — store the break-glass key offline");
+            ui.banner_warn("ACTION REQUIRED — store the break-glass key offline");
             ui.warn(
                 "Please copy these files and place them in 1Password (or another secure, offline store):",
             );
@@ -724,7 +724,7 @@ fn portable_key_ceremony(
             "Please press ENTER when you copied the keys to a secure storage (eg 1Password):"
         }
         PortableKeyKind::Ci => {
-            ui.header("ACTION REQUIRED — add the CI key to your CI provider's secret store");
+            ui.banner_warn("ACTION REQUIRED — add the CI key to your CI provider's secret store");
             ui.warn("Go to your CI settings and add ONE secret:");
             ui.info(format!(
                 "  • SOPS_AGE_KEY — the contents of {} (the name `sops` reads identities from)",

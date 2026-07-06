@@ -31,14 +31,14 @@ Require bat
 
 Set Shell "bash"
 Set FontSize 18
-Set Width 1280
+Set Width 1380
 Set Height 860
-Set Padding 24
+Set Padding 15
 Set Margin 16
 Set BorderRadius 10
 Set WindowBar Colorful
-Set Theme "Catppuccin Mocha"
-Set TypingSpeed 22ms
+Set Theme "Ayu Mirage"
+Set TypingSpeed 30ms
 
 # ── off-camera setup: throwaway workspace, per-user keystores, clean prompt ──
 Hide
@@ -61,12 +61,14 @@ Sleep 1s
 # ── 1. Bootstrap a brand-new repo ────────────────────────────────────────────
 Type "# 1) Bootstrap a brand-new git repo with sopsy"
 Enter
+Sleep 800ms
 Type "git init -q sopsy-demo && cd sopsy-demo"
 Enter
 Sleep 800ms
 
 Type "# the admin's Enclave key lives in its own keystore file"
 Enter
+Sleep 800ms
 Type "export SOPSY_KEYS_FILE=$KADMIN"
 Enter
 Type "sopsy init -y --recipient-name 'Konstantin (admin)' --no-break-glass"
