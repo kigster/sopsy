@@ -119,8 +119,9 @@ git commit -m 'Requesting access to the .env.encrypted'
 git push origin/sopsy/add/alan-turing
 # create a PR
 
+# —————————————————————————————————————————————————————————
 # Alan's Manager or the "Prime Radiant", or any existing 
-# already approved engineer:
+# already approved engineer, on their MacBook:
 git fetch
 git checkout sopsy/add/alan-turing
 sopsy approve "Alan Turing"
