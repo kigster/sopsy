@@ -2,7 +2,7 @@
 name = "sopsy"
 version = "1.3.0"
 edition = "2024"
-description = "Public/private individual key encryption for repo secrets with biometrics support and explicit approval of who can decrypt. Inother words — the missing good UX for SOPS"
+description = "Public/private individual key encryption for repo secrets with biometrics support and explicit approval of who can decrypt. In other words — the missing good UX for SOPS"
 license = "MIT"
 repository = "https://github.com/kigster/sopsy.git"
 homepage = "https://sopsy-cli.dev"
