@@ -153,6 +153,76 @@ fn init_with_public_key_encrypts_real_env() {
 
 #[test]
 #[serial]
+fn init_with_git_flag_stages_created_files_once() {
+    let dir = TempDir::new().unwrap();
+    init_git_repo(dir.path());
+    let (public_key, _key_file) = generate_age_key(dir.path());
+
+    // Same real-sops happy path as above, plus the top-level `--git` flag.
+    // Non-interactive init skips the break-glass ceremony, and even when it
+    // runs, init suppresses the ceremony's own staging so the "Staged for you"
+    // summary is emitted exactly once at the end (step 12).
+    std::fs::write(dir.path().join(".env"), "PASSWORD=hunter2\n").unwrap(); // pragma: allowlist secret
+
+    let assert = sopsy_in(dir.path())
+        .args([
+            "--non-interactive",
+            "--git",
+            "init",
+            "--no-generate",
+            "--public-key",
+            &public_key,
+            "--recipient-name",
+            "admin",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Staged for you"));
+
+    // The staging summary appears exactly once (no duplicate from the nested
+    // break-glass ceremony path).
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert_eq!(
+        stdout.matches("Staged for you").count(),
+        1,
+        "staging summary must be printed exactly once:\n{stdout}"
+    );
+
+    // Everything init created is actually in the git index.
+    let staged = StdCommand::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args(["diff", "--cached", "--name-only"])
+        .output()
+        .unwrap();
+    assert!(staged.status.success(), "git diff --cached failed");
+    let staged: Vec<String> = String::from_utf8_lossy(&staged.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+    for name in [
+        ".sops.yaml",
+        ".env.example",
+        ".env.encrypted",
+        ".gitignore",
+        ".sopsy.yml",
+        ".sopsy.sha",
+    ] {
+        assert!(
+            staged.iter().any(|f| f == name),
+            "{name} should be staged with --git; staged set: {staged:?}"
+        );
+    }
+
+    // And the plaintext `.env` was NOT staged (it is gitignored).
+    assert!(
+        !staged.iter().any(|f| f == ".env"),
+        "plaintext .env must never be staged: {staged:?}"
+    );
+}
+
+#[test]
+#[serial]
 fn init_seeds_from_env_example_when_no_dotenv() {
     let dir = TempDir::new().unwrap();
     init_git_repo(dir.path());

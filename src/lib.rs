@@ -75,7 +75,7 @@ fn dispatch(ui: &Ui, command: Command) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::InitArgs;
+    use crate::cli::{CompletionArgs, DepsArgs, InitArgs, SecretsDecryptArgs, SecretsEncryptArgs};
 
     fn test_ui() -> Ui {
         Ui::new(false, false, false)
@@ -84,6 +84,61 @@ mod tests {
     #[test]
     fn dispatch_doctor_is_ok() {
         assert!(dispatch(&test_ui(), Command::Doctor).is_ok());
+    }
+
+    #[test]
+    fn dispatch_deps_and_completion_are_ok() {
+        let ui = test_ui();
+        // `--dry-run` only prints the would-be `brew install` line.
+        assert!(
+            dispatch(
+                &ui,
+                Command::Deps(DepsArgs {
+                    check: false,
+                    dry_run: true,
+                })
+            )
+            .is_ok()
+        );
+        assert!(
+            dispatch(
+                &ui,
+                Command::Completion(CompletionArgs {
+                    shell: clap_complete::Shell::Bash,
+                })
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn dispatch_encrypt_decrypt_shorthands_route_to_secrets() {
+        // Both arms route through `commands::secrets::run`; a nonexistent
+        // input file proves the arm is taken and the shared validation
+        // rejects it before any external tool is invoked.
+        let ui = test_ui();
+        assert!(
+            dispatch(
+                &ui,
+                Command::Encrypt(SecretsEncryptArgs {
+                    file: "no-such-file.env".into(),
+                    output: None,
+                    file_type: None,
+                })
+            )
+            .is_err()
+        );
+        assert!(
+            dispatch(
+                &ui,
+                Command::Decrypt(SecretsDecryptArgs {
+                    file: "no-such-file.env.encrypted".into(),
+                    output: None,
+                    file_type: None,
+                })
+            )
+            .is_err()
+        );
     }
 
     #[test]
