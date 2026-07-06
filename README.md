@@ -87,6 +87,61 @@ The killer property: the secret values live in Git in *encrypted* form, while th
 
 ---
 
+## Encryption & Team Onboarding Flow
+
+Sopsy's killer feature (besides the Touch ID-based decryption) is the fact that each developer on the team must be onboardded to a be allowed to decrypt the secrets file. This means that a random person that aquires your repo with all the encryped files in them, can never decrypt the file, since they have not been officially admitted into the select group of decryptors.
+
+The first encryptor is considered the **prime** encryptor, and they are also given the "break-glass" in case of emergency pair of private and public keys to be placed in 1Password's some exec-only Vault because you should hopefully never need those keys unless somehow all of the laptops were stolen from the company.
+
+The next person must request to join with `sopsy request-access "Full Name"` or it's synonym `sopsy join "First Last"`. 
+
+By default, the key minted in the Apple Enclave will require Touch ID every time it's used. This is good security but may get old if you are using say `direnv` or many windows with your project there. If you prefer to trade security of your thumb for convenience, you can pass the `--access-control none` after `--` as arguments to `sopsy join`. Here is an example:
+
+```bash
+# Alan Turing's MacBook:
+git fetch
+git checkout main
+git checkout -b sopsy/add/alan-turing
+
+# standard request to join, will require Touch ID 
+# on every decryption
+sopsy request-access "Alan Turing"
+
+# or the alias:
+sopsy join "Alan Turing" 
+
+# And in this request to join, private key is still in Enclave, 
+# but no Touch ID would be required for decryption
+sopsy join "Alan Turing" -- --access-control none
+
+git add -A .
+git commit -m 'Requesting access to the .env.encrypted'
+git push origin/sopsy/add/alan-turing
+# create a PR
+
+# Alan's Manager or the "Prime Radiant", or any existing 
+# already approved engineer:
+git fetch
+git checkout sopsy/add/alan-turing
+sopsy approve "Alan Turing"
+# or simply like so — this will allow you to interactively
+# approve or deny every pending request on that branch.
+sopsy approve 
+....
+git add -A .
+git commit -m 'Approving Alan Turing for encryption'
+git push
+
+# Either Alan, or the manager or anyone else:
+# merges the PR to the main branch. Now they can decrypt the file.
+```
+
+To illustrate this process, here is the sequence diagram with not one but two people using the same branch to add themselves for approval (NOTE: to encrypt `.env` you would run `sopsy secrets encrypt .env -o .env.encrypted`)
+
+![sopsy-workflow](docs/sopsy-workflow.png)
+
+---
+
 ## Prerequisites
 
 `sopsy` is **macOS-first** (v1). It orchestrates three external tools, all
