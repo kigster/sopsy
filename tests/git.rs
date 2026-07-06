@@ -186,3 +186,70 @@ fn is_tracked_works_with_absolute_paths() {
     let abs = dir.path().join("tracked.txt");
     assert!(git::is_tracked(dir.path(), &abs).unwrap());
 }
+
+// ----- The `--git` staging helpers ----------------------------------------
+
+#[test]
+fn stage_adds_only_existing_files_and_reports_them() {
+    let dir = init_repo();
+    let present = dir.path().join("a.txt");
+    std::fs::write(&present, "alpha").unwrap();
+    let missing = dir.path().join("nope.txt");
+
+    // The absent path is silently skipped; only the present one is returned.
+    let staged = git::stage(dir.path(), &[present.clone(), missing]).unwrap();
+    assert_eq!(staged, vec![present]);
+    // git now has it in the index.
+    assert!(git::is_tracked(dir.path(), Path::new("a.txt")).unwrap());
+}
+
+#[test]
+fn stage_is_a_noop_when_empty_or_all_missing() {
+    let dir = init_repo();
+    assert!(git::stage(dir.path(), &[]).unwrap().is_empty());
+    assert!(
+        git::stage(dir.path(), &[dir.path().join("ghost")])
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn current_branch_reports_the_checked_out_branch() {
+    let dir = init_repo();
+    // `init_repo` forces `-b main`; it resolves even before the first commit
+    // (unborn branch), which is the post-`sopsy init` state.
+    assert_eq!(git::current_branch(dir.path()).as_deref(), Some("main"));
+
+    run_git(dir.path(), &["checkout", "-q", "-b", "feature/x"]);
+    assert_eq!(
+        git::current_branch(dir.path()).as_deref(),
+        Some("feature/x")
+    );
+}
+
+#[test]
+fn current_branch_is_none_when_detached() {
+    let dir = init_repo();
+    std::fs::write(dir.path().join("f"), "x").unwrap();
+    run_git(dir.path(), &["add", "f"]);
+    run_git(dir.path(), &["commit", "-q", "-m", "one"]);
+    // Detach HEAD onto the commit; there is no current branch.
+    run_git(dir.path(), &["checkout", "-q", "--detach", "HEAD"]);
+    assert!(git::current_branch(dir.path()).is_none());
+}
+
+#[test]
+fn stage_and_advise_stages_the_given_files() {
+    let dir = init_repo();
+    for name in [".sops.yaml", ".sopsy.yml"] {
+        std::fs::write(dir.path().join(name), "x").unwrap();
+    }
+    let ui = sopsy::ui::Ui::new(false, false, false);
+    let files = [dir.path().join(".sops.yaml"), dir.path().join(".sopsy.yml")];
+
+    git::stage_and_advise(&ui, dir.path(), &files, "Add sopsy secrets").unwrap();
+
+    assert!(git::is_tracked(dir.path(), Path::new(".sops.yaml")).unwrap());
+    assert!(git::is_tracked(dir.path(), Path::new(".sopsy.yml")).unwrap());
+}

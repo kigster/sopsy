@@ -451,6 +451,7 @@ fn join_empty_name_rejected() {
                 username: None,
                 sopsy_file: None,
                 public_key: Some("age1x".into()),
+                without_touch_id: false,
                 age_args: vec![],
             },
         )
@@ -475,6 +476,7 @@ fn join_rejects_duplicate_pending_request() {
                 username: None,
                 sopsy_file: None,
                 public_key: Some("age1bobnew".into()),
+                without_touch_id: false,
                 age_args: vec![],
             },
         )
@@ -496,6 +498,7 @@ fn join_rejects_duplicate_public_key() {
                 username: None,
                 sopsy_file: None,
                 public_key: Some("age1alice".into()),
+                without_touch_id: false,
                 age_args: vec![],
             },
         )
@@ -522,6 +525,7 @@ fn join_with_sopsy_file_targets_custom_path() {
             username: None,
             sopsy_file: Some(file.clone()),
             public_key: Some("age1bobkey".into()),
+            without_touch_id: false,
             age_args: vec![],
         },
     )
@@ -542,6 +546,7 @@ fn join_with_missing_sopsy_file_errors() {
             username: None,
             sopsy_file: Some("/nonexistent/dir/custom.yml".into()),
             public_key: Some("age1bobkey".into()),
+            without_touch_id: false,
             age_args: vec![],
         },
     )
@@ -809,6 +814,7 @@ fn join_records_pending_member_without_granting_access() {
             username: Some("bob".into()),
             sopsy_file: None,
             public_key: Some(key_b.public.clone()),
+            without_touch_id: false,
             age_args: vec![],
         },
     )
@@ -848,6 +854,7 @@ fn join_rejects_existing_member() {
                 username: None,
                 sopsy_file: None,
                 public_key: Some("age1x".into()),
+                without_touch_id: false,
                 age_args: vec![],
             },
         )
@@ -871,6 +878,7 @@ fn approve_activates_pending_member_and_rekeys() {
             username: None,
             sopsy_file: None,
             public_key: Some(key_b.public.clone()),
+            without_touch_id: false,
             age_args: vec![],
         },
     )
@@ -1099,6 +1107,7 @@ fn join_then_batch_approve_handles_multiword_names() {
                     username: None,
                     sopsy_file: None,
                     public_key: Some(key.into()),
+                    without_touch_id: false,
                     age_args: vec![],
                 },
             )
@@ -1147,6 +1156,7 @@ fn join_defaults_username_to_system_user() {
                 username: None,
                 sopsy_file: None,
                 public_key: Some("age1konstantin".into()),
+                without_touch_id: false,
                 age_args: vec![],
             },
         )
@@ -1547,6 +1557,127 @@ fn add_rolls_back_when_reencryption_fails() {
     assert!(
         !sops_yaml.contains(new_key),
         ".sops.yaml must not list the new key after rollback"
+    );
+
+    unsafe {
+        std::env::remove_var("SOPSY_SOPS_BIN");
+    }
+    restore_cwd(&original_cwd);
+}
+
+/// A fake `sops` that re-wraps every file *except* one ending in `b.encrypted`
+/// (which it fails on), letting a test drive a mid-loop `updatekeys` failure. On
+/// success it overwrites the target with a sentinel, so a test can prove the
+/// pre-command bytes were restored (not the re-wrapped ones).
+const SELECTIVE_FAKE_SOPS: &str = "for f in \"$@\"; do target=\"$f\"; done\n\
+     case \"$target\" in\n\
+     \x20 *b.encrypted) echo 'cannot get data key' >&2; exit 1 ;;\n\
+     \x20 *) printf 'REWRAPPED-BY-FAKE\\n' > \"$target\"; exit 0 ;;\n\
+     esac\n";
+
+#[test]
+#[serial]
+fn add_rollback_restores_already_rewrapped_bodies() {
+    let original_cwd = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+
+    let (a_pub, _a_file) = generate_age_key(dir.path(), "keyA.txt");
+    git_init(dir.path());
+    write_sops_yaml(dir.path(), &a_pub);
+    write_sopsy_yml(dir.path(), &a_pub);
+
+    // Two managed encrypted files (both match the default `*.encrypted` glob and
+    // carry the `ENC[` marker). `collect_encrypted_files` sorts, so `a.encrypted`
+    // is re-wrapped (by the fake `sops`) *before* `b.encrypted` fails.
+    std::fs::write(dir.path().join("a.encrypted"), "A=ENC[a]\n").unwrap();
+    std::fs::write(dir.path().join("b.encrypted"), "B=ENC[b]\n").unwrap();
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    let fake = dir.path().join("fake-sops.sh");
+    write_script(&fake, SELECTIVE_FAKE_SOPS);
+    unsafe {
+        std::env::set_var("SOPSY_SOPS_BIN", &fake);
+    }
+
+    let new_key = "age1rollbackkeyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+    let err = recipient::run(&test_ui(), &add_command("second", new_key, false, false))
+        .expect_err("recipient add must fail when re-encryption fails");
+    assert!(matches!(err, Error::Validation(m) if m.contains("rolled back")));
+
+    // The already-re-wrapped `a.encrypted` must be rolled back to its original
+    // bytes — not left carrying the fake's re-wrap (the bug this test guards).
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.encrypted")).unwrap(),
+        "A=ENC[a]\n",
+        "a.encrypted must be restored to its pre-command bytes after rollback"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("b.encrypted")).unwrap(),
+        "B=ENC[b]\n"
+    );
+
+    // And the config files are rolled back as before.
+    let config = Config::load_from_dir(dir.path()).unwrap();
+    assert!(config.recipient("second").is_none());
+    let sops_yaml = std::fs::read_to_string(dir.path().join(".sops.yaml")).unwrap();
+    assert!(!sops_yaml.contains(new_key));
+
+    unsafe {
+        std::env::remove_var("SOPSY_SOPS_BIN");
+    }
+    restore_cwd(&original_cwd);
+}
+
+#[test]
+#[serial]
+fn remove_rollback_restores_already_rewrapped_bodies() {
+    let original_cwd = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+
+    let (a_pub, _a_file) = generate_age_key(dir.path(), "keyA.txt");
+    git_init(dir.path());
+    write_sops_yaml(dir.path(), &a_pub);
+    write_sopsy_yml(dir.path(), &a_pub);
+    std::env::set_current_dir(dir.path()).unwrap();
+
+    // Register a second recipient (config-only, no re-key) so `remove` clears the
+    // "last recipient" safety rail.
+    let second_key = "age1secondkeyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+    recipient::run(&test_ui(), &add_command("second", second_key, false, true))
+        .expect("recipient add (--no-updatekeys) should succeed");
+
+    std::fs::write(dir.path().join("a.encrypted"), "A=ENC[a]\n").unwrap();
+    std::fs::write(dir.path().join("b.encrypted"), "B=ENC[b]\n").unwrap();
+
+    let fake = dir.path().join("fake-sops.sh");
+    write_script(&fake, SELECTIVE_FAKE_SOPS);
+    unsafe {
+        std::env::set_var("SOPSY_SOPS_BIN", &fake);
+    }
+
+    let err = recipient::run(&test_ui(), &remove_command("second", false))
+        .expect_err("recipient remove must fail when re-encryption fails");
+    assert!(matches!(err, Error::Validation(m) if m.contains("rolled back")));
+
+    // The already-re-wrapped `a.encrypted` must be restored — otherwise the
+    // removed recipient is silently stripped from a subset of files (a partial
+    // revocation) while the config claims they are still a member.
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.encrypted")).unwrap(),
+        "A=ENC[a]\n",
+        "a.encrypted must be restored to its pre-command bytes after rollback"
+    );
+
+    // `second` is rolled back into both config files.
+    let config = Config::load_from_dir(dir.path()).unwrap();
+    assert!(
+        config.recipient("second").is_some(),
+        "`second` must remain a recipient after rollback"
+    );
+    let sops_yaml = std::fs::read_to_string(dir.path().join(".sops.yaml")).unwrap();
+    assert!(
+        sops_yaml.contains(second_key),
+        ".sops.yaml must still list `second`'s key after rollback"
     );
 
     unsafe {

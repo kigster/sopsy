@@ -19,64 +19,37 @@ and lifecycle edges, not novel crypto.
 
 | # | Issue | Severity | Status |
 |---|-------|----------|--------|
-| 1 | Rollback doesn't restore already-re-wrapped encrypted files | Medium | Confirmed |
-| 2 | Nested `*.encrypted` files skipped by re-key globs | Medium | Confirmed |
-| 3 | `recipient remove` re-wraps but never rotates the data key | Medium | Confirmed (partly by design) |
-| 4 | Mid-mutation failures (before `updatekeys`) bypass rollback | Medium | Confirmed |
-| 5 | Approver is never checked to be an active member | Medium | Confirmed |
-| 6 | `check`'s hand-rolled regex mis-evaluates common `path_regex` syntax | Medium | Confirmed |
-| 7 | `mutate_sops_yaml` destroys `.sops.yaml` comments/formatting | Medium | Confirmed |
-| 8 | `secret-scan` push trigger targets `master`; repo is `main` | Medium | Confirmed |
-| 9 | `just warnings` runs `-D warmings` (typo) — dead release gate | Medium | Confirmed |
-| 10 | `.sopsy.sha` sidecar: friction-heavy, weak evidence, guards the wrong file | Medium (UX) / Low (security) | Confirmed |
-| 11 | Portable break-glass/CI key lifecycle on disk | Medium | Partially mitigated |
-| 12 | `Config::save` is a non-atomic two-file write | Low–Medium | Confirmed |
-| 13 | `secrets decrypt -o <file>` writes plaintext with default perms | Low–Medium | Confirmed |
-| 14 | Unpinned/unverified `sops`/`age` downloads in CI and docs | Low | Confirmed |
-| 15 | `SOPSY_ASSUME_YES` is a presence check (`=false`/`=0` still enable) | Low | Confirmed |
-| 16 | `doctor` silently re-blesses a tampered config | Low | Confirmed |
-| 17 | Join-request TTL freshness trivially bypassed | Low | Confirmed (advisory by design) |
-| 18 | `approved_by` derived from spoofable `$USER`; "audit trail" oversold | Low | Confirmed |
-| 19 | No `--` end-of-options guard before user file paths | Low | Confirmed |
-| 20 | `recipient list` truncates public keys to 24 chars | Low | Confirmed |
-| 21 | `approve` next-steps references nonexistent `sopsy decrypt` | Low | Confirmed |
-| 22 | Unused `toml` dependency | Low | Confirmed |
-| 23 | No format validation of supplied age public keys | Low | Confirmed |
-| 24 | Global gitleaks allowlist for `age1…` can mask adjacent secrets | Info | Confirmed |
+| 1 | Nested `*.encrypted` files skipped by re-key globs | Medium | Confirmed |
+| 2 | `recipient remove` re-wraps but never rotates the data key | Medium | Confirmed (partly by design) |
+| 3 | Mid-mutation failures (before `updatekeys`) bypass rollback | Medium | Confirmed |
+| 4 | Approver is never checked to be an active member | Medium | Confirmed |
+| 5 | `check`'s hand-rolled regex mis-evaluates common `path_regex` syntax | Medium | Confirmed |
+| 6 | `mutate_sops_yaml` destroys `.sops.yaml` comments/formatting | Medium | Confirmed |
+| 7 | `secret-scan` push trigger targets `master`; repo is `main` | Medium | Confirmed |
+| 8 | `just warnings` runs `-D warmings` (typo) — dead release gate | Medium | Confirmed |
+| 9 | `.sopsy.sha` sidecar: friction-heavy, weak evidence, guards the wrong file | Medium (UX) / Low (security) | Confirmed |
+| 10 | Portable break-glass/CI key lifecycle on disk | Medium | Partially mitigated |
+| 11 | `Config::save` is a non-atomic two-file write | Low–Medium | Confirmed |
+| 12 | `secrets decrypt -o <file>` writes plaintext with default perms | Low–Medium | Confirmed |
+| 13 | Unpinned/unverified `sops`/`age` downloads in CI and docs | Low | Confirmed |
+| 14 | `SOPSY_ASSUME_YES` is a presence check (`=false`/`=0` still enable) | Low | Confirmed |
+| 15 | `doctor` silently re-blesses a tampered config | Low | Confirmed |
+| 16 | Join-request TTL freshness trivially bypassed | Low | Confirmed (advisory by design) |
+| 17 | `approved_by` derived from spoofable `$USER`; "audit trail" oversold | Low | Confirmed |
+| 18 | No `--` end-of-options guard before user file paths | Low | Confirmed |
+| 19 | `recipient list` truncates public keys to 24 chars | Low | Confirmed |
+| 20 | `approve` next-steps references nonexistent `sopsy decrypt` | Low | Confirmed |
+| 21 | Unused `toml` dependency | Low | Confirmed |
+| 22 | No format validation of supplied age public keys | Low | Confirmed |
+| 23 | Global gitleaks allowlist for `age1…` can mask adjacent secrets | Info | Confirmed |
+| — | Re-key rollback didn't restore already-re-wrapped encrypted bodies | (was Medium) | **Resolved** |
 | — | Failed `init` left plaintext in `.env.encrypted` | (was Critical) | **Resolved** |
 
 ______________________________________________________________________
 
 ## Medium
 
-### 1. Re-key rollback doesn't restore already-re-wrapped encrypted files
-
-*Was: Security #2, Staff #2. Both rated High; calibrated to Medium.*
-
-`run_updatekeys` (`recipient.rs:775-801`) re-wraps files one at a time
-(`for file in &files { updatekeys_file(file)?; }`) and aborts on the first
-failure. `ConfigSnapshot` (`recipient.rs:262-294`) snapshots only `.sopsy.yml`,
-`.sopsy.sha`, and `.sops.yaml` — **not** the encrypted bodies. If the loop
-succeeds on files 1–2 and fails on file 3, the callers (`add:177`, `remove:246`,
-`approve.rs:123`, ceremony `:727`) restore the three config files and report
-"rolled back", yet files 1–2 already carry the new key stanza.
-
-**Verified:** still present; snapshot covers 3 files only.
-
-**Impact (calibrated):** Real but bounded. The "not-added" recipient is someone
-the operator was deliberately adding, not an external attacker; and the operator
-must already be able to decrypt for `updatekeys` to run at all. The sharper edge
-is the mirror case: `remove` strips a recipient from a *subset* of files while
-the config claims they're gone — a silent partial revocation failure.
-
-**Fix:** Extend `ConfigSnapshot::capture` to also snapshot the bytes of every
-file `collect_encrypted_files` returns (compute that set once, before the loop),
-and restore them in `restore()`. Consider having `run_updatekeys` continue past
-failures and report all of them, so one bad file doesn't strand the rest
-mid-state. Pair with a `check`/`doctor` invariant that flags "a recipient in
-`.sops.yaml` whose stanza is absent from some encrypted files".
-
-### 2. Nested `*.encrypted` files are silently skipped during re-keying
+### 1. Nested `*.encrypted` files are silently skipped during re-keying
 
 *Was: Staff #3. Rated High; calibrated to Medium.*
 
@@ -104,7 +77,7 @@ creation-rule regexes, exactly as `sops` will. Failing that, add `**` support,
 change defaults to `**/*.encrypted`, and make `secrets encrypt -o` warn when the
 output path matches no configured glob/rule.
 
-### 3. `recipient remove` re-wraps but never rotates the data key
+### 2. `recipient remove` re-wraps but never rotates the data key
 
 *Was: Staff #4. Rated High; calibrated to Medium (largely inherent to the model).*
 
@@ -126,7 +99,7 @@ re-wrapped, not rotated; a member who previously decrypted may retain access to
 future revisions — run `sops rotate -i <file>` to fully rotate." Optionally add a
 `--rotate` flag. Silence is the only unacceptable option.
 
-### 4. Mid-mutation failures before `updatekeys` bypass the rollback entirely
+### 3. Mid-mutation failures before `updatekeys` bypass the rollback entirely
 
 *Was: Staff #6. Medium.*
 
@@ -151,7 +124,7 @@ before returning (see the closure sketch in the original Staff review). Also
 parse-validate `.sops.yaml` up front (`serde_yaml_ng::from_str`) so the common
 failure never mutates anything.
 
-### 5. Nothing checks that the approver is an active member
+### 4. Nothing checks that the approver is an active member
 
 *Was: Staff #9, related Security #11. Medium.*
 
@@ -174,7 +147,7 @@ or an explicit `--as <name>`) to an active, non-pending recipient; refuse
 self-approval; and warn loudly when `--no-updatekeys` skips the crypto gate. Keep
 `--force` as the documented escape hatch.
 
-### 6. `check`'s hand-rolled regex engine mis-evaluates common `path_regex` syntax
+### 5. `check`'s hand-rolled regex engine mis-evaluates common `path_regex` syntax
 
 *Was: Staff #11. Medium.*
 
@@ -195,7 +168,7 @@ defaults (`\.encrypted$`) are fine.
 for unsupported metacharacters and report "unsupported path_regex `…` — cannot
 evaluate this rule" as an explicit failure rather than treating them as literals.
 
-### 7. Every recipient mutation destroys `.sops.yaml` comments and formatting
+### 6. Every recipient mutation destroys `.sops.yaml` comments and formatting
 
 *Was: Staff #12. Medium.*
 
@@ -218,7 +191,7 @@ header after serialization. Better — do a targeted textual splice of the `age:
 value (already normalized to a single comma-separated string), falling back to
 the serde round-trip with a warning only when the structure is unrecognizable.
 
-### 8. `secret-scan` push trigger targets `master`, but the repo's branch is `main`
+### 7. `secret-scan` push trigger targets `master`, but the repo's branch is `main`
 
 *Was: Security #4, Staff #13. Medium.*
 
@@ -239,7 +212,7 @@ keyed to a nonexistent `master` would silently protect nothing.
 in branch protection for `main` (a repo setting the code can't enforce — verify
 in the GitHub UI). Grep for other `master` remnants while there.
 
-### 9. `just warnings` runs `-D warmings` — the release gate is a no-op
+### 8. `just warnings` runs `-D warmings` — the release gate is a no-op
 
 *Was: Staff #10. Medium.*
 
@@ -257,7 +230,7 @@ the committed code. CLAUDE.md documents the typo instead of fixing it.
 `fmt-check: cargo fmt --all -- --check`, and remove the CLAUDE.md sentence that
 enshrines the typo.
 
-### 10. `.sopsy.sha`: high friction, weak evidence, guards the metadata not the grant
+### 9. `.sopsy.sha`: high friction, weak evidence, guards the metadata not the grant
 
 *Was: Security #6, Security #9, Staff #5. Rated up to Critical-ish; calibrated to
 Medium (UX) / Low (security).*
@@ -274,7 +247,7 @@ Three related observations about the integrity sidecar:
   every sopsy command fails "edited outside sopsy" until someone runs `doctor`.
 - **Weak evidence + auto-bless.** The checksum is keyless (SHA-256 of raw bytes +
   the *public* admin key, `config.rs:218-223`), so anyone recomputes it; and
-  `doctor` re-blesses whatever is on disk (see #16). By the project's own
+  `doctor` re-blesses whatever is on disk (see #15). By the project's own
   admission it is "evidence, not proof."
 
 **Verified:** all three still hold as described.
@@ -291,7 +264,7 @@ conflicts at `doctor`. If integrity of `.sops.yaml` matters, the real control is
 required human PR review of recipient changes — say so plainly rather than
 implying the sidecar provides it.
 
-### 11. Portable break-glass / CI private key lifecycle on disk
+### 10. Portable break-glass / CI private key lifecycle on disk
 
 *Was: Security #1 (High), Staff #8 (Medium). Calibrated to Medium; the interrupt
 case is now mitigated.*
@@ -338,16 +311,16 @@ ______________________________________________________________________
 
 ## Low
 
-### 12. `Config::save` is a non-atomic two-file write
+### 11. `Config::save` is a non-atomic two-file write
 
 *Was: Staff #7.* `save` (`config.rs:283-292`) writes `.sopsy.yml` then `.sopsy.sha`
 with plain `std::fs::write`. A crash between the two makes the next `load` fail the
 integrity check for a file sopsy half-wrote. The crate already depends on
 `tempfile`. **Fix:** write to a `NamedTempFile` in the same dir and `persist()`
-over each target. (Combined with #10's warn-not-fail posture, a one-save-behind
+over each target. (Combined with #9's warn-not-fail posture, a one-save-behind
 sidecar costs a warning, not an outage.)
 
-### 13. `secrets decrypt -o <file>` writes plaintext with default permissions
+### 12. `secrets decrypt -o <file>` writes plaintext with default permissions
 
 *Was: Security #5.* `write_output` (`secrets.rs:104-114`) is a bare
 `std::fs::write(path, data)`, inheriting the umask (often `0644`). The README CI
@@ -358,7 +331,7 @@ materializing a group/world-readable plaintext file. **Fix:** create `-o` target
 unavoidable. (Env-var secrets remain visible via `/proc/<pid>/environ` to the same
 user — inherent, document it.)
 
-### 14. Unpinned/unverified `sops`/`age` downloads in CI and docs
+### 13. Unpinned/unverified `sops`/`age` downloads in CI and docs
 
 *Was: Security #7.* `ci.yml:45-56,86-94` install `sops`/`age` via
 `curl … -o …; chmod +x` with no checksum/signature; the README deploy workflow
@@ -369,7 +342,7 @@ applied inconsistently. **Fix:** download to a temp path, verify a pinned SHA-25
 before install, SHA-pin third-party actions, and pin `sopsy`
 (`--version x.y.z --locked`).
 
-### 15. `SOPSY_ASSUME_YES` is a presence check
+### 14. `SOPSY_ASSUME_YES` is a presence check
 
 *Was: Security #8.* `assume_yes()` (`recipient.rs:40-42`) returns true whenever the
 var `is_some()`, so `SOPSY_ASSUME_YES=false`/`=0`/`""` all *enable* the bypass —
@@ -377,17 +350,17 @@ auto-vouching (`approve.rs:262`) and skipping the break-glass confirmation.
 **Fix:** parse truthiness (`""`/`0`/`false`/`no`/`off` → disabled). **Impact:**
 low — it takes a user actively setting the var to the "wrong" falsey value.
 
-### 16. `doctor` silently re-blesses a tampered config
+### 15. `doctor` silently re-blesses a tampered config
 
 *Was: Security #9.* `checksum_check` (`doctor.rs:258-280`) rewrites `.sopsy.sha` to
 match whatever is on disk, emitting only a yellow `⚠`. Since `doctor` is
 documented as safe and is run reflexively, a tampered `.sopsy.yml` gets
 "verified". **Fix:** report a stale/mismatched sidecar as a prominent failure and
 repair only behind an explicit `--repair-checksum` (or an interactive confirm that
-shows `git diff` first). Closely tied to #10; if `load` only warns, this matters
+shows `git diff` first). Closely tied to #9; if `load` only warns, this matters
 less.
 
-### 17. Join-request TTL freshness is trivially bypassed
+### 16. Join-request TTL freshness is trivially bypassed
 
 *Was: Security #10.* `check_freshness` (`approve.rs:204-209`) treats a **missing**
 `requested_at` as "proceed", and `request_age` (`:244-251`) maps a **future**
@@ -397,7 +370,7 @@ the real gate — so this is low, but it shouldn't be described as an access-con
 window. **Fix:** make a missing `requested_at` a hard stop in strict (named) mode
 and clamp implausible future timestamps to "reject", not "fresh".
 
-### 18. `approved_by` is derived from spoofable `$USER`; "audit trail" is oversold
+### 17. `approved_by` is derived from spoofable `$USER`; "audit trail" is oversold
 
 *Was: Security #11.* `resolve_approver` (`approve.rs:140-150`) reads
 `$USER`/`$LOGNAME` and writes it into the committed record as "Full Name
@@ -407,7 +380,7 @@ calls it "a built-in audit trail". **Fix:** label the field in output as
 self-reported and point to git commit signatures / branch-protection review as the
 authoritative record; soften the README wording.
 
-### 19. No `--` end-of-options guard before user file paths
+### 18. No `--` end-of-options guard before user file paths
 
 *Was: Security #12.* `sops/mod.rs` appends the file path as a positional with no
 preceding `--` in `edit` (`:169-190`), `encrypt_in_place` (`:196-206`),
@@ -416,7 +389,7 @@ preceding `--` in `edit` (`:169-190`), `encrypt_in_place` (`:196-206`),
 filename), but `--` is free defense in depth. **Fix:** push `"--"` before the file
 argument in each invocation.
 
-### 20. `recipient list` truncates public keys to 24 characters
+### 19. `recipient list` truncates public keys to 24 characters
 
 *Was: Staff #14.* `KEY_COL_MAX = 24` (`recipient.rs:400`) shows almost none of a
 ~62-char age key, so two keys can render identically — in the very table an
@@ -424,7 +397,7 @@ approver eyeballs while vouching. (`truncate` also yields max+1 chars, so the
 "cap" isn't one; codified by the test at `recipient.rs:1064`.) **Fix:** show the
 full key (this table is the audit surface), or keep prefix *and* suffix.
 
-### 21. `approve` next-steps references a nonexistent `sopsy decrypt`
+### 20. `approve` next-steps references a nonexistent `sopsy decrypt`
 
 *Was: Staff #15.* `approve.rs:289` prints "can `sopsy edit`/`sopsy decrypt`" — the
 command is `sopsy secrets decrypt`. The newcomer's first suggested action is an
@@ -432,18 +405,18 @@ argument-parse error. **Fix:** one-line correction to `sopsy secrets decrypt`; a
 a cheap test that greps next-steps strings for `sopsy <word>` tokens and asserts
 each is a real subcommand.
 
-### 22. Unused `toml` dependency
+### 21. Unused `toml` dependency
 
 *Was: Staff #16.* `Cargo.toml:37` declares `toml = "1.1.2"`; `rg` finds zero uses
 in `src/`/`tests/`. Dead compile time and supply-chain surface. **Fix:** remove it;
 consider `cargo machete`/`cargo-udeps` in CI.
 
-### 23. No format validation of supplied age public keys
+### 22. No format validation of supplied age public keys
 
 *Was: Staff #17.* `join` (`join.rs:108-114`), `recipient add`
 (`recipient.rs:120-129`), and `init --public-key` (`init.rs:249-255`) only check
 for emptiness. A garbage key is persisted and then makes *every* later re-keying
-op fail (and roll back) until hand-edited — which then trips #10's tamper error.
+op fail (and roll back) until hand-edited — which then trips #9's tamper error.
 **Fix:** a shared validator (`age1`/`age1se1` prefix, bech32 charset, sane length)
 applied at all three entry points, rejecting with "that does not look like an age
 public key (age1…)".
@@ -452,7 +425,7 @@ ______________________________________________________________________
 
 ## Info
 
-### 24. Global gitleaks allowlist for `age1…` can mask adjacent secrets
+### 23. Global gitleaks allowlist for `age1…` can mask adjacent secrets
 
 *Was: Security #13.* `.gitleaks.toml:44-46` allowlists `age1[0-9a-z]{8,}` at global
 scope (applies to every rule). It correctly avoids matching private
@@ -465,6 +438,26 @@ public keys legitimately appear (tests, fixtures, `.sops.yaml`, `.sopsy.yml`) vi
 ______________________________________________________________________
 
 ## Resolved since the original reviews
+
+### Re-key rollback now restores already-re-wrapped encrypted bodies
+
+*Was: Security #2, Staff #2 (both rated High; calibrated to Medium). Fixed on
+this branch.*
+
+`ConfigSnapshot` (`recipient.rs:262-...`) previously captured only the three
+config files (`.sopsy.yml`, `.sopsy.sha`, `.sops.yaml`), so a mid-loop
+`sops updatekeys` failure left the files already re-wrapped for the new recipient
+set carrying the new key stanza even though `add`/`remove`/`approve`/the
+portable-key ceremony reported a clean rollback. It now **also snapshots the
+bytes of every managed encrypted file** — the same set `run_updatekeys` re-wraps,
+stable because these commands never change `encrypted_globs` — and `restore()`
+rewrites those bodies first (the security-critical data), then the config files.
+`capture` stays infallible and no callsite signatures changed, so every caller
+gains correct rollback for free; `run_updatekeys` stays fail-fast. Covered by
+`add_rollback_restores_already_rewrapped_bodies` and
+`remove_rollback_restores_already_rewrapped_bodies` in `tests/recipient.rs`
+(a fake `sops` that re-wraps `a.encrypted`, fails on `b.encrypted`, and asserts
+`a.encrypted` is restored to its pre-command bytes).
 
 ### Failed `init` left plaintext secrets in a committable `.env.encrypted`
 

@@ -103,13 +103,25 @@ grants nothing yet — it is purely a request.
 > Already have a Secure Enclave public key? Skip generation with
 > `sopsy join alice --public-key age1se1…`.
 
+> [!TIP]
+> Tired of Touch ID on every decrypt (e.g. when using `direnv`)? Pass
+> `-t` / `--without-touch-id` to mint the Enclave key with no biometric or
+> passcode gate (`age-plugin-se --access-control none`). The private key still
+> never leaves the Enclave and is device-bound — it just stops prompting. Drop
+> the flag if you want the biometric protection.
+
 ### Step 2 — open a pull request
 
 ```bash
-git add .sopsy.yml
+git add .sopsy.yml .sopsy.sha
 git commit -m "join: request access for alice"
 git push           # then open a PR, and ping any member to approve you
 ```
+
+> [!TIP]
+> Add `--git` to the `sopsy join` above and sopsy stages `.sopsy.yml` and its
+> `.sopsy.sha` sidecar for you, then prints the exact `git commit` / `git push`
+> commands to paste — no need to remember which files to add.
 
 ### Step 3 — get approved
 
@@ -140,6 +152,11 @@ git add .env.encrypted
 git commit -m "Update API keys"
 git push
 ```
+
+> [!TIP]
+> `sopsy edit .env.encrypted --git` stages just the re-encrypted file and
+> prints the commit/push commands for you, so you can skip the manual
+> `git add` above.
 
 - **`sopsy edit <file>`** decrypts into a temp file, opens your `$EDITOR` (or
   `--editor`), and re-encrypts when you save and quit. A Touch ID prompt may appear

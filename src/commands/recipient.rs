@@ -88,6 +88,34 @@ pub(crate) fn load_config(repo: &Path) -> Result<Config> {
 }
 
 /// Resolve and validate the path to `.sops.yaml` inside `repo`.
+/// Every committable file a membership change touches: the three config files
+/// (`.sops.yaml`, `.sopsy.yml`, `.sopsy.sha`) plus every managed encrypted file
+/// (which `sops updatekeys` re-wraps). Handed to [`crate::git::stage_and_advise`]
+/// for the `--git` flow; absent entries are skipped there.
+pub(crate) fn membership_paths(repo: &Path) -> Vec<PathBuf> {
+    let sopsy = repo.join(CONFIG_FILE_NAME);
+    let mut paths = vec![
+        repo.join(SOPS_CONFIG_FILE_NAME),
+        sopsy.clone(),
+        Config::checksum_path(&sopsy),
+    ];
+    let globs = load_config(repo)
+        .map(|c| c.encrypted_globs)
+        .unwrap_or_else(|_| Config::default().encrypted_globs);
+    paths.extend(collect_encrypted_files(repo, &globs).unwrap_or_default());
+    paths
+}
+
+/// When `--git` was passed, `git add` the membership file set and print
+/// commit/PR instructions. A no-op otherwise. Errors propagate: staging is the
+/// user's explicit request, so a failure to stage should be surfaced.
+pub(crate) fn maybe_stage(ui: &Ui, repo: &Path, subject: &str) -> Result<()> {
+    if ui.stage_requested() {
+        crate::git::stage_and_advise(ui, repo, &membership_paths(repo), subject)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn sops_config_path(repo: &Path) -> Result<PathBuf> {
     let path = repo.join(SOPS_CONFIG_FILE_NAME);
     if !path.exists() {
@@ -181,6 +209,7 @@ fn add(ui: &Ui, args: &RecipientAddArgs) -> Result<()> {
     }
 
     ui.success(format!("recipient `{name}` added"));
+    maybe_stage(ui, &repo, &format!("Add sopsy recipient {name}"))?;
     Ok(())
 }
 
@@ -250,37 +279,68 @@ fn remove(ui: &Ui, args: &RecipientRemoveArgs) -> Result<()> {
     }
 
     ui.success(format!("recipient `{name}` removed"));
+    maybe_stage(ui, &repo, &format!("Remove sopsy recipient {name}"))?;
     Ok(())
 }
 
-/// A snapshot of the two recipient-config files (`.sopsy.yml` and `.sops.yaml`),
-/// used to roll a partial mutation back. Updating recipients touches both files
-/// *before* `sops updatekeys` re-wraps the encrypted secrets; if that re-wrap
-/// fails (most often because the operator's age key is not available to decrypt
-/// the existing secrets), restoring this snapshot keeps the repository
-/// consistent — it never lists a recipient the secrets were not re-wrapped for.
+/// A snapshot of everything a recipient mutation touches, used to roll a partial
+/// mutation back. Updating recipients rewrites the config files (`.sopsy.yml`,
+/// its `.sopsy.sha` sidecar, `.sops.yaml`) *and then* has `sops updatekeys`
+/// re-wrap the encrypted secrets one file at a time. If that re-wrap fails
+/// partway (most often because the operator's age key is not available to
+/// decrypt), restoring this snapshot returns the repository to its exact
+/// pre-command state — both the config files *and* every encrypted body that was
+/// already re-wrapped — so it never lists a recipient the secrets were not
+/// re-wrapped for, nor silently re-wraps a subset before claiming a rollback.
+///
+/// The captured encrypted set is the same one `run_updatekeys` re-wraps: these
+/// commands never change `encrypted_globs`, so the file set is stable across the
+/// mutation. Bodies are held in memory (secrets are small, matching the config
+/// snapshots); capture is best-effort and infallible.
 pub(crate) struct ConfigSnapshot {
+    /// The three config files, `None` when absent at capture time.
     files: [(PathBuf, Option<Vec<u8>>); 3],
+    /// Every managed encrypted file and its pre-command bytes. Only files that
+    /// existed and were readable at capture are recorded, so bytes are always
+    /// present (no `Option`).
+    encrypted: Vec<(PathBuf, Vec<u8>)>,
 }
 
 impl ConfigSnapshot {
-    /// Capture the current bytes of the config files (`None` if absent):
-    /// `.sopsy.yml`, its `.sopsy.sha` integrity sidecar, and `.sops.yaml`.
+    /// Capture the current bytes of the config files (`None` if absent) —
+    /// `.sopsy.yml`, its `.sopsy.sha` integrity sidecar, and `.sops.yaml` — plus
+    /// the bytes of every managed encrypted file that `run_updatekeys` will touch.
     pub(crate) fn capture(repo: &Path, sops_config: &Path) -> Self {
         let sopsy = repo.join(CONFIG_FILE_NAME);
         let sha = Config::checksum_path(&sopsy);
+        // Resolve globs the same way `run_updatekeys` does (falling back to the
+        // defaults when `.sopsy.yml` is absent/unreadable, e.g. mid-init), then
+        // snapshot each encrypted body so a failed re-wrap can be undone.
+        let globs = load_config(repo)
+            .map(|c| c.encrypted_globs)
+            .unwrap_or_else(|_| Config::default().encrypted_globs);
+        let encrypted = collect_encrypted_files(repo, &globs)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|path| std::fs::read(&path).ok().map(|bytes| (path, bytes)))
+            .collect();
         ConfigSnapshot {
             files: [
                 (sopsy.clone(), std::fs::read(&sopsy).ok()),
                 (sha.clone(), std::fs::read(&sha).ok()),
                 (sops_config.to_path_buf(), std::fs::read(sops_config).ok()),
             ],
+            encrypted,
         }
     }
 
-    /// Restore both files to their captured contents (removing any that did not
-    /// exist when captured).
+    /// Restore everything to its captured contents. Encrypted bodies are written
+    /// first (the security-critical data), then the config files (removing any
+    /// that did not exist when captured). The first write error propagates.
     pub(crate) fn restore(&self) -> Result<()> {
+        for (path, bytes) in &self.encrypted {
+            std::fs::write(path, bytes)?;
+        }
         for (path, contents) in &self.files {
             match contents {
                 Some(bytes) => std::fs::write(path, bytes)?,
@@ -739,6 +799,12 @@ fn portable_key_ceremony(
         ui.info("      SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}");
         ui.info("Then decrypt with: sopsy secrets decrypt .env.encrypted");
     }
+
+    let subject = match kind {
+        PortableKeyKind::BreakGlass => "Add sopsy break-glass recipient",
+        PortableKeyKind::Ci => "Add sopsy CI recipient",
+    };
+    maybe_stage(ui, &repo, subject)?;
     Ok(())
 }
 

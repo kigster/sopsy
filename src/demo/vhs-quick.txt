@@ -1,0 +1,76 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# sopsy — 20-second quickstart  (record with:  vhs src/demo/vhs-quick.txt)
+#
+# The snappy README-hero cut: plaintext secret → committed ciphertext, fast.
+# No decrypt step, so it needs no Touch ID and runs fully hands-free.
+# For the full team flow (join / approve / decrypt / edit) see vhs.txt.
+# ─────────────────────────────────────────────────────────────────────────────
+
+Output sopsy-quick.gif
+
+Require sopsy
+Require git
+Require sops
+Require age-plugin-se
+Require bat
+
+Set Shell "bash"
+Set FontSize 18
+Set Width 1200
+Set Height 720
+Set Padding 24
+Set Margin 16
+Set BorderRadius 10
+Set WindowBar Colorful
+Set Theme "Catppuccin Mocha"
+Set TypingSpeed 22ms
+
+Hide
+Type "export PS1='\033[38;5;170m❯\033[0m '"
+Enter
+Type "export BAT_PAGER=cat BAT_STYLE=numbers,grid CLICOLOR_FORCE=1"
+Enter
+Type "export SOPSY_KEYS_FILE=$(mktemp -d)/keys.txt"
+Enter
+Type "cd $(mktemp -d)"
+Enter
+Type "clear"
+Enter
+Show
+
+Sleep 1s
+
+Type "# Bootstrap a repo — one command mints your Enclave key and writes the config"
+Enter
+Type "git init -q app && cd app"
+Enter
+Type "sopsy init -y --recipient-name 'me' --no-break-glass"
+Enter
+Sleep 2500ms
+
+Type "# Add a real secret"
+Enter
+Type "printf 'DATABASE_URL=postgres://user:s3cr3t@db/prod\n' > .env"
+Enter
+Sleep 800ms
+
+Type "# Encrypt it — values sealed, keys still readable in a diff"
+Enter
+Type "sopsy secrets encrypt .env -o .env.encrypted"
+Enter
+Sleep 1800ms
+Type "bat -l ini .env.encrypted"
+Enter
+Sleep 3s
+
+Type "# The hygiene gate — fails the build if any plaintext secret is tracked"
+Enter
+Type "sopsy check"
+Enter
+Sleep 2500ms
+
+Type "# Commit the ciphertext. The plaintext .env is already gitignored."
+Enter
+Type "git add -A && git commit -q -m 'Add encrypted secrets managed by sopsy' && git log --oneline -1"
+Enter
+Sleep 3s

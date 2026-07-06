@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use crate::cli::{InitArgs, RecipientBreakGlassArgs, RecipientCommand};
 use crate::commands::recipient::system_username;
-use crate::config::{Config, Recipient};
+use crate::config::{CONFIG_FILE_NAME, Config, Recipient};
 use crate::error::{Error, Result};
 use crate::sops::{self, FileType};
 use crate::ui::Ui;
@@ -145,11 +145,29 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
     ui.success(format!("Wrote {}.", config_path.display()));
 
     // 10. Offer to create the break-glass emergency key while we're here — this
-    //     is the moment the owner is most likely to actually do it.
-    maybe_setup_break_glass(ui, &root, args)?;
+    //     is the moment the owner is most likely to actually do it. Run with
+    //     staging suppressed so init emits a single --git summary at the end
+    //     rather than the ceremony advising separately (step 12).
+    maybe_setup_break_glass(&ui.without_git(), &root, args)?;
 
     // 11. Final, colorful health summary.
     print_summary(ui, &recipient);
+
+    // 12. With --git, stage exactly the files init creates and print commit/PR
+    //     steps. This is the whole set (the break-glass ceremony above ran with
+    //     staging suppressed, so it lands here once, not twice).
+    if ui.stage_requested() {
+        let sopsy_yml = root.join(CONFIG_FILE_NAME);
+        let files = [
+            root.join(".sops.yaml"),
+            root.join(".env.example"),
+            root.join(".env.encrypted"),
+            root.join(".gitignore"),
+            sopsy_yml.clone(),
+            Config::checksum_path(&sopsy_yml),
+        ];
+        git::stage_and_advise(ui, &root, &files, "Add sopsy-managed encrypted secrets")?;
+    }
     Ok(())
 }
 

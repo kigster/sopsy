@@ -48,6 +48,12 @@ pub struct GlobalArgs {
     /// Increase output verbosity (show debug detail).
     #[arg(long, short = 'v', global = true)]
     pub verbose: bool,
+
+    /// After a command changes files, `git add` exactly those files and print
+    /// ready-to-paste commit and pull-request instructions. A no-op for commands
+    /// that don't modify committed files.
+    #[arg(long, global = true)]
+    pub git: bool,
 }
 
 impl GlobalArgs {
@@ -87,9 +93,17 @@ pub enum Command {
     #[command(subcommand)]
     Recipient(RecipientCommand),
 
-    /// Encrypt or decrypt a secrets file to stdout (or a file).
-    #[command(subcommand)]
+    /// Deprecated alias for the top-level `encrypt`/`decrypt` commands, kept
+    /// (hidden) for backwards compatibility with scripts written before they
+    /// existed. Prefer `sopsy encrypt` / `sopsy decrypt`.
+    #[command(subcommand, hide = true)]
     Secrets(SecretsCommand),
+
+    /// Encrypt a plaintext file to stdout (or a file).
+    Encrypt(SecretsEncryptArgs),
+
+    /// Decrypt an encrypted file to stdout (or a file).
+    Decrypt(SecretsDecryptArgs),
 
     /// List the file types sopsy understands (for `--type`).
     ListSupportedTypes,
@@ -172,6 +186,14 @@ pub struct JoinArgs {
     /// Use this existing age public key instead of generating a new identity.
     #[arg(long)]
     pub public_key: Option<String>,
+
+    /// Generate the Secure Enclave identity without a Touch ID / passcode gate,
+    /// by passing `--access-control none` to `age-plugin-se keygen`. The private
+    /// key still never leaves the Enclave (and is device-bound), but unlocking it
+    /// no longer prompts for a fingerprint or passcode — handy for scripted or
+    /// headless setups. Ignored when `--public-key` is supplied.
+    #[arg(short = 't', long = "without-touch-id")]
+    pub without_touch_id: bool,
 
     /// Extra arguments forwarded verbatim to `age-plugin-se keygen` after `--`.
     #[arg(last = true)]
@@ -448,6 +470,52 @@ mod tests {
             }
             _ => panic!("expected join"),
         }
+    }
+
+    #[test]
+    fn join_without_touch_id_flag_parses() {
+        // Long and short forms both set the flag; it defaults to false.
+        for argv in [
+            vec!["sopsy", "join", "annie", "--without-touch-id"],
+            vec!["sopsy", "join", "annie", "-t"],
+        ] {
+            let cli = Cli::try_parse_from(argv).unwrap();
+            assert!(matches!(cli.command, Command::Join(a) if a.without_touch_id));
+        }
+        let cli = Cli::try_parse_from(["sopsy", "join", "annie"]).unwrap();
+        assert!(matches!(cli.command, Command::Join(a) if !a.without_touch_id));
+    }
+
+    #[test]
+    fn hidden_secrets_alias_still_parses() {
+        // `secrets encrypt`/`secrets decrypt` remain functional (hidden from
+        // help) so pre-existing scripts keep working after the top-level verbs.
+        let cli = Cli::try_parse_from(["sopsy", "secrets", "decrypt", ".env.encrypted"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Secrets(SecretsCommand::Decrypt(a)) if a.file == *std::path::Path::new(".env.encrypted")
+        ));
+        let cli = Cli::try_parse_from(["sopsy", "secrets", "encrypt", ".env"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Secrets(SecretsCommand::Encrypt(_))
+        ));
+    }
+
+    #[test]
+    fn top_level_encrypt_decrypt_are_shorthands() {
+        let cli = Cli::try_parse_from(["sopsy", "decrypt", ".env.encrypted"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Decrypt(a) if a.file == *std::path::Path::new(".env.encrypted")
+        ));
+
+        let cli =
+            Cli::try_parse_from(["sopsy", "encrypt", ".env", "-o", ".env.encrypted"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Encrypt(a) if a.output == Some(PathBuf::from(".env.encrypted"))
+        ));
     }
 
     #[test]

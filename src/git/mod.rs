@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::error::{Error, Result};
+use crate::ui::Ui;
 
 /// The name of the external binary this module drives.
 pub const GIT_BIN: &str = "git";
@@ -91,6 +92,99 @@ pub fn is_ignored(repo: &Path, path: &Path) -> Result<bool> {
     }
 }
 
+/// `git add` the given committable files, skipping any that don't exist, and
+/// return the ones actually staged.
+///
+/// Callers can therefore pass their full *managed* set even when some entries
+/// are optional (e.g. an absent `.env.example`): only present paths are staged.
+pub fn stage(repo: &Path, files: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let existing: Vec<PathBuf> = files.iter().filter(|path| path.exists()).cloned().collect();
+    if existing.is_empty() {
+        return Ok(existing);
+    }
+    // `--` guards against any path that looks like an option.
+    let mut args: Vec<String> = vec!["add".to_string(), "--".to_string()];
+    args.extend(
+        existing
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned()),
+    );
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let output = git(repo, &refs)?;
+    if !output.status.success() {
+        return Err(Error::ProcessFailed {
+            tool: GIT_BIN.to_string(),
+            code: output.status.code().unwrap_or(-1),
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    Ok(existing)
+}
+
+/// The current branch name, or `None` on a detached HEAD.
+///
+/// Uses `symbolic-ref` rather than `rev-parse --abbrev-ref` so it still returns
+/// the branch name on an *unborn* branch (a fresh repo with no commits yet,
+/// exactly the state right after `sopsy init`).
+pub fn current_branch(repo: &Path) -> Option<String> {
+    let output = git(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch)
+    }
+}
+
+/// Stage `files` and print copy-pasteable commit + pull-request instructions.
+///
+/// The entry point for the global `--git` flag: a command that just changed
+/// files passes the concrete set it touched plus a commit subject. Only files
+/// that exist are staged (see [`stage`]), and the printed `git push`/`gh pr`
+/// lines are tailored to the current branch.
+pub fn stage_and_advise(
+    ui: &Ui,
+    repo: &Path,
+    files: &[PathBuf],
+    commit_subject: &str,
+) -> Result<()> {
+    let staged = stage(repo, files)?;
+    ui.header("Staged for you (--git)");
+    if staged.is_empty() {
+        ui.warn("no changed files were found to stage");
+        return Ok(());
+    }
+    for path in &staged {
+        ui.success(format!("git add {}", relative_display(repo, path)));
+    }
+
+    ui.header("Next: commit and open a pull request");
+    ui.command(format!("git commit -m {}", quote(commit_subject)));
+    match current_branch(repo) {
+        Some(branch) => ui.command(format!("git push -u origin {branch}")),
+        None => ui.command("git push -u origin HEAD"),
+    }
+    ui.command("gh pr create --fill   # or open a pull request on your Git host");
+    Ok(())
+}
+
+/// Display `path` relative to `repo` when possible, for tidy `git add` output.
+fn relative_display(repo: &Path, path: &Path) -> String {
+    path.strip_prefix(repo)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Double-quote a commit subject for safe shell copy-paste, escaping `\` and `"`.
+fn quote(subject: &str) -> String {
+    let escaped = subject.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
 /// Ensure `pattern` is present in the repository's `.gitignore`, appending it if
 /// missing. Returns `true` if the file was modified, `false` if `pattern` was
 /// already present. Idempotent.
@@ -118,4 +212,30 @@ pub fn ensure_gitignored(repo: &Path, pattern: &str) -> Result<bool> {
     updated.push('\n');
     std::fs::write(&gitignore, updated)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The public `stage` / `current_branch` / `stage_and_advise` are exercised
+    // against a real repo in `tests/git.rs`; here we cover only the private
+    // formatting helpers, which integration tests cannot reach.
+
+    #[test]
+    fn quote_escapes_quotes_and_backslashes() {
+        assert_eq!(quote("simple"), "\"simple\"");
+        assert_eq!(quote(r#"a "b" \c"#), r#""a \"b\" \\c""#);
+    }
+
+    #[test]
+    fn relative_display_strips_the_repo_prefix() {
+        let repo = Path::new("/repo");
+        assert_eq!(
+            relative_display(repo, Path::new("/repo/.sops.yaml")),
+            ".sops.yaml"
+        );
+        // Paths outside the repo are shown verbatim.
+        assert_eq!(relative_display(repo, Path::new("/other/x")), "/other/x");
+    }
 }

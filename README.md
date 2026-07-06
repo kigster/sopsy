@@ -1,6 +1,6 @@
 # Sopsy
 
-[![crates](https://img.shields.io/crates/v/sopsy?logo=rust&style=flat-square&color=E05D44)](https://crates.io/crates/sopsy)  [![CI](https://github.com/kigster/sopsy/actions/workflows/ci.yml/badge.svg)](https://github.com/kigster/sopsy/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/kigster/sopsy/graph/badge.svg)](https://codecov.io/gh/kigster/sopsy) [![repository](https://img.shields.io/badge/repo-kigster/sopsy-1370D3?style=flat-square&logo=github)](https://github.com/kigster/sopsy) ![License](https://img.shields.io/crates/l/sopsy?style=flat-square&color=1370D3) [![docs](https://img.shields.io/badge/docs-sopsy-1370D3?style=flat-square&logo=rust)](https://docs.rs/crate/sopsy/latest) 
+[![crates](https://img.shields.io/crates/v/sopsy?logo=rust&style=flat-square&color=E05D44)](https://crates.io/crates/sopsy) [![CI](https://github.com/kigster/sopsy/actions/workflows/ci.yml/badge.svg)](https://github.com/kigster/sopsy/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/kigster/sopsy/graph/badge.svg)](https://codecov.io/gh/kigster/sopsy) [![repository](https://img.shields.io/badge/repo-kigster/sopsy-1370D3?style=flat-square&logo=github)](https://github.com/kigster/sopsy) ![License](https://img.shields.io/crates/l/sopsy?style=flat-square&color=1370D3) [![docs](https://img.shields.io/badge/docs-sopsy-1370D3?style=flat-square&logo=rust)](https://docs.rs/crate/sopsy/latest)
 
 > The missing developer experience for [SOPS](https://github.com/getsops/sops).
 
@@ -16,7 +16,7 @@ secret sneaks in.
 > Enclave holds the private key. sopsy orchestrates and enhances them with safe
 > defaults, great diagnostics, and a scriptable interface.
 
----
+______________________________________________________________________
 
 ## Table of Contents
 
@@ -41,7 +41,7 @@ secret sneaks in.
   - [`sopsy join`](#sopsy-join)
   - [`sopsy approve`](#sopsy-approve)
   - [`sopsy recipient`](#sopsy-recipient)
-  - [`sopsy secrets`](#sopsy-secrets)
+  - [`sopsy encrypt` / `sopsy decrypt`](#sopsy-encrypt--sopsy-decrypt)
   - [`sopsy list-supported-types`](#sopsy-list-supported-types)
   - [`sopsy check`](#sopsy-check)
   - [`sopsy deps`](#sopsy-deps)
@@ -54,7 +54,7 @@ secret sneaks in.
 - [Scope and roadmap](#scope-and-roadmap)
 - [Further reading](#further-reading)
 
----
+______________________________________________________________________
 
 ## What it is
 
@@ -65,7 +65,7 @@ The killer property: the secret values live in Git in *encrypted* form, while th
 ## Philosophy
 
 - **Sopsy does not replace SOPS** — it orchestrates and enhances it. That keeps the scope crisp and the maintenance burden low.
-- **Opinionated, safe defaults** — the right thing should be the easy thing.  Plaintext `.env` files are gitignored automatically; a CI gate stops mistakes.
+- **Opinionated, safe defaults** — the right thing should be the easy thing. Plaintext `.env` files are gitignored automatically; a CI gate stops mistakes.
 - **Fully scriptable** — every interactive prompt has an equivalent flag, so the same tool serves a human at a terminal and an unattended CI job.
 - **Great diagnostics** — `sopsy doctor` produces a report you can paste straight into a GitHub issue.
 
@@ -78,14 +78,14 @@ The killer property: the secret values live in Git in *encrypted* form, while th
 - **Self-service onboarding** — newcomers `sopsy join` to generate a key and request access via a pull request; any active member `sopsy approve`s them.
 - **A built-in audit trail** — every member carries their full name, `username`, when they requested access (`requested_at`), and who granted it and when (`approved_by` as `"Konstantin Gredeskoul (kig)"`, `approved_at`). `sopsy recipient list` shows it all in one table.
 - **Recipient management** — add, remove, and list the people (and machines) who can decrypt.
-- **`secrets encrypt`/`decrypt`** — one-shot encrypt/decrypt of `.env`/YAML/JSON/INI files to stdout (or `-o`), ideal for `direnv` and process wrappers.
+- **`encrypt`/`decrypt`** — one-shot encrypt/decrypt of `.env`/YAML/JSON/INI files to stdout (or `-o`), ideal for `direnv` and process wrappers.
 - **Break-glass ceremony** — `sopsy recipient break-glass` generates a portable emergency key, hands it off for offline storage, then deletes the local copy.
 - **CI decryption ceremony** — `sopsy recipient ci` runs the same guided flow to give your pipeline a portable decryption key: one CI secret (`SOPS_AGE_KEY`) and your workflows can decrypt — [setup guide below](#using-sopsy-in-ci).
 - **Config integrity checksum** — `.sopsy.sha` (SHA-256 of `.sopsy.yml` + the admin public key) is refreshed on every write and verified on every read, so hand edits are surfaced instead of silently trusted; `sopsy doctor` repairs it.
 - **SOPS key rotation** — every membership change re-wraps the existing secrets via `sops updatekeys`.
 - **Safe defaults & a CI gate** — `sopsy check` enforces seven hygiene invariants and exits non-zero on any violation.
 
----
+______________________________________________________________________
 
 ## Encryption & Team Onboarding Flow
 
@@ -93,9 +93,9 @@ Sopsy's killer feature (besides the Touch ID-based decryption) is the fact that 
 
 The first encryptor is considered the **prime** encryptor, and they are also given the "break-glass" in case of emergency pair of private and public keys to be placed in 1Password's some exec-only Vault because you should hopefully never need those keys unless somehow all of the laptops were stolen from the company.
 
-The next person must request to join with `sopsy request-access "Full Name"` or it's synonym `sopsy join "First Last"`. 
+The next person must request to join with `sopsy request-access "Full Name"` or it's synonym `sopsy join "First Last"`.
 
-By default, the key minted in the Apple Enclave will require Touch ID every time it's used. This is good security but may get old if you are using say `direnv` or many windows with your project there. If you prefer to trade security of your thumb for convenience, you can pass the `--access-control none` after `--` as arguments to `sopsy join`. Here is an example:
+By default, the key minted in the Apple Enclave will require Touch ID every time it's used. This is good security but may get old if you are using say `direnv` or many windows with your project there. If you prefer to trade security of your thumb for convenience, pass the native `-t` / `--without-touch-id` flag to `sopsy join` (equivalent to forwarding `--access-control none` to `age-plugin-se` after `--`). Here is an example:
 
 ```bash
 # Alan Turing's MacBook:
@@ -112,6 +112,8 @@ sopsy join "Alan Turing"
 
 # And in this request to join, private key is still in Enclave, 
 # but no Touch ID would be required for decryption
+sopsy join "Alan Turing" --without-touch-id
+# (equivalent, forwarding the raw age flag)
 sopsy join "Alan Turing" -- --access-control none
 
 git add -A .
@@ -137,11 +139,11 @@ git push
 # merges the PR to the main branch. Now they can decrypt the file.
 ```
 
-To illustrate this process, here is the sequence diagram with not one but two people using the same branch to add themselves for approval (NOTE: to encrypt `.env` you would run `sopsy secrets encrypt .env -o .env.encrypted`)
+To illustrate this process, here is the sequence diagram with not one but two people using the same branch to add themselves for approval (NOTE: to encrypt `.env` you would run `sopsy encrypt .env -o .env.encrypted`)
 
 ![sopsy-workflow](docs/sopsy-workflow.png)
 
----
+______________________________________________________________________
 
 ## Prerequisites
 
@@ -156,12 +158,12 @@ brew install sops age age-plugin-se
 > If you installed sopsy via `brew install kigster/tap/sopsy`, these are pulled
 > in automatically — you can skip this section.
 
-| Tool            | Purpose                                                      |
+| Tool | Purpose |
 | --------------- | ----------------------------------------------------------- |
-| `sops`          | The encryption engine sopsy drives for every crypto op.     |
-| `age`           | The modern encryption library SOPS uses under the hood.     |
-| `age-plugin-se` | Generates Secure Enclave-backed `age` identities on macOS.  |
-| `git`           | sopsy is repository-aware (already present on most Macs).    |
+| `sops` | The encryption engine sopsy drives for every crypto op. |
+| `age` | The modern encryption library SOPS uses under the hood. |
+| `age-plugin-se` | Generates Secure Enclave-backed `age` identities on macOS. |
+| `git` | sopsy is repository-aware (already present on most Macs). |
 
 > [!IMPORTANT]
 > Secure Enclave identity generation requires **Apple Silicon** (M-series) with a
@@ -199,7 +201,7 @@ cargo build --release
 # binary at ./target/release/sopsy
 ```
 
----
+______________________________________________________________________
 
 ## Quick Start
 
@@ -229,7 +231,7 @@ git commit -m "Add encrypted secrets managed by sopsy"
 The `sopsy init` run prints your **public recipient** prominently. That string (an `age1se1...` key) is what your teammates and admins need to grant you access — it is safe to share. The matching **private key never leaves the Secure Enclave**.
 
 > [!TIP]
-> **Joining a repo someone else bootstrapped?** Don't run `init`. Run `sopsy join <your-name>` to generate your key and record a pending request, open a pull request, and ask any current member to run `sopsy approve <your-name>`.  See the [Member guide](docs/guide-member.md).
+> **Joining a repo someone else bootstrapped?** Don't run `init`. Run `sopsy join <your-name>` to generate your key and record a pending request, open a pull request, and ask any current member to run `sopsy approve <your-name>`. See the [Member guide](docs/guide-member.md).
 
 ## Screenshot
 
@@ -237,7 +239,7 @@ The following is a screenshot from the `sopsy init` session on a MacBook Pro:
 
 ![init](docs/sopsy-init.png)
 
----
+______________________________________________________________________
 
 ## Architecture
 
@@ -245,23 +247,21 @@ The following is a screenshot from the `sopsy init` session on a MacBook Pro:
 
 ![architecture](docs/architecture.png)
 
-
-| Module          | Responsibility                                                        |
+| Module | Responsibility |
 | --------------- | -------------------------------------------------------------------- |
-| `cli.rs`        | Authoritative `clap` definition of every command and flag.           |
-| `ui.rs`         | All output and `inquire`-backed prompts; color/TTY/`NO_COLOR` logic. |
-| `config.rs`     | The serde model for `.sopsy.yml` (members, states, globs, TTL, …).   |
-| `commands/`     | One module per subcommand (`init`, `join`, `approve`, `recipient`, …).|
-| `sops/`         | Wraps `sops` (`encrypt`, `decrypt`, `edit`, `updatekeys`).           |
-| `enclave/`      | Wraps `age-plugin-se keygen` (Secure Enclave identities).            |
-| `age.rs`        | Wraps `age-keygen` for portable keys (used by break-glass).          |
-| `git/`          | Repo root, tracked files, ignore status, `.gitignore` editing.       |
-| `error.rs`      | `Error`/`Result`; the binary maps any `Err` to a non-zero exit.      |
+| `cli.rs` | Authoritative `clap` definition of every command and flag. |
+| `ui.rs` | All output and `inquire`-backed prompts; color/TTY/`NO_COLOR` logic. |
+| `config.rs` | The serde model for `.sopsy.yml` (members, states, globs, TTL, …). |
+| `commands/` | One module per subcommand (`init`, `join`, `approve`, `recipient`, …).|
+| `sops/` | Wraps `sops` (`encrypt`, `decrypt`, `edit`, `updatekeys`). |
+| `enclave/` | Wraps `age-plugin-se keygen` (Secure Enclave identities). |
+| `age.rs` | Wraps `age-keygen` for portable keys (used by break-glass). |
+| `git/` | Repo root, tracked files, ignore status, `.gitignore` editing. |
+| `error.rs` | `Error`/`Result`; the binary maps any `Err` to a non-zero exit. |
 
 ### The `init` bootstrap flow
 
 ![sequence-01](docs/sopsy-sequence-01.png)
-
 
 > [!NOTE]
 > `init` is **idempotent**: existing files are preserved unless you pass `--force`. Re-running it is always safe.
@@ -269,7 +269,7 @@ The following is a screenshot from the `sopsy init` session on a MacBook Pro:
 > [!TIP]
 > In **interactive** mode `init` offers to set up the break-glass key right then — the moment you're most likely to actually do it. It prints a yellow prompt to copy the generated `break-glass.private` / `.public` into 1Password, waits for you, then deletes the local copies. Use `--break-glass` / `--no-break-glass` to decide explicitly (e.g. in scripts).
 
----
+______________________________________________________________________
 
 ## How encryption flows
 
@@ -282,10 +282,10 @@ The following is a screenshot from the `sopsy init` session on a MacBook Pro:
 - **File-type detection** — `.env`, `.env.*`, and `*.env` map to `dotenv`; `.yaml`/`.yml` to `yaml`; `.json` to `json`; everything else to `binary`.
 
 > [!IMPORTANT]
-> 
+>
 > Only **encrypted** files (`.env.encrypted`, `*.encrypted`, `config/*.encrypted.yaml`) and **public** metadata (`.sops.yaml`, `.sopsy.yml`, `.env.example`) belong in Git. The plaintext `.env` must always stay local.
 
----
+______________________________________________________________________
 
 ## The Secure Enclave security model
 
@@ -301,12 +301,12 @@ Each developer owns an individual key pair. On macOS Apple Silicon the private k
 
 When `sopsy init` or `sopsy join` generates a Secure Enclave identity, the **identity handle** (`AGE-PLUGIN-SE-1…`) is written to your per-user `sops` age keys file:
 
-| Platform        | Location                                              |
+| Platform | Location |
 | --------------- | ---------------------------------------------------- |
-| macOS           | `~/Library/Application Support/sops/age/keys.txt`    |
-| Linux / others  | `${XDG_CONFIG_HOME:-~/.config}/sops/age/keys.txt`    |
+| macOS | `~/Library/Application Support/sops/age/keys.txt` |
+| Linux / others | `${XDG_CONFIG_HOME:-~/.config}/sops/age/keys.txt` |
 
-That handle is **not** secret key material — the private key never leaves the Secure Enclave, and the handle only works on *this* device, behind Touch ID — so keeping it on disk is safe. `sops` reads this file automatically (sopsy also points at it explicitly via `SOPS_AGE_KEY_FILE`), and that is what lets `sopsy edit` and `sopsy secrets decrypt` unlock your secrets. Override the path with `SOPSY_KEYS_FILE` if you keep identities elsewhere.
+That handle is **not** secret key material — the private key never leaves the Secure Enclave, and the handle only works on *this* device, behind Touch ID — so keeping it on disk is safe. `sops` reads this file automatically (sopsy also points at it explicitly via `SOPS_AGE_KEY_FILE`), and that is what lets `sopsy edit` and `sopsy decrypt` unlock your secrets. Override the path with `SOPSY_KEYS_FILE` if you keep identities elsewhere.
 
 > [!NOTE]
 >
@@ -316,7 +316,7 @@ That handle is **not** secret key material — the private key never leaves the 
 
 Secure Enclave keys can only be **used to decrypt** from the user's *active GUI login session*. `sudo`, `su`, and SSH cannot raise the Touch ID prompt, so decryption from those contexts fails with `no identity matched any of the recipients` — often with no prompt at all. Encryption and key generation are unaffected (they never touch the private key).
 
-You are prompted for Touch ID on every operation that **decrypts** an encrypted file — `sopsy secrets decrypt`, `sopsy edit`, and `sopsy approve` (once per encrypted file — so approve can prompt more than once). There is no time-based "remember me"; to prompt less often, decrypt once per shell with [direnv](#sopsy-secrets).
+You are prompted for Touch ID on every operation that **decrypts** an encrypted file — `sopsy decrypt`, `sopsy edit`, and `sopsy approve` (once per encrypted file — so approve can prompt more than once). There is no time-based "remember me"; to prompt less often, decrypt once per shell with [direnv](#sopsy-encrypt--sopsy-decrypt).
 
 This matters when simulating a **team on a single Mac** — e.g. exercising the owner → member (`join` / `approve`) flow with two accounts:
 
@@ -332,7 +332,7 @@ This matters when simulating a **team on a single Mac** — e.g. exercising the 
 
 ## Break-glass keys
 
-A **break-glass key** is a separate emergency `age` key pair stored *offline* (for example in 1Password) and shared with only a few admins. It is your disaster-recovery path: if every developer's Secure Enclave device is lost, the break-glass key can still decrypt and re-key the repository. It is a **portable** age key (not Enclave-backed), precisely so it can survive the loss of any device.  `sopsy recipient break-glass` runs the whole ceremony — generate, hand off, delete, register — in one command:
+A **break-glass key** is a separate emergency `age` key pair stored *offline* (for example in 1Password) and shared with only a few admins. It is your disaster-recovery path: if every developer's Secure Enclave device is lost, the break-glass key can still decrypt and re-key the repository. It is a **portable** age key (not Enclave-backed), precisely so it can survive the loss of any device. `sopsy recipient break-glass` runs the whole ceremony — generate, hand off, delete, register — in one command:
 
 ```bash
 sopsy recipient break-glass -o break-glass
@@ -350,19 +350,19 @@ sopsy recipient break-glass -o break-glass
 
 The same guided ceremony — generate a portable key, hand it off, wait for confirmation, delete the local copies, register and re-key — also powers [`sopsy recipient ci`](#recipient-ci), which provisions a decryption key for your CI pipeline instead of an offline vault. The two keys must never be shared: break-glass is offline/few-hands, CI is online/every-run — opposite threat models.
 
----
+______________________________________________________________________
 
 ## Files sopsy manages
 
-| File             | Committed? | Purpose                                                              |
+| File | Committed? | Purpose |
 | ---------------- | ---------- | ------------------------------------------------------------------- |
-| `.sops.yaml`     | ✅ yes     | SOPS `creation_rules`: maps file patterns → `age` recipients.       |
-| `.sopsy.yml`     | ✅ yes     | sopsy's own state: member names, usernames, `pending`/`active` state, request/approval provenance (`requested_at`, `approved_at`, `approved_by`), break-glass marker, `join_request_ttl`, sops version. |
-| `.sopsy.sha`     | ✅ yes     | SHA-256 integrity checksum of `.sopsy.yml` (+ the admin public key). Refreshed on every sopsy write, verified on every read; `sopsy doctor` repairs it after a legitimate manual edit. Tamper *evidence*, not proof. |
-| `.env.example`   | ✅ yes     | Placeholder variables; the template for a real `.env`.              |
-| `.env.encrypted` | ✅ yes     | The encrypted secrets (`KEY=ENC[…]` + sops metadata).               |
-| `.gitignore`     | ✅ yes     | Updated to ignore plaintext secrets and un-ignore the safe files.   |
-| `.env`           | 🚫 never   | Your real plaintext secrets — gitignored, never committed.          |
+| `.sops.yaml` | ✅ yes | SOPS `creation_rules`: maps file patterns → `age` recipients. |
+| `.sopsy.yml` | ✅ yes | sopsy's own state: member names, usernames, `pending`/`active` state, request/approval provenance (`requested_at`, `approved_at`, `approved_by`), break-glass marker, `join_request_ttl`, sops version. |
+| `.sopsy.sha` | ✅ yes | SHA-256 integrity checksum of `.sopsy.yml` (+ the admin public key). Refreshed on every sopsy write, verified on every read; `sopsy doctor` repairs it after a legitimate manual edit. Tamper *evidence*, not proof. |
+| `.env.example` | ✅ yes | Placeholder variables; the template for a real `.env`. |
+| `.env.encrypted` | ✅ yes | The encrypted secrets (`KEY=ENC[…]` + sops metadata). |
+| `.gitignore` | ✅ yes | Updated to ignore plaintext secrets and un-ignore the safe files. |
+| `.env` | 🚫 never | Your real plaintext secrets — gitignored, never committed. |
 
 The `.gitignore` rules `sopsy init` ensures are present:
 
@@ -386,7 +386,7 @@ creation_rules:
     age: 'age1se1qg8vw…'
 ```
 
----
+______________________________________________________________________
 
 ## Command Reference
 
@@ -402,11 +402,19 @@ sopsy [GLOBAL FLAGS] <COMMAND> [ARGS]
 These apply to **every** subcommand (they are global and may appear before or
 after the subcommand):
 
-| Flag                          | Description                                                                                   |
+| Flag | Description |
 | ----------------------------- | --------------------------------------------------------------------------------------------- |
 | `-y`, `--yes`, `--non-interactive` | Disable all prompts; fail with a clear error instead of asking. Auto-enabled when stdout is not a TTY. |
-| `--no-color`                  | Disable colored output. Also honored via the `NO_COLOR` environment variable.                 |
-| `-v`, `--verbose`             | Increase verbosity (show debug detail such as the resolved editor and file type).             |
+| `--no-color` | Disable colored output. Also honored via the `NO_COLOR` environment variable. |
+| `-v`, `--verbose` | Increase verbosity (show debug detail such as the resolved editor and file type). |
+| `--git` | After a command changes files, `git add` exactly those files and print ready-to-paste `git commit` / `git push` / `gh pr create` instructions. A no-op for commands that don't modify committed files. |
+
+> [!TIP]
+> `--git` saves you from hand-typing the `git add` line that each command
+> otherwise suggests. It stages only the specific files sopsy touched (never
+> `git add -A`), so it won't sweep up unrelated changes, and it prints a
+> commit subject and branch-aware push/PR commands you can paste as-is. It
+> works on `init`, `join`, `approve`, `edit`, and every `recipient` mutation.
 
 > [!TIP]
 > In CI you don't even need `-y`: when stdout is not a terminal, sopsy detects it
@@ -420,15 +428,15 @@ recipient (a generated Secure Enclave identity or a supplied public key), and
 writes `.sops.yaml`, `.env.example`, an encrypted `.env.encrypted`, `.gitignore`
 safety rules, and `.sopsy.yml`.
 
-| Flag                       | Description                                                                                  |
+| Flag | Description |
 | -------------------------- | -------------------------------------------------------------------------------------------- |
-| `--recipient-name <NAME>`  | Name to record for the recipient created/registered during init (default: `admin`).          |
-| `--username <NAME>`        | Username of who generated the key, recorded in `.sopsy.yml`. When generating interactively, this is the default offered at the prompt (falls back to `$USER`). |
-| `--public-key <age1...>`   | Use an existing `age` public key instead of generating a new Secure Enclave identity.        |
-| `--no-generate`            | Skip Secure Enclave identity generation. Requires `--public-key`, else init errors.          |
-| `--break-glass`            | Run the break-glass ceremony as part of init (interactive mode prompts by default).          |
-| `--no-break-glass`         | Skip break-glass setup during init (you'll get a reminder to run it later).                   |
-| `--force`                  | Overwrite/recreate `.sops.yaml` and `.env.encrypted` even if they already exist.             |
+| `--recipient-name <NAME>` | Name to record for the recipient created/registered during init (default: `admin`). |
+| `--username <NAME>` | Username of who generated the key, recorded in `.sopsy.yml`. When generating interactively, this is the default offered at the prompt (falls back to `$USER`). |
+| `--public-key <age1...>` | Use an existing `age` public key instead of generating a new Secure Enclave identity. |
+| `--no-generate` | Skip Secure Enclave identity generation. Requires `--public-key`, else init errors. |
+| `--break-glass` | Run the break-glass ceremony as part of init (interactive mode prompts by default). |
+| `--no-break-glass` | Skip break-glass setup during init (you'll get a reminder to run it later). |
+| `--force` | Overwrite/recreate `.sops.yaml` and `.env.encrypted` even if they already exist. |
 
 ```bash
 # Interactive: generate a Secure Enclave identity (Touch ID may prompt).
@@ -468,11 +476,11 @@ Edit an encrypted file with your editor through SOPS — "the missing DX" wrappe
 around `EDITOR=<editor> sops <file>`, with friendlier errors and automatic
 file-type detection.
 
-| Argument / Flag        | Description                                                                            |
+| Argument / Flag | Description |
 | ---------------------- | -------------------------------------------------------------------------------------- |
-| `<file>`               | The encrypted file to edit (required).                                                 |
-| `--editor <EDITOR>`    | Editor to use. Overrides `$EDITOR`. Resolution: `--editor` → `$EDITOR` → `$VISUAL` → `vi`. |
-| `-- <sops args>`       | Everything after `--` is forwarded verbatim to `sops` (can override sopsy's defaults). |
+| `<file>` | The encrypted file to edit (required). |
+| `--editor <EDITOR>` | Editor to use. Overrides `$EDITOR`. Resolution: `--editor` → `$EDITOR` → `$VISUAL` → `vi`. |
+| `-- <sops args>` | Everything after `--` is forwarded verbatim to `sops` (can override sopsy's defaults). |
 
 ```bash
 # Use your $EDITOR (or vi):
@@ -495,17 +503,19 @@ sopsy edit config/db.encrypted.yaml -- --indent 4
 
 Request membership in a repo someone else bootstrapped. Generates your Secure Enclave identity (or uses `--public-key`) and records a **pending** entry in `.sopsy.yml` with a timestamp. A pending entry is *not* added to `.sops.yaml`, so it grants no access — it is purely a request you then push as a pull request.
 
-| Argument / Flag           | Description                                                                       |
+| Argument / Flag | Description |
 | ------------------------- | -------------------------------------------------------------------------------- |
-| `<name>`                  | Your name as recorded in `.sopsy.yml` — full name or first name (required).      |
-| `--username <NAME>`       | System username recorded alongside the name (defaults to `$USER`).               |
-| `--public-key <age1...>`  | Use an existing public key instead of generating a new Secure Enclave identity.  |
-| `--sopsy-file <FILE>`     | Path to the `.sopsy.yml` to update (defaults to the one in the repo root).       |
-| `-- <age flags>`          | Everything after `--` is forwarded to `age-plugin-se keygen`.                    |
+| `<name>` | Your name as recorded in `.sopsy.yml` — full name or first name (required). |
+| `--username <NAME>` | System username recorded alongside the name (defaults to `$USER`). |
+| `--public-key <age1...>` | Use an existing public key instead of generating a new Secure Enclave identity. |
+| `-t`, `--without-touch-id`| Mint the Enclave identity with no Touch ID / passcode gate (`--access-control none`). |
+| `--sopsy-file <FILE>` | Path to the `.sopsy.yml` to update (defaults to the one in the repo root). |
+| `-- <age flags>` | Everything after `--` is forwarded to `age-plugin-se keygen`. |
 
 ```bash
 sopsy join alice                                   # generate a key, record a pending request
 sopsy join "Konstantin Gredeskoul" --username kig  # full name + explicit username
+sopsy join alice --without-touch-id                # no Touch ID prompt on decryption
 sopsy join alice --public-key age1se1…             # reuse an existing public key
 # then:
 git add .sopsy.yml .sopsy.sha && git commit -m "join: request access for alice" && git push
@@ -519,11 +529,11 @@ git add .sopsy.yml .sopsy.sha && git commit -m "join: request access for alice" 
 
 Approve a pending member (run by **any active member**, on their PR branch). Checks the request is fresh, asks you to vouch that the key belongs to the person, adds the key to `.sops.yaml`, flips them to `active`, and runs `sops updatekeys` so every encrypted file gains a stanza they can open. Rolls back atomically if the re-key fails. The approval is recorded in `.sopsy.yml` for the audit trail: `approved_by` (resolved to `"Full Name (username)"` from your `$USER`) and `approved_at`, while `requested_at` is kept — `recipient list` shows all of it.
 
-| Argument / Flag     | Description                                                                |
+| Argument / Flag | Description |
 | ------------------- | ------------------------------------------------------------------------- |
-| `<name>`            | The pending member to approve (required).                                 |
-| `--force`           | Approve even if the join request is older than `join_request_ttl`.        |
-| `--no-updatekeys`   | Skip the `sops updatekeys` re-encryption step after editing `.sops.yaml`. |
+| `<name>` | The pending member to approve (required). |
+| `--force` | Approve even if the join request is older than `join_request_ttl`. |
+| `--no-updatekeys` | Skip the `sops updatekeys` re-encryption step after editing `.sops.yaml`. |
 
 ```bash
 git fetch origin pull/123/head:join-alice && git switch join-alice
@@ -544,13 +554,13 @@ generation helpers.
 
 #### `recipient add`
 
-| Argument / Flag           | Description                                                                  |
+| Argument / Flag | Description |
 | ------------------------- | ---------------------------------------------------------------------------- |
-| `[name]`                  | Positional recipient name (equivalent to `--name`).                          |
-| `--name <NAME>`           | Recipient name (prompted if omitted in interactive mode).                    |
-| `--public-key <age1...>`  | The recipient's `age` public key (prompted if omitted in interactive mode).  |
-| `--break-glass`           | Mark this recipient as the offline emergency break-glass key.                |
-| `--no-updatekeys`         | Skip the `sops updatekeys` re-encryption step after editing `.sops.yaml`.    |
+| `[name]` | Positional recipient name (equivalent to `--name`). |
+| `--name <NAME>` | Recipient name (prompted if omitted in interactive mode). |
+| `--public-key <age1...>` | The recipient's `age` public key (prompted if omitted in interactive mode). |
+| `--break-glass` | Mark this recipient as the offline emergency break-glass key. |
+| `--no-updatekeys` | Skip the `sops updatekeys` re-encryption step after editing `.sops.yaml`. |
 
 ```bash
 # Interactive: prompts for name + key.
@@ -569,11 +579,11 @@ sopsy recipient add break-glass --public-key age1q… --break-glass
 
 #### `recipient remove`
 
-| Argument / Flag     | Description                                                                |
+| Argument / Flag | Description |
 | ------------------- | -------------------------------------------------------------------------- |
-| `[name]`            | Positional recipient name (equivalent to `--name`).                       |
-| `--name <NAME>`     | Recipient to remove (a multi-select prompt is shown if omitted).          |
-| `--no-updatekeys`   | Skip the `sops updatekeys` re-encryption step after editing `.sops.yaml`. |
+| `[name]` | Positional recipient name (equivalent to `--name`). |
+| `--name <NAME>` | Recipient to remove (a multi-select prompt is shown if omitted). |
+| `--no-updatekeys` | Skip the `sops updatekeys` re-encryption step after editing `.sops.yaml`. |
 
 ```bash
 sopsy recipient remove alice
@@ -608,12 +618,12 @@ sopsy recipient keygen -- --access-control=any-biometry-or-passcode
 
 Generate the offline emergency key in one guided ceremony: write `<output>.private` / `<output>.public`, prompt you to copy them into a secure store, wait for ENTER, then delete the local files and register the key as the break-glass recipient (re-keying every secret).
 
-| Argument / Flag        | Description                                                          |
+| Argument / Flag | Description |
 | ---------------------- | ------------------------------------------------------------------- |
-| `-o, --output <FILE>`  | Output prefix; writes `<output>.private` and `<output>.public`.     |
-| `--name <NAME>`        | Recipient name to record (defaults to `break-glass`).               |
-| `--force`              | Overwrite the `.private` / `.public` files if they already exist.   |
-| `--no-updatekeys`      | Skip the `sops updatekeys` re-encryption step.                      |
+| `-o, --output <FILE>` | Output prefix; writes `<output>.private` and `<output>.public`. |
+| `--name <NAME>` | Recipient name to record (defaults to `break-glass`). |
+| `--force` | Overwrite the `.private` / `.public` files if they already exist. |
+| `--no-updatekeys` | Skip the `sops updatekeys` re-encryption step. |
 
 ```bash
 sopsy recipient break-glass -o break-glass
@@ -628,12 +638,12 @@ sopsy recipient break-glass -o break-glass
 
 Give your CI pipeline decryption access, in the same guided ceremony as break-glass: generate a **portable** age key (CI runners have no Secure Enclave), write `<output>.private` / `<output>.public`, walk you through storing the key as a CI secret, wait for ENTER, then delete the local files and register the key as an ordinary recipient (re-keying every secret). Only **one** CI secret is needed — `SOPS_AGE_KEY`, holding the *private* half (that's the variable `sops` reads identities from, and sopsy never overrides it). The public half needs no secret: it isn't sensitive, and the ceremony commits it to `.sopsy.yml` / `.sops.yaml` as the recipient.
 
-| Argument / Flag        | Description                                                          |
+| Argument / Flag | Description |
 | ---------------------- | ------------------------------------------------------------------- |
-| `-o, --output <FILE>`  | Output prefix (default `ci`); writes `<output>.private` / `<output>.public`. |
-| `--name <NAME>`        | Recipient name to record (defaults to `ci`).                        |
-| `--force`              | Overwrite the `.private` / `.public` files if they already exist.   |
-| `--no-updatekeys`      | Skip the `sops updatekeys` re-encryption step.                      |
+| `-o, --output <FILE>` | Output prefix (default `ci`); writes `<output>.private` / `<output>.public`. |
+| `--name <NAME>` | Recipient name to record (defaults to `ci`). |
+| `--force` | Overwrite the `.private` / `.public` files if they already exist. |
+| `--no-updatekeys` | Skip the `sops updatekeys` re-encryption step. |
 
 ```bash
 sopsy recipient ci                                  # ceremony: generate → store → delete → register
@@ -647,7 +657,7 @@ A workflow can then decrypt with nothing but `sops` installed — no `age`, no `
   env:
     SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
   run: |
-    eval "$(sopsy secrets decrypt .env.encrypted | sed 's/^/export /')"
+    eval "$(sopsy decrypt .env.encrypted | sed 's/^/export /')"
 ```
 
 > [!CAUTION]
@@ -658,34 +668,38 @@ A workflow can then decrypt with nothing but `sops` installed — no `age`, no `
 > models. Note that `sopsy check` needs no keys at all; only jobs that consume
 > secrets need `SOPS_AGE_KEY`.
 
-### `sopsy secrets`
+### `sopsy encrypt` / `sopsy decrypt`
 
 One-shot encrypt/decrypt of a single file, defaulting to **stdout** so it composes in pipelines. Unlike `edit` (which opens an editor) these are non-interactive and scriptable. The encrypted artifact always ends in `.encrypted`, so the default `.sops.yaml` rule covers it.
 
-#### `secrets encrypt`
+> [!NOTE]
+>
+> These were previously `sopsy secrets encrypt` / `sopsy secrets decrypt`. That `secrets` form still works as a hidden, deprecated alias, but `sopsy encrypt` / `sopsy decrypt` are now the documented commands.
 
-| Argument / Flag        | Description                                                                  |
+#### `encrypt`
+
+| Argument / Flag | Description |
 | ---------------------- | ---------------------------------------------------------------------------- |
-| `<file>`               | The plaintext file to encrypt (`.env`/`.yaml`/`.json`/`.ini`/…).             |
-| `-o, --output <FILE>`  | Write ciphertext to a file (**must end in `.encrypted`**) instead of stdout. |
-| `--type <T>`           | Override the format (`dotenv`/`yaml`/`json`/`ini`/`binary`) if the name lacks a usable extension. |
+| `<file>` | The plaintext file to encrypt (`.env`/`.yaml`/`.json`/`.ini`/…). |
+| `-o, --output <FILE>` | Write ciphertext to a file (**must end in `.encrypted`**) instead of stdout. |
+| `--type <T>` | Override the format (`dotenv`/`yaml`/`json`/`ini`/`binary`) if the name lacks a usable extension. |
 
 ```bash
-sopsy secrets encrypt .env -o .env.encrypted        # the committed artifact
-sopsy secrets encrypt config.json > config.json.encrypted
+sopsy encrypt .env -o .env.encrypted        # the committed artifact
+sopsy encrypt config.json > config.json.encrypted
 ```
 
-#### `secrets decrypt`
+#### `decrypt`
 
-| Argument / Flag        | Description                                                        |
+| Argument / Flag | Description |
 | ---------------------- | ----------------------------------------------------------------- |
-| `<file>`               | The encrypted file to decrypt.                                    |
-| `-o, --output <FILE>`  | Write plaintext to a file instead of stdout.                     |
-| `--type <T>`           | Override the format (rarely needed; inferred from the name).      |
+| `<file>` | The encrypted file to decrypt. |
+| `-o, --output <FILE>` | Write plaintext to a file instead of stdout. |
+| `--type <T>` | Override the format (rarely needed; inferred from the name). |
 
 ```bash
-sopsy secrets decrypt .env.encrypted                 # → plaintext on stdout
-sopsy secrets decrypt config.json.encrypted -o config.json
+sopsy decrypt .env.encrypted                 # → plaintext on stdout
+sopsy decrypt config.json.encrypted -o config.json
 ```
 
 > [!TIP]
@@ -693,7 +707,7 @@ sopsy secrets decrypt config.json.encrypted -o config.json
 > **Load secrets into your shell with `direnv`** — drop this in `.envrc` so the decrypted values live only in memory, only inside the project directory:
 >
 > ```bash
-> eval "$(sopsy secrets decrypt .env.encrypted | sed -E '/^#/d; /^$/d; s/^([A-Z])/export \1/g')"
+> eval "$(sopsy decrypt .env.encrypted | sed -E '/^#/d; /^$/d; s/^([A-Z])/export \1/g')"
 > ```
 >
 > The same idea works in a wrapper that `exec`s your app (Rails, etc.) with the secrets in its environment — nothing is ever written to disk in plaintext.
@@ -724,12 +738,12 @@ The CI gate. Runs seven hygiene invariants over the repository, prints a pass/fa
 The seven invariants:
 
 1. `.env` is **not** tracked by git.
-2. `.env` **is** gitignored.
-3. `.sops.yaml` exists and parses with at least one `creation_rules` entry.
-4. Every encrypted file (matching `.sopsy.yml`'s `encrypted_globs`) matches at least one `.sops.yaml` `path_regex`.
-5. No plaintext secrets are tracked (`.env`/`.env.*` that isn't `.env.example`/`*.encrypted`, or any `*.key`/`*.pem`).
-6. Every encrypted file carries sops metadata (`sops` section + `ENC[`).
-7. A break-glass recipient exists in `.sopsy.yml`.
+1. `.env` **is** gitignored.
+1. `.sops.yaml` exists and parses with at least one `creation_rules` entry.
+1. Every encrypted file (matching `.sopsy.yml`'s `encrypted_globs`) matches at least one `.sops.yaml` `path_regex`.
+1. No plaintext secrets are tracked (`.env`/`.env.*` that isn't `.env.example`/`*.encrypted`, or any `*.key`/`*.pem`).
+1. Every encrypted file carries sops metadata (`sops` section + `ENC[`).
+1. A break-glass recipient exists in `.sopsy.yml`.
 
 ```bash
 sopsy check && echo "secrets hygiene: OK"
@@ -739,16 +753,16 @@ sopsy check && echo "secrets hygiene: OK"
 >
 > If `.sopsy.yml` is absent, the repository is not sopsy-managed, so `check` prints a notice and exits **0** rather than failing unrelated repositories.
 
----
+______________________________________________________________________
 
 ### `sopsy deps`
 
 Install the external tools sopsy needs (`sops`, `age`, `age-plugin-se`) with [Homebrew](https://brew.sh). It probes for each tool first and only installs the ones that are missing, so it is safe to run repeatedly. This is the *remedy* that pairs with `sopsy doctor`'s *diagnosis*.
 
-| Flag        | Effect                                                       |
+| Flag | Effect |
 | ----------- | ------------------------------------------------------------ |
-| `--check`   | Report status only; exit **non-zero** if anything is missing.|
-| `--dry-run` | Print the `brew install …` command without running it.       |
+| `--check` | Report status only; exit **non-zero** if anything is missing.|
+| `--dry-run` | Print the `brew install …` command without running it. |
 
 ```bash
 sopsy deps              # install whatever is missing
@@ -764,7 +778,7 @@ sopsy deps --dry-run    # preview the brew command without touching the system
 >
 > `sopsy doctor` tells you *what* is missing; `sopsy deps` *fixes* it. For tests and sandboxes, the `brew` binary can be overridden with `SOPSY_BREW_BIN`.
 
----
+______________________________________________________________________
 
 ### `sopsy completion`
 
@@ -788,14 +802,14 @@ eval "$(sopsy completion zsh)"
 >
 > After installing a zsh completion you may need to restart your shell (or run `compinit`) for it to take effect.
 
----
+______________________________________________________________________
 
 ## Using sopsy in CI
 
 CI touches sopsy in two very different ways, with very different key requirements:
 
 1. **The hygiene gate** (`sopsy check`) — validates the repo on every push. Needs **no keys at all**.
-2. **Decrypting secrets** (deploys, integration tests) — needs its own recipient, because Secure Enclave keys are hardware-bound to developer Macs and cannot travel to a runner.
+1. **Decrypting secrets** (deploys, integration tests) — needs its own recipient, because Secure Enclave keys are hardware-bound to developer Macs and cannot travel to a runner.
 
 ### The hygiene gate: `sopsy check` (no keys needed)
 
@@ -869,9 +883,9 @@ jobs:
           SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
         run: |
           # Export into the job environment…
-          eval "$(sopsy secrets decrypt .env.encrypted | sed 's/^/export /')"
+          eval "$(sopsy decrypt .env.encrypted | sed 's/^/export /')"
           # …or materialize a plaintext file for tooling that wants one:
-          sopsy secrets decrypt .env.encrypted -o .env
+          sopsy decrypt .env.encrypted -o .env
 ```
 
 > [!CAUTION]
@@ -881,23 +895,23 @@ jobs:
 > rotate the underlying secret **values**. Never reuse the break-glass key for CI —
 > offline/few-hands and online/every-run are opposite threat models.
 
----
+______________________________________________________________________
 
 ## Environment variables
 
-| Variable                    | Effect                                                                        |
+| Variable | Effect |
 | --------------------------- | ----------------------------------------------------------------------------- |
-| `EDITOR` / `VISUAL`         | Editor for `sopsy edit` (after `--editor`, before the `vi` default).          |
-| `NO_COLOR`                  | Disables colored output (same as `--no-color`).                               |
-| `SOPSY_KEYS_FILE`           | Override where sopsy stores/reads the age identity (default: the per-user `sops` keys file). |
-| `SOPS_AGE_KEY_FILE`         | Standard `sops` var for the age identity file; if you set it, sopsy honors it and stores there. |
-| `SOPS_AGE_KEY`              | Standard `sops` var holding a literal age identity — how CI decrypts (see [`recipient ci`](#recipient-ci)). sopsy never overrides it. |
-| `SOPSY_SOPS_BIN`            | Override the `sops` binary path (primarily for testing).                      |
-| `SOPSY_AGE_PLUGIN_SE_BIN`   | Override the `age-plugin-se` binary path (primarily for testing).             |
-| `SOPSY_AGE_KEYGEN_BIN`      | Override the `age-keygen` binary path (used by break-glass; for testing).     |
-| `SOPSY_ASSUME_YES`          | Assume interactive confirmations (break-glass press-ENTER, `approve` vouch). For automation/CI only. |
+| `EDITOR` / `VISUAL` | Editor for `sopsy edit` (after `--editor`, before the `vi` default). |
+| `NO_COLOR` | Disables colored output (same as `--no-color`). |
+| `SOPSY_KEYS_FILE` | Override where sopsy stores/reads the age identity (default: the per-user `sops` keys file). |
+| `SOPS_AGE_KEY_FILE` | Standard `sops` var for the age identity file; if you set it, sopsy honors it and stores there. |
+| `SOPS_AGE_KEY` | Standard `sops` var holding a literal age identity — how CI decrypts (see [`recipient ci`](#recipient-ci)). sopsy never overrides it. |
+| `SOPSY_SOPS_BIN` | Override the `sops` binary path (primarily for testing). |
+| `SOPSY_AGE_PLUGIN_SE_BIN` | Override the `age-plugin-se` binary path (primarily for testing). |
+| `SOPSY_AGE_KEYGEN_BIN` | Override the `age-keygen` binary path (used by break-glass; for testing). |
+| `SOPSY_ASSUME_YES` | Assume interactive confirmations (break-glass press-ENTER, `approve` vouch). For automation/CI only. |
 
----
+______________________________________________________________________
 
 ## Scope and roadmap
 

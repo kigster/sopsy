@@ -27,7 +27,7 @@ pub mod ui;
 
 use clap::Parser;
 
-use crate::cli::{Cli, Command};
+use crate::cli::{Cli, Command, SecretsCommand};
 use crate::error::Result;
 use crate::ui::Ui;
 
@@ -41,7 +41,8 @@ pub fn run() -> Result<()> {
         cli.global.resolve_color(),
         cli.global.verbose,
         cli.global.resolve_interactive(),
-    );
+    )
+    .with_git(cli.global.git);
     dispatch(&ui, cli.command)
 }
 
@@ -57,6 +58,10 @@ fn dispatch(ui: &Ui, command: Command) -> Result<()> {
         Command::Approve(args) => commands::approve::run(ui, &args),
         Command::Recipient(cmd) => commands::recipient::run(ui, &cmd),
         Command::Secrets(cmd) => commands::secrets::run(ui, &cmd),
+        // `sopsy encrypt`/`sopsy decrypt` are shorthands for the `secrets`
+        // subcommands, routed through the same handler.
+        Command::Encrypt(args) => commands::secrets::run(ui, &SecretsCommand::Encrypt(args)),
+        Command::Decrypt(args) => commands::secrets::run(ui, &SecretsCommand::Decrypt(args)),
         Command::ListSupportedTypes => {
             commands::secrets::list_supported_types(ui);
             Ok(())

@@ -92,6 +92,13 @@ is recorded as the key's `username` in `.sopsy.yml`, so it is obvious later who
 generated it. It then writes `.sops.yaml`, `.env.example`, an encrypted
 `.env.encrypted`, the `.gitignore` safety rules, and `.sopsy.yml`.
 
+> [!TIP]
+> Add `--git` to `sopsy init` and it `git add`s exactly the files it just
+> created (`.sops.yaml`, `.env.example`, `.env.encrypted`, `.gitignore`,
+> `.sopsy.yml`, and its `.sopsy.sha` sidecar), then prints ready-to-paste
+> `git commit` / `git push` / `gh pr create` commands. It never runs
+> `git add -A`, so unrelated changes stay out of your first commit.
+
 In **interactive** mode, `init` then offers to set up the break-glass key right
 away (it prompts; pass `--break-glass` / `--no-break-glass` to decide explicitly).
 Accepting runs the same ceremony described in the next section. This is the best
@@ -187,7 +194,14 @@ sequenceDiagram
    it requires *your* key to unwrap the data key first (Touch ID will prompt).
 
 If the re-key fails (e.g. you cannot decrypt), every change is rolled back so the
-repo is never left inconsistent.
+repo is never left inconsistent — both the config files **and** any encrypted
+body already re-wrapped are restored to their exact pre-command bytes.
+
+> [!TIP]
+> Run `sopsy approve alice --git` to stage the full membership file set it
+> touched (`.sops.yaml`, `.sopsy.yml`, `.sopsy.sha`, and every re-keyed
+> encrypted file) and print the commit/push commands — the same convenience is
+> available on every `recipient add` / `remove` / `break-glass` / `ci`.
 
 > [!WARNING]
 > Encrypted files do **not** merge. Approve late and merge fast: if `.env.encrypted`

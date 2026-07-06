@@ -38,6 +38,11 @@ pub struct Ui {
     /// Whether interactive prompting is allowed. When `false`, prompt helpers
     /// return [`Error::NonInteractive`] rather than blocking.
     interactive: bool,
+    /// Whether the user asked sopsy to stage its changes with `git add` and print
+    /// commit/PR instructions (the global `--git` flag). Carried here because it
+    /// is a resolved global flag like the others; consumed by
+    /// [`crate::git::stage_and_advise`].
+    git: bool,
 }
 
 impl Ui {
@@ -68,7 +73,33 @@ impl Ui {
             verbose,
             // Interactive prompting only makes sense on a real terminal.
             interactive: interactive && stdout_tty,
+            // Enabled explicitly via `with_git`; off by default so every test and
+            // nested call starts without staging behavior.
+            git: false,
         }
+    }
+
+    /// Enable the `--git` staging behavior on this handle. Consuming builder,
+    /// used once in [`crate::run`] from the parsed global flag.
+    pub fn with_git(mut self, git: bool) -> Self {
+        self.git = git;
+        self
+    }
+
+    /// A clone of this handle with `--git` disabled, for nested command calls
+    /// that must not emit their own staging advice — e.g. `sopsy init` invoking
+    /// the break-glass ceremony, since `init` stages the whole file set once at
+    /// the end.
+    pub fn without_git(&self) -> Self {
+        Self {
+            git: false,
+            ..self.clone()
+        }
+    }
+
+    /// Whether the user requested `git add` + commit/PR advice (`--git`).
+    pub fn stage_requested(&self) -> bool {
+        self.git
     }
 
     /// Whether color output is currently enabled.
@@ -137,6 +168,15 @@ impl Ui {
         if self.verbose {
             println!("{}", self.paint(msg.as_ref(), Style::new().dimmed()));
         }
+    }
+
+    /// Print a copy-pasteable shell command, indented and highlighted.
+    ///
+    /// Unlike [`Ui::info`] it carries no leading status glyph, so the line can be
+    /// selected and run as-is. Used to present the `git`/`gh` commands the
+    /// `--git` flow suggests.
+    pub fn command(&self, cmd: impl AsRef<str>) {
+        println!("  {}", self.paint(cmd.as_ref(), Style::new().bold().cyan()));
     }
 
     /// Print a bold, underlined section header with surrounding spacing.
@@ -325,6 +365,7 @@ mod tests {
             color: false,
             verbose: false,
             interactive: false,
+            git: false,
         }
     }
 
@@ -338,6 +379,7 @@ mod tests {
             color: true,
             verbose: true,
             interactive: true,
+            git: false,
         }
     }
 
@@ -381,6 +423,26 @@ mod tests {
         assert!(ui.color_enabled());
         assert!(ui.is_verbose());
         assert!(ui.is_interactive());
+    }
+
+    #[test]
+    fn git_flag_is_off_by_default_and_toggled_by_builder() {
+        // Fresh handles never stage; `with_git` opts in; `without_git` opts a
+        // clone back out (the nested-call path) while preserving other flags.
+        assert!(!color_ui().stage_requested());
+        let staging = color_ui().with_git(true);
+        assert!(staging.stage_requested());
+        let nested = staging.without_git();
+        assert!(!nested.stage_requested());
+        assert!(nested.color_enabled());
+        assert!(nested.is_interactive());
+    }
+
+    #[test]
+    fn command_prints_without_a_status_glyph() {
+        // Smoke test for the copy-pasteable command line in both color modes.
+        noninteractive_ui().command("git commit -m \"x\"");
+        color_ui().command("git push -u origin HEAD");
     }
 
     #[test]

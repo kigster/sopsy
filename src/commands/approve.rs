@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime};
 use crate::cli::ApproveArgs;
 use crate::commands::recipient::{
     ConfigSnapshot, SOPS_CONFIG_FILE_NAME, add_key_to_sops_yaml, assume_yes, current_repo_root,
-    load_config, rewrap_error, run_updatekeys, sops_config_path,
+    load_config, membership_paths, rewrap_error, run_updatekeys, sops_config_path,
 };
 use crate::config::{CONFIG_FILE_NAME, Config, MemberState, Recipient};
 use crate::error::{Error, Result};
@@ -127,7 +127,15 @@ pub fn run(ui: &Ui, args: &ApproveArgs) -> Result<()> {
     }
 
     ui.success(format!("{names} approved and added to all encrypted files"));
-    print_next_steps(ui, &approved_names);
+
+    // Stage first (so "commands shown above" in the next-steps refers to them),
+    // then print the human narrative.
+    let staged = ui.stage_requested();
+    if staged {
+        let subject = format!("Approve sopsy access for {}", approved_names.join(", "));
+        crate::git::stage_and_advise(ui, &repo, &membership_paths(&repo), &subject)?;
+    }
+    print_next_steps(ui, &approved_names, staged);
     Ok(())
 }
 
@@ -277,13 +285,22 @@ fn confirm_vouch(ui: &Ui, name: &str, public_key: &str) -> Result<bool> {
 }
 
 /// Print what the approver does next, and what the newcomer(s) do after merge.
-fn print_next_steps(ui: &Ui, names: &[String]) {
+///
+/// When `staged` is set (the `--git` flow), the concrete commit/push commands
+/// were already printed by [`crate::git::stage_and_advise`], so the manual
+/// `git add` line is replaced with a pointer to them.
+fn print_next_steps(ui: &Ui, names: &[String], staged: bool) {
     let joined = names.join(", ");
     ui.header("Next steps");
     ui.info("You (the approver):");
-    ui.info(format!(
-        "  1. Commit the changes:  git add -A && git commit -m \"approve: {joined}\""
-    ));
+    if staged {
+        ui.info("  1. Commit and push the staged changes (commands shown above).");
+    } else {
+        ui.info(format!(
+            "  1. Commit the changes:  git add -A && git commit -m \"approve: {joined}\""
+        ));
+        ui.info("     (or re-run with --git to stage them automatically)");
+    }
     ui.info("  2. Push to the PR branch and merge it (rebase first if main moved).");
     ui.info(format!(
         "{joined} then pull main and can `sopsy edit`/`sopsy decrypt` — Touch ID unlocks it."
