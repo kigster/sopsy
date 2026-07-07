@@ -87,6 +87,10 @@ The killer property: the secret values live in Git in *encrypted* form, while th
 - **`--git` staging** — a global flag that `git add`s exactly the files a command changed and prints ready-to-paste commit/push/PR instructions ([details](#global-flags)).
 - **Readable, colorful output** — key moments (init complete, members approved, ceremony hand-offs, check failures) render as full-width colored banners; with `--no-color`, pipes, or `NO_COLOR` they degrade to plain bordered boxes so logs stay clean.
 
+## Demo
+
+![demo](https://sopsy-cli.dev/sopsy-demo.gif)
+
 ______________________________________________________________________
 
 ## Encryption & Team Onboarding Flow
