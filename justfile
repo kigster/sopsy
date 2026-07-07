@@ -69,3 +69,6 @@ release:
     git push -f tags
     gh release create "v{{version}}" --generate-notes --repo git@github.com:kigster/sopsy
 
+clean:
+    /usr/bin/find . -type f -name sopsy -delete
+    /usr/bin/find . -type f -name .DS_Store -delete
