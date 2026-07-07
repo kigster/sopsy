@@ -89,7 +89,9 @@ The killer property: the secret values live in Git in *encrypted* form, while th
 
 ## Demo
 
-![demo](https://sopsy-cli.dev/sopsy-demo.gif)
+> [!IMPORTANT]
+>
+> Watch the demo of the sopsy in action on the site's [demo section](https://sopsy-cli.dev/#demo).
 
 ______________________________________________________________________
 
