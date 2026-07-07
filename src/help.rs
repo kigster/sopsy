@@ -7,9 +7,10 @@
 //!
 //! - section headings (`Usage:`, `Commands:`, `Options:`, `Arguments:`) become
 //!   ALL CAPS in bold green;
-//! - the usage line moves onto its own line, in bold yellow;
-//! - command names render in bold cyan;
-//! - option flags and argument placeholders render in bold blue.
+//! - the usage line moves onto its own line, indented two spaces to match the
+//!   other entries, in bold bright yellow;
+//! - command names render in bold blue;
+//! - option flags and argument placeholders render in bold magenta.
 //!
 //! Headings are re-cased even when color is disabled; ANSI codes are only
 //! emitted when `color` is `true` (see [`color_wanted`]).
@@ -40,9 +41,9 @@ pub fn color_wanted() -> bool {
 /// Re-case and colorize a plain clap help screen (see the module docs).
 pub fn render(help: &str, color: bool) -> String {
     let heading = Style::new().green().bold();
-    let usage = Style::new().yellow().bold();
-    let command = Style::new().cyan().bold();
-    let option = Style::new().blue().bold();
+    let usage = Style::new().bright_yellow().bold();
+    let command = Style::new().blue().bold();
+    let option = Style::new().magenta().bold();
 
     let mut out = String::new();
     let mut section = Section::None;
@@ -137,7 +138,7 @@ mod tests {
     /// load-bearing, and `\n\` continuations would swallow them.
     const SAMPLE: &str = "The missing developer experience for SOPS
 
-Usage: sopsy [OPTIONS] command [COMMAND-OPTIONS]
+Usage: sopsy [OPTIONS] <COMMAND> [COMMAND-OPTIONS]
 
 Commands:
   init        Bootstrap an encrypted repository
@@ -157,7 +158,7 @@ Options:
     #[test]
     fn headings_are_recased_even_without_color() {
         let plain = render(SAMPLE, false);
-        assert!(plain.contains("USAGE:\n  sopsy [OPTIONS] command [COMMAND-OPTIONS]"));
+        assert!(plain.contains("USAGE:\n  sopsy [OPTIONS] <COMMAND> [COMMAND-OPTIONS]"));
         assert!(plain.contains("COMMANDS:"));
         assert!(plain.contains("OPTIONS:"));
         assert!(plain.contains("ARGUMENTS:"));
@@ -173,8 +174,8 @@ Options:
         assert!(
             plain
                 .lines()
-                .any(|l| l == "  sopsy [OPTIONS] command [COMMAND-OPTIONS]"),
-            "usage body should sit alone on an indented line:\n{plain}"
+                .any(|l| l == "  sopsy [OPTIONS] <COMMAND> [COMMAND-OPTIONS]"),
+            "usage body should sit alone on a two-space-indented line:\n{plain}"
         );
     }
 
@@ -219,14 +220,14 @@ Options:
     }
 
     #[test]
-    fn commands_are_cyan_options_are_blue() {
+    fn commands_are_blue_options_are_magenta() {
         let colored = render(SAMPLE, true);
         let init = colored.lines().find(|l| l.contains("init")).unwrap();
         let no_color = colored.lines().find(|l| l.contains("--no-color")).unwrap();
-        // owo_colors encodes cyan as SGR 36 and blue as SGR 34.
-        assert!(init.contains("36m") || init.contains("36;"), "{init}");
+        // owo_colors encodes blue as SGR 34 and magenta as SGR 35.
+        assert!(init.contains("34m") || init.contains("34;"), "{init}");
         assert!(
-            no_color.contains("34m") || no_color.contains("34;"),
+            no_color.contains("35m") || no_color.contains("35;"),
             "{no_color}"
         );
     }

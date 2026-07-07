@@ -24,8 +24,8 @@ use crate::sops::FileType;
 // their width). Set on the root command, this applies to every subcommand too.
 #[command(max_term_width = 100)]
 // The canonical shape shown at the top of `sopsy --help`; rendering (own line,
-// bold yellow) is handled by `crate::help`.
-#[command(override_usage = "sopsy [OPTIONS] command [COMMAND-OPTIONS]")]
+// indented, bold bright yellow) is handled by `crate::help`.
+#[command(override_usage = "sopsy [OPTIONS] <COMMAND> [COMMAND-OPTIONS]")]
 pub struct Cli {
     /// Global flags shared by every subcommand.
     #[command(flatten)]
