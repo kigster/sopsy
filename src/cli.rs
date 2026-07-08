@@ -109,7 +109,11 @@ pub enum Command {
     Decrypt(SecretsDecryptArgs),
 
     /// List the file types sopsy understands (for `--type`).
-    #[command(name = "types", visible_alias = "list-supported-types")]
+    ///
+    /// `list-supported-types` is the command's original name, kept as a
+    /// hidden alias for backwards compatibility (parses, but is not shown
+    /// in help or offered by shell completion).
+    #[command(name = "types", alias = "list-supported-types")]
     ListSupportedTypes,
 
     /// CI gate: verify the repo's encrypted-secrets hygiene (exit 0/1).
@@ -504,6 +508,16 @@ mod tests {
             cli.command,
             Command::Secrets(SecretsCommand::Encrypt(_))
         ));
+    }
+
+    #[test]
+    fn hidden_list_supported_types_alias_still_parses() {
+        // The original spelling remains functional as a hidden alias of
+        // `types` (absent from help and completion menus).
+        let cli = Cli::try_parse_from(["sopsy", "list-supported-types"]).unwrap();
+        assert!(matches!(cli.command, Command::ListSupportedTypes));
+        let cli = Cli::try_parse_from(["sopsy", "types"]).unwrap();
+        assert!(matches!(cli.command, Command::ListSupportedTypes));
     }
 
     #[test]

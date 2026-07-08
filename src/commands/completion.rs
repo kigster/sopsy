@@ -123,18 +123,23 @@ mod tests {
         }
     }
 
-    /// Every shell's script offers the current commands (and the visible
-    /// `list-supported-types` alias, which is intentionally advertised).
+    /// Every shell's script offers the current commands. The deprecated
+    /// `list-supported-types` spelling is a *hidden* alias: it must not be
+    /// offered anywhere (clap_complete only emits visible aliases).
     #[test]
     fn scripts_offer_current_commands() {
         for shell in ALL_SHELLS {
             let script = generate_script(shell);
-            for name in ["encrypt", "decrypt", "types", "list-supported-types"] {
+            for name in ["encrypt", "decrypt", "types"] {
                 assert!(
                     script.contains(name),
                     "{shell:?} script should offer `{name}`"
                 );
             }
+            assert!(
+                !script.contains("list-supported-types"),
+                "{shell:?} script should not offer the hidden alias"
+            );
         }
     }
 

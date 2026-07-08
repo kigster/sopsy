@@ -715,7 +715,7 @@ sopsy decrypt config.json.encrypted -o config.json
 
 ### `sopsy types`
 
-Print the file formats sopsy understands (the valid values for `--type`) and which extensions auto-detect to each. Takes no flags. Also available under its longer alias, `sopsy list-supported-types`.
+Print the file formats sopsy understands (the valid values for `--type`) and which extensions auto-detect to each. Takes no flags. The command's original, longer name `sopsy list-supported-types` still works as a hidden backwards-compatibility alias (not shown in help or completions).
 
 ```bash
 sopsy types
