@@ -195,6 +195,30 @@ brew install kigster/tap/sopsy
 
 This is the simplest path: it installs a **prebuilt binary** (no Rust toolchain required) **and** pulls the tools sopsy orchestrates — `sops`, `age`, and, on macOS, `age-plugin-se` — automatically. You can skip the [Prerequisites](#prerequisites) step entirely; Homebrew handles them.
 
+> [!IMPORTANT]
+> **If your Homebrew enforces tap trust** (the `HOMEBREW_REQUIRE_TAP_TRUST`
+> environment variable is set), third-party formulae like this one must be
+> trusted before Homebrew will load them. Trust the tap and the formula once,
+> before installing:
+>
+> ```bash
+> brew trust --tap kigster/tap
+> brew trust --formula kigster/tap/sopsy
+> brew install kigster/tap/sopsy
+> ```
+>
+> The trust is recorded against the formula you approved, so **when a new
+> sopsy version is released you must re-run the `brew trust` command before
+> upgrading**:
+>
+> ```bash
+> brew trust --formula kigster/tap/sopsy && brew upgrade sopsy
+> ```
+>
+> Without the re-trust, `brew upgrade sopsy` fails to load the updated
+> formula. If `HOMEBREW_REQUIRE_TAP_TRUST` is not set on your machine, none
+> of this applies and plain `brew install`/`brew upgrade` works as usual.
+
 ### From crates.io (requires Rust)
 
 ```bash
