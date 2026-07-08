@@ -3,6 +3,7 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"] 
 
 version := `grep -i '^version' Cargo.toml | awk '{print $3}' | tr -d '"'`
+repo := 'git@github.com:kigster/sopsy'
 
 [no-exit-message]
 recipes:
@@ -65,8 +66,9 @@ version:
 release:
     git fetch --tags
     git tag -f "v{{ version }}"
-    git push -f --tags
-    gh release create "v{{version}}" --force --generate-notes --repo git@github.com:kigster/sopsy
+    git push -f --tags 
+    gh release delete -y "v{{ version }}" --repo {{ repo }} 2>/dev/nul || true
+    gh release create "v{{ version }}" --force --generate-notes --repo {{ repo }}
 
 clean:
     /usr/bin/find . -type f -name sopsy -delete
