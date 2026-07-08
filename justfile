@@ -68,7 +68,7 @@ release:
     git tag -f "v{{ version }}"
     git push -f --tags 
     gh release delete -y "v{{ version }}" --repo {{ repo }} 2>/dev/null || true
-    gh release create "v{{ version }}" --force --generate-notes --repo {{ repo }}
+    gh release create "v{{ version }}" --generate-notes --repo {{ repo }}
 
 clean:
     /usr/bin/find . -type f -name sopsy -delete
