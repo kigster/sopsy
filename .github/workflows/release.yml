@@ -55,14 +55,18 @@ jobs:
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # v7 runs on the node24 runtime (node20 is deprecated on GitHub runners
+      # and removed in fall 2026).
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
       # Builds (cross-compiling where needed), tars the binary as
       # sopsy-<target>.tar.gz, generates a .sha256, and uploads to the release.
       # Pinned to a full commit SHA (supply-chain hardening); bump deliberately.
-      - uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1
+      # Composite action (shell steps, no Node runtime) — unaffected by the
+      # node20 deprecation; this SHA is v1.30.2, the latest release.
+      - uses: taiki-e/upload-rust-binary-action@f0d45ae91ee7b8ee928de7a9d04d893a08bcbec6 # v1.30.2
         with:
           bin: sopsy
           target: ${{ matrix.target }}
