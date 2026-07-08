@@ -46,6 +46,9 @@ pub struct Ui {
 }
 
 impl Ui {
+    /// Total width, in columns, of the yellow band [`Ui::header`] paints.
+    const HEADER_WIDTH: usize = 75;
+
     /// Build a [`Ui`] from the resolved global flags.
     ///
     /// `color` and `interactive` reflect the user's requested preference; this
@@ -241,13 +244,37 @@ impl Ui {
         println!();
     }
 
-    /// Print a bold, underlined section header with surrounding spacing.
+    /// Print a section header — bold white text on a yellow band padded to
+    /// [`Self::HEADER_WIDTH`] columns — framed by two blank lines above and one
+    /// below. Longer titles are not truncated — the band simply extends.
+    /// Without color the title is printed plainly (no invisible padding for
+    /// logs/pipes).
     pub fn header(&self, title: impl AsRef<str>) {
+        let title = title.as_ref();
         println!();
-        println!(
-            "{}",
-            self.paint(title.as_ref(), Style::new().bold().underline().cyan())
-        );
+        println!();
+        if self.color {
+            // HEADER_WIDTH columns total: two leading spaces (title starts on
+            // column 3) + title + padding out to the edge.
+            let pad = Self::HEADER_WIDTH.saturating_sub(title.chars().count() + 2);
+            let band = format!("  {title}{}", " ".repeat(pad));
+            println!(
+                "{}",
+                // Two separate SGR sequences with the background opened FIRST:
+                // a single combined `38;2;R;G;B;43;1` run-on can trip up SGR
+                // parsers (owo_colors always emits fg first in one sequence, so
+                // this is done as nested paints). Truecolor white because ANSI
+                // white/bright-white (SGR 37/97) are palette slots that themes
+                // can remap to dark tones; an RGB literal cannot be remapped.
+                self.paint(
+                    &self.paint(&band, Style::new().truecolor(255, 255, 255).bold()),
+                    Style::new().on_yellow(),
+                )
+            );
+        } else {
+            println!("{title}");
+        }
+        println!();
     }
 
     /// Print a line whose characters cycle through a rainbow of colors.
