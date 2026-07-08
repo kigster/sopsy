@@ -12,12 +12,11 @@
 
 `sopsy` is a CLI tool written in Rust that combines sops, age, and age-plugin-se for MacOS to provide seamless and yet hardware-protected way of encrypting the application secrets that can be safely checked into the repo. It's meant for developer settings and API keys, but can be used for staging and production as well.
 
----
+______________________________________________________________________
 
 It's the "missing developer experience for SOPS".
 
-Sopsy bootstraps encrypted repositories using SOPS and age, manages Secure Enclave-backed identities on macOS, and makes working with
-encrypted secrets simple.
+Sopsy bootstraps encrypted repositories using SOPS and age, manages Secure Enclave-backed identities on macOS, and makes working with encrypted secrets simple.
 
 ## Features
 
@@ -51,18 +50,7 @@ sopsy/
 
 ## MVP Breakdown
 
-
-MVP breakdown
-Workstream	Estimate
-Rust CLI skeleton with clap	0.5 day
-doctor checks: macOS, tools, git repo, .sops.yaml, ignored plaintext files	1 day
-Secure Enclave identity generation via age-plugin-se	0.5–1 day
-.sops.yaml init/update logic	1 day
-Emergency/break-glass key instructions + validation warning	0.5 day
-edit wrapper around EDITOR=vim sops <file>	0.5 day
-add-recipient, remove-recipient, list-recipients, updatekeys	1–1.5 days
-Integration tests using temp git repos + mocked commands	1–1.5 days
-README + manager/developer docs	0.5 day
+MVP breakdown Workstream Estimate Rust CLI skeleton with clap 0.5 day doctor checks: macOS, tools, git repo, .sops.yaml, ignored plaintext files 1 day Secure Enclave identity generation via age-plugin-se 0.5–1 day .sops.yaml init/update logic 1 day Emergency/break-glass key instructions + validation warning 0.5 day edit wrapper around EDITOR=vim sops <file> 0.5 day add-recipient, remove-recipient, list-recipients, updatekeys 1–1.5 days Integration tests using temp git repos + mocked commands 1–1.5 days README + manager/developer docs 0.5 day
 
 ## Solid MVP with tests: 4–7 days
 
@@ -112,12 +100,7 @@ Hopefully, that's a project people immediately understand.
 
 Opinionated developer experience for SOPS.
 
-• Bootstrap a repository in minutes
-• Secure Enclave-backed identities
-• Safe defaults
-• Team onboarding
-• Recipient management
-• Great diagnostics
+• Bootstrap a repository in minutes • Secure Enclave-backed identities • Safe defaults • Team onboarding • Recipient management • Great diagnostics
 
 ## Commands
 
@@ -144,14 +127,9 @@ Checks everything.
 
 This should become the command people paste into GitHub Issues.
 
-✓ macOS 15.5
-✓ Apple Silicon
-✓ Secure Enclave available
-✓ Touch ID enabled
+✓ macOS 15.5 ✓ Apple Silicon ✓ Secure Enclave available ✓ Touch ID enabled
 
-✓ `sops`
-✓ `age-plugin-se`
-✓ `git`
+✓ `sops` ✓ `age-plugin-se` ✓ `git`
 
 ✓ `.sops.yaml`
 
@@ -181,28 +159,19 @@ Same idea.
 
 ## `sopsy recipient keygen [ -- age flags ]`
 
-Generates a Secure Enclave identity (`age-plugin-se keygen`) and prints the public
-key + identity, without touching any config. Trailing args after `--` are forwarded
-to the plugin.
+Generates a Secure Enclave identity (`age-plugin-se keygen`) and prints the public key + identity, without touching any config. Trailing args after `--` are forwarded to the plugin.
 
 ## `sopsy recipient break-glass -o <file>`
 
-Generates a portable (`age-keygen`) emergency key, writes `<file>.private` /
-`<file>.public`, prompts the owner to copy them to an offline vault (1Password),
-waits, then deletes the local copies and registers the key as the break-glass
-recipient. Also offered automatically during `sopsy init`.
+Generates a portable (`age-keygen`) emergency key, writes `<file>.private` / `<file>.public`, prompts the owner to copy them to an offline vault (1Password), waits, then deletes the local copies and registers the key as the break-glass recipient. Also offered automatically during `sopsy init`.
 
 ## `sopsy join <name>`
 
-Self-service onboarding for a newcomer: generates their Enclave key and records a
-**pending** entry in `.sopsy.yml` (with a timestamp). Pending grants nothing — they
-push it as a pull request.
+Self-service onboarding for a newcomer: generates their Enclave key and records a **pending** entry in `.sopsy.yml` (with a timestamp). Pending grants nothing — they push it as a pull request.
 
 ## `sopsy approve <name>`
 
-Run by any active member: checks the request is fresh (`join_request_ttl`), vouches
-for the key, adds it to `.sops.yaml`, flips the member to `active`, and runs
-`sops updatekeys`.
+Run by any active member: checks the request is fresh (`join_request_ttl`), vouches for the key, adds it to `.sops.yaml`, flips the member to `active`, and runs `sops updatekeys`.
 
 ## `sopsy check`
 
@@ -242,10 +211,10 @@ I'd deliberately not implement these until people ask for them:
 
 **The fastest path to adoption is a polished macOS experience.**
 
----
+______________________________________________________________________
 
 ## Other Notes
 
 The user interaction must be top-notch, and use color freely, especially animations of lines changing color, etc.
 
-The prompt library should ask the user questions, and save 
+The prompt library should ask the user questions, and save
