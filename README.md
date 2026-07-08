@@ -23,9 +23,12 @@ ______________________________________________________________________
 - [What it is](#what-it-is)
 - [Philosophy](#philosophy)
 - [Features](#features)
+- [Demo](#demo)
+- [Encryption & Team Onboarding Flow](#encryption--team-onboarding-flow)
 - [Prerequisites](#prerequisites)
 - [Install](#install)
 - [Quick Start](#quick-start)
+- [Screenshot](#screenshot)
 - [Architecture](#architecture)
 - [How encryption flows](#how-encryption-flows)
 - [The Secure Enclave security model](#the-secure-enclave-security-model)
@@ -91,19 +94,19 @@ The killer property: the secret values live in Git in *encrypted* form, while th
 
 > [!IMPORTANT]
 >
-> Watch the demo of the sopsy in action on the site's [demo section](https://sopsy-cli.dev/#demo).
+> Watch the demo of sopsy in action in the site's [demo section](https://sopsy-cli.dev/#demo).
 
 ______________________________________________________________________
 
 ## Encryption & Team Onboarding Flow
 
-Sopsy's killer feature (besides the Touch ID-based decryption) is the fact that each developer on the team must be onboardded to a be allowed to decrypt the secrets file. This means that a random person that aquires your repo with all the encryped files in them, can never decrypt the file, since they have not been officially admitted into the select group of decryptors.
+Sopsy's killer feature (besides the Touch ID-based decryption) is the fact that each developer on the team must be onboarded to be allowed to decrypt the secrets file. This means that a random person who acquires your repo with all the encrypted files in it can never decrypt the file, since they have not been officially admitted into the select group of decryptors.
 
-The first encryptor is considered the **prime** encryptor, and they are also given the "break-glass" in case of emergency pair of private and public keys to be placed in 1Password's some exec-only Vault because you should hopefully never need those keys unless somehow all of the laptops were stolen from the company.
+The first encryptor is considered the **prime** encryptor, and they are also given the "break-glass" in-case-of-emergency pair of private and public keys to be placed in some exec-only 1Password Vault, because you should hopefully never need those keys unless somehow all of the laptops were stolen from the company.
 
-The next person must request to join with `sopsy request-access "Full Name"` or it's synonym `sopsy join "First Last"`.
+The next person must request to join with `sopsy join "First Last"` or its synonym `sopsy request-access "Full Name"`.
 
-By default, the key minted in the Apple Enclave will require Touch ID every time it's used. This is good security but may get old if you are using say `direnv` or many windows with your project there. If you prefer to trade security of your thumb for convenience, pass the native `-t` / `--without-touch-id` flag to `sopsy join` (equivalent to forwarding `--access-control none` to `age-plugin-se` after `--`). Here is an example:
+By default, the key minted in the Apple Enclave will require Touch ID every time it's used. This is good security but may get old if you are using, say, `direnv` or many windows with your project there. If you prefer to trade the security of your thumb for convenience, pass the native `-t` / `--without-touch-id` flag to `sopsy join` (equivalent to forwarding `--access-control none` to `age-plugin-se` after `--`). Here is an example:
 
 ```bash
 # Alan Turing's MacBook:
@@ -126,7 +129,7 @@ sopsy join "Alan Turing" -- --access-control none
 
 git add -A .
 git commit -m 'Requesting access to the .env.encrypted'
-git push origin/sopsy/add/alan-turing
+git push origin sopsy/add/alan-turing
 # create a PR
 
 # —————————————————————————————————————————————————————————
@@ -147,7 +150,7 @@ git push
 # merges the PR to the main branch. Now they can decrypt the file.
 ```
 
-To illustrate this process, here is the sequence diagram with not one but two people using the same branch to add themselves for approval (NOTE: to encrypt `.env` you would run `sopsy encrypt .env -o .env.encrypted`)
+To illustrate this process, here is the sequence diagram with not one but two people using the same branch to add themselves for approval (NOTE: to encrypt `.env` you would run `sopsy encrypt .env -o .env.encrypted`).
 
 ![sopsy-workflow](docs/sopsy-workflow.png)
 
@@ -287,7 +290,7 @@ ______________________________________________________________________
 
 - **Encrypt** — `sops --encrypt --input-type dotenv --output-type dotenv --in-place .env.encrypted`. The recipients come from `.sops.yaml`.
 - **Decrypt / edit** — `sopsy edit` runs `EDITOR=<editor> sops <file>`, which decrypts into a temp file, opens your editor, then re-encrypts on save. This requires a private key one of the recipients holds.
-- **File-type detection** — `.env`, `.env.*`, and `*.env` map to `dotenv`; `.yaml`/`.yml` to `yaml`; `.json` to `json`; everything else to `binary`.
+- **File-type detection** — `.env`, `.env.*`, and `*.env` map to `dotenv`; `.yaml`/`.yml` to `yaml`; `.json` to `json`; `.ini` to `ini`; everything else to `binary`.
 
 > [!IMPORTANT]
 >
@@ -444,7 +447,7 @@ safety rules, and `.sopsy.yml`.
 | `--no-generate` | Skip Secure Enclave identity generation. Requires `--public-key`, else init errors. |
 | `--break-glass` | Run the break-glass ceremony as part of init (interactive mode prompts by default). |
 | `--no-break-glass` | Skip break-glass setup during init (you'll get a reminder to run it later). |
-| `--force` | Overwrite/recreate `.sops.yaml` and `.env.encrypted` even if they already exist. |
+| `--force` | Overwrite/recreate `.sops.yaml` and `.env.encrypted` even if they already exist, and proceed even if some doctor checks fail. |
 
 ```bash
 # Interactive: generate a Secure Enclave identity (Touch ID may prompt).
@@ -535,17 +538,19 @@ git add .sopsy.yml .sopsy.sha && git commit -m "join: request access for alice" 
 
 ### `sopsy approve`
 
-Approve a pending member (run by **any active member**, on their PR branch). Checks the request is fresh, asks you to vouch that the key belongs to the person, adds the key to `.sops.yaml`, flips them to `active`, and runs `sops updatekeys` so every encrypted file gains a stanza they can open. Rolls back atomically if the re-key fails. The approval is recorded in `.sopsy.yml` for the audit trail: `approved_by` (resolved to `"Full Name (username)"` from your `$USER`) and `approved_at`, while `requested_at` is kept — `recipient list` shows all of it.
+Approve one or more pending members (run by **any active member**, on their PR branch). Checks each request is fresh, asks you to vouch that the key belongs to the person, adds the key to `.sops.yaml`, flips them to `active`, and runs `sops updatekeys` so every encrypted file gains a stanza they can open. Rolls back atomically if the re-key fails — both config files *and* any already-re-wrapped encrypted files are restored. The approval is recorded in `.sopsy.yml` for the audit trail: `approved_by` (resolved to `"Full Name (username)"` from your `$USER`) and `approved_at`, while `requested_at` is kept — `recipient list` shows all of it.
 
 | Argument / Flag | Description |
 | ------------------- | ------------------------------------------------------------------------- |
-| `<name>` | The pending member to approve (required). |
-| `--force` | Approve even if the join request is older than `join_request_ttl`. |
+| `[names]...` | The pending member(s) to approve. Pass several to approve them together and re-key once; with no names, walk every pending member interactively. |
+| `--force` | Approve even if a join request is older than `join_request_ttl`. |
 | `--no-updatekeys` | Skip the `sops updatekeys` re-encryption step after editing `.sops.yaml`. |
 
 ```bash
 git fetch origin pull/123/head:join-alice && git switch join-alice
 sopsy approve alice                       # vouch, re-key, activate (Touch ID prompts)
+sopsy approve annie colin                 # approve several at once, re-keying once
+sopsy approve                             # walk every pending request interactively
 git add -A && git commit -m "approve: alice" && git push   # then merge the PR
 ```
 
@@ -590,7 +595,7 @@ sopsy recipient add break-glass --public-key age1q… --break-glass
 | Argument / Flag | Description |
 | ------------------- | -------------------------------------------------------------------------- |
 | `[name]` | Positional recipient name (equivalent to `--name`). |
-| `--name <NAME>` | Recipient to remove (a multi-select prompt is shown if omitted). |
+| `--name <NAME>` | Recipient to remove (a selection prompt is shown if omitted). |
 | `--no-updatekeys` | Skip the `sops updatekeys` re-encryption step after editing `.sops.yaml`. |
 
 ```bash

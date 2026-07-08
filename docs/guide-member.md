@@ -19,7 +19,7 @@ thinking about it."
 - [Troubleshooting with `sopsy doctor`](#troubleshooting-with-sopsy-doctor)
 - [FAQ](#faq)
 
----
+______________________________________________________________________
 
 ## Mental model in 30 seconds
 
@@ -131,8 +131,9 @@ flips you to `active`. They commit and merge.
 
 > [!IMPORTANT]
 > Approve promptly: your request expires after the repo's `join_request_ttl`
-> (default 72h). If it goes stale, just re-run `sopsy join` to refresh the
-> timestamp.
+> (default 72h). If it goes stale, the approver can pass `--force`
+> (`sopsy approve alice --force`), or remove the pending entry and re-run
+> `sopsy join` — sopsy refuses to overwrite an existing request.
 
 Once it's merged, `git pull` and you're in.
 
@@ -161,17 +162,18 @@ git push
 - **`sopsy edit <file>`** decrypts into a temp file, opens your `$EDITOR` (or
   `--editor`), and re-encrypts when you save and quit. A Touch ID prompt may appear
   — that's the Secure Enclave releasing your key for this operation.
-- To read a value without editing, use `sops` directly:
-  `sops --decrypt --input-type dotenv .env.encrypted`.
-- New encrypted file? Name it so it matches a `.sops.yaml` rule (e.g.
-  `something.encrypted` or `config/db.encrypted.yaml`) and run
-  `sops --encrypt --in-place …`, or ask a teammate.
+- To read a value without editing, use `sopsy decrypt`:
+  `sopsy decrypt .env.encrypted` (plaintext goes to stdout; the file type is
+  auto-detected from the name).
+- New encrypted file? Run
+  `sopsy encrypt config/db.yaml -o config/db.yaml.encrypted` — the output must
+  end in `.encrypted` so it matches a `.sops.yaml` rule — or ask a teammate.
 
 > [!WARNING]
 > Never copy a decrypted value into a tracked file, and never `git add .env`.
 > The plaintext `.env` is for your machine only. If you need a real local `.env`,
 > generate it from the encrypted source:
-> `sops --decrypt --input-type dotenv .env.encrypted > .env`.
+> `sopsy decrypt .env.encrypted > .env`.
 
 ## Before you commit
 
@@ -189,6 +191,7 @@ seven invariants.
 
 > [!TIP]
 > Wire it into a pre-commit hook so you never forget:
+>
 > ```bash
 > echo 'exec sopsy check' > .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 > ```
@@ -210,14 +213,14 @@ flowchart TD
     dec -- no --> done([likely environment-specific —<br/>share doctor output])
 ```
 
-| Symptom                                            | Likely cause & fix                                                             |
+| Symptom | Likely cause & fix |
 | -------------------------------------------------- | ----------------------------------------------------------------------------- |
-| `sops` / `age-plugin-se` not found on PATH         | `brew install sops age age-plugin-se`, then re-open your shell.               |
-| `edit` fails: *no matching creation rules*         | The file name doesn't match a `.sops.yaml` `path_regex`. Rename or ask.       |
-| `edit` fails to decrypt (no key)                   | Your key isn't in `.sops.yaml` yet — run `sopsy join` and get approved.       |
-| Touch ID never prompts / decrypt hangs             | Enclave/Touch ID not enrolled. Check `sopsy doctor` **System** group.         |
-| `not inside a git repository`                      | Run commands from within the cloned repo (or `git init`).                     |
-| `.sopsy.yml not found — run sopsy init`            | The repo wasn't bootstrapped with sopsy; the owner should run `sopsy init`.   |
+| `sops` / `age-plugin-se` not found on PATH | `brew install sops age age-plugin-se`, then re-open your shell. |
+| `edit` fails: *no matching creation rules* | The file name doesn't match a `.sops.yaml` `path_regex`. Rename or ask. |
+| `edit` fails to decrypt (no key) | Your key isn't in `.sops.yaml` yet — run `sopsy join` and get approved. |
+| Touch ID never prompts / decrypt hangs | Enclave/Touch ID not enrolled. Check `sopsy doctor` **System** group. |
+| `not inside a git repository` | Run commands from within the cloned repo (or `git init`). |
+| `.sopsy.yml not found — run sopsy init` | The repo wasn't bootstrapped with sopsy; the owner should run `sopsy init`. |
 
 ## FAQ
 
@@ -231,8 +234,9 @@ confirming the key really belongs to that person.
 **Can I use VS Code?** Yes: `sopsy edit .env.encrypted --editor "code --wait"`
 (the `--wait` is essential so sops knows when you've finished editing).
 
-**I rotated/lost my Mac.** Run `sopsy join` on the new machine to request a fresh
-key, get approved, and have someone `sopsy recipient remove` the old one. Your old
+**I rotated/lost my Mac.** Have a teammate `sopsy recipient remove` your old entry
+first (`sopsy join` refuses a name that is already registered), then run
+`sopsy join` on the new machine to request a fresh key and get approved. Your old
 device's key can no longer decrypt new commits once removed.
 
 > [!CAUTION]

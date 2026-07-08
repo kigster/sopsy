@@ -29,7 +29,7 @@ recorded in `.sopsy.yml` (via `--username`), not an enforced permission.
 > *who may change membership* with branch protection / CODEOWNERS on `.sops.yaml`
 > and `.sopsy.yml` — that is where an actual authority (the server) lives.
 
----
+______________________________________________________________________
 
 ## Security Model
 
@@ -73,11 +73,11 @@ flowchart TB
 > **state** (`active`/`pending`), the break-glass marker, the encrypted-file globs,
 > the `join_request_ttl`, and the `sops` version.
 
----
+______________________________________________________________________
 
 ## Bootstrapping the repository
 
-As the owner you run `sopsy init` **once**:
+As the owner, you run `sopsy init` **once**:
 
 ```bash
 cd my-repo
@@ -109,7 +109,7 @@ moment to do it — don't skip it.
 > `--force`. Run `sopsy doctor` afterward to confirm the toolchain and repo are
 > healthy.
 
----
+______________________________________________________________________
 
 ## Break-glass: do this on day one
 
@@ -127,9 +127,9 @@ sopsy recipient break-glass -o break-glass
 This:
 
 1. generates a portable age key pair,
-2. writes `break-glass.private` and `break-glass.public` to disk,
-3. tells you to copy them into 1Password (or another offline vault) and **waits**,
-4. once you press ENTER, **deletes both local files** and registers the key as the
+1. writes `break-glass.private` and `break-glass.public` to disk,
+1. tells you to copy them into 1Password (or another offline vault) and **waits**,
+1. once you press ENTER, **deletes both local files** and registers the key as the
    break-glass recipient — adding it to `.sops.yaml` and re-keying every secret.
 
 ```mermaid
@@ -154,7 +154,7 @@ flowchart TD
 > never on a daily-driver machine. Only its public key is committed, exactly like
 > any other recipient.
 
----
+______________________________________________________________________
 
 ## The membership lifecycle (join → approve)
 
@@ -181,15 +181,18 @@ sequenceDiagram
 
 ### What `approve` actually does
 
-`sopsy approve <name>`:
+`sopsy approve <name…>` (pass several names to approve them together with a
+single re-key; with no names it walks every pending member interactively):
 
 1. **checks freshness** — refuses requests older than `join_request_ttl`
    (default `72h`, editable in `.sopsy.yml`) unless you pass `--force`;
-2. **asks you to vouch** — shows the name + public key so you confirm, out of band,
+1. **asks you to vouch** — shows the name + public key so you confirm, out of band,
    that the key really belongs to that person (the one human trust step no
    cryptography can remove);
-3. **adds the key to `.sops.yaml`** and flips the member from `pending` to `active`;
-4. **runs `sops updatekeys`** on every encrypted file — this adds a wrapped copy of
+1. **adds the key to `.sops.yaml`**, flips the member from `pending` to `active`,
+   and records the provenance (`approved_at`, plus `approved_by` as
+   `"Full Name (username)"`);
+1. **runs `sops updatekeys`** on every encrypted file — this adds a wrapped copy of
    the data key for the new member. It does **not** re-encrypt the file bodies, and
    it requires *your* key to unwrap the data key first (Touch ID will prompt).
 
@@ -221,7 +224,7 @@ sopsy recipient add bob --public-key age1se1…
 > `sopsy recipient list` prints the current roster (names, truncated keys, and the
 > ★ break-glass marker) — a quick way to audit access.
 
----
+______________________________________________________________________
 
 ## Offboarding a member
 
@@ -241,7 +244,7 @@ recipient of **future** ciphertext.
 > sopsy also refuses to remove the **last remaining recipient** or the **sole
 > break-glass recipient**, to avoid stranding the repository.
 
----
+______________________________________________________________________
 
 ## Generating a key without registering it
 
@@ -255,15 +258,21 @@ sopsy recipient keygen
 sopsy recipient keygen -- --access-control=any-biometry-or-passcode
 ```
 
----
+______________________________________________________________________
 
 ## Enforcing hygiene in CI
 
 Run `sopsy check` in CI and as a pre-commit hook. It validates seven invariants
-(plaintext not tracked, `.env` ignored, `.sops.yaml` valid, every encrypted file
+(`.env` not tracked, `.env` ignored, `.sops.yaml` valid, every encrypted file
 covered and genuinely encrypted, no plaintext secrets tracked, break-glass present)
 and exits non-zero on any failure — **without needing any private key**. See the
 [CI gate diagram and YAML example in the README](../README.md#using-sopsy-in-ci).
+
+When CI must also *decrypt* (deploys, integration tests), mint it a dedicated
+portable key with `sopsy recipient ci`. It runs the same ceremony as break-glass,
+except you store the private half as a CI secret named `SOPS_AGE_KEY` (the
+variable `sops` reads identities from) before the local files are deleted and
+the key is registered as a recipient.
 
 > [!TIP]
 > Because `check` never decrypts, it runs on a Linux CI runner just fine. The
