@@ -63,11 +63,10 @@ version:
 
 # Tag v{{ version }}, publish the GH release, & refresh the Homebrew tap.
 release:
-    #!/usr/bin/env bash
     git fetch --tags
     git tag -f "v{{ version }}"
-    git push -f tags
-    gh release create "v{{version}}" --generate-notes --repo git@github.com:kigster/sopsy
+    git push -f --tags
+    gh release create "v{{version}}" --force --generate-notes --repo git@github.com:kigster/sopsy
 
 clean:
     /usr/bin/find . -type f -name sopsy -delete
