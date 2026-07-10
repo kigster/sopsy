@@ -1,6 +1,6 @@
 [package]
 name = "sopsy"
-version = "1.3.2"
+version = "1.3.3"
 edition = "2024"
 description = "Public/private individual key encryption for repo secrets with biometrics support and explicit approval of who can decrypt. In other words — the missing good UX for SOPS"
 license = "MIT"
