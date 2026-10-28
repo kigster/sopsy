@@ -16,6 +16,7 @@
 use std::ffi::OsString;
 use std::process::Command;
 
+use super::{GeneratedIdentity, Store};
 use crate::error::{Error, Result};
 
 /// The default name of the external binary this module drives.
@@ -24,19 +25,12 @@ pub const PLUGIN_BIN: &str = "age-plugin-se";
 /// Environment variable that overrides the `age-plugin-se` binary path.
 pub const PLUGIN_BIN_ENV: &str = "SOPSY_AGE_PLUGIN_SE_BIN";
 
+/// Prefix of every Secure Enclave age recipient.
+pub const RECIPIENT_PREFIX: &str = "age1se1";
+
 /// Resolve the `age-plugin-se` binary to invoke, honoring [`PLUGIN_BIN_ENV`].
 fn plugin_bin() -> OsString {
     std::env::var_os(PLUGIN_BIN_ENV).unwrap_or_else(|| OsString::from(PLUGIN_BIN))
-}
-
-/// A freshly generated Secure Enclave identity.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EnclaveIdentity {
-    /// The age recipient (public key), e.g. `age1se1...`.
-    pub public_key: String,
-    /// The identity stanza to store (references the Secure Enclave key),
-    /// e.g. `AGE-PLUGIN-SE-1...`.
-    pub identity: String,
 }
 
 /// Verify the `age-plugin-se` binary is available on `PATH` (or via
@@ -60,7 +54,7 @@ pub fn ensure_available() -> Result<()> {
 /// which contains a `# public key: age1se1...` comment line and the
 /// `AGE-PLUGIN-SE-...` identity line; the public key may also appear on stderr
 /// as `Public key: age1se1...`. Both stdout and stderr are parsed.
-pub fn generate_identity(access_control: Option<&str>) -> Result<EnclaveIdentity> {
+pub fn generate_identity(access_control: Option<&str>) -> Result<GeneratedIdentity> {
     let args: Vec<String> = access_control
         .map(|value| vec![format!("--access-control={value}")])
         .unwrap_or_default();
@@ -73,7 +67,7 @@ pub fn generate_identity(access_control: Option<&str>) -> Result<EnclaveIdentity
 /// This is the escape hatch behind `sopsy recipient keygen -- <age flags>`: it
 /// lets callers pass arbitrary plugin flags (e.g. `--access-control=...`) while
 /// still parsing the public key and identity out of the output.
-pub fn generate_identity_with_args(extra_args: &[String]) -> Result<EnclaveIdentity> {
+pub fn generate_identity_with_args(extra_args: &[String]) -> Result<GeneratedIdentity> {
     let mut command = Command::new(plugin_bin());
     command.arg("keygen");
     command.args(extra_args);
@@ -98,7 +92,7 @@ pub fn generate_identity_with_args(extra_args: &[String]) -> Result<EnclaveIdent
 /// (case-insensitive) — covering both the `# public key:` comment in the
 /// identity file and the `Public key:` summary printed to stderr. The identity
 /// is the first line beginning with `AGE-PLUGIN-SE`.
-fn parse_keygen_output(stdout: &str, stderr: &str) -> Result<EnclaveIdentity> {
+fn parse_keygen_output(stdout: &str, stderr: &str) -> Result<GeneratedIdentity> {
     let public_key = stdout
         .lines()
         .chain(stderr.lines())
@@ -118,7 +112,8 @@ fn parse_keygen_output(stdout: &str, stderr: &str) -> Result<EnclaveIdentity> {
             )
         })?;
 
-    Ok(EnclaveIdentity {
+    Ok(GeneratedIdentity {
+        store: Store::Enclave,
         public_key,
         identity,
     })
@@ -143,7 +138,8 @@ mod tests {
 
     #[test]
     fn enclave_identity_is_constructible() {
-        let id = EnclaveIdentity {
+        let id = GeneratedIdentity {
+            store: Store::Enclave,
             public_key: "age1se1qexample".into(),
             identity: "AGE-PLUGIN-SE-1...".into(),
         };

@@ -16,8 +16,8 @@ use std::time::SystemTime;
 use crate::cli::JoinArgs;
 use crate::commands::recipient;
 use crate::config::{CHECKSUM_FILE_NAME, CONFIG_FILE_NAME, Config, MemberState, Recipient};
-use crate::enclave;
 use crate::error::{Error, Result};
+use crate::hardware::enclave;
 use crate::keystore;
 use crate::ui::Ui;
 

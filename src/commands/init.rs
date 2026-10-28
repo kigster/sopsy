@@ -18,9 +18,10 @@ use crate::cli::{InitArgs, RecipientBreakGlassArgs, RecipientCommand};
 use crate::commands::recipient::system_username;
 use crate::config::{CONFIG_FILE_NAME, Config, Recipient};
 use crate::error::{Error, Result};
+use crate::hardware::enclave;
 use crate::sops::{self, FileType};
 use crate::ui::Ui;
-use crate::{enclave, git, keystore};
+use crate::{git, keystore};
 
 /// Default recipient name when none is supplied. The init-time recipient is
 /// the repository's *admin*: the first entry in `.sopsy.yml`, whose public key
