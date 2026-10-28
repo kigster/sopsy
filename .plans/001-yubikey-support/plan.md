@@ -346,3 +346,8 @@ None open.
 ## Findings
 
 - 2026-10-28: the Intel dev Mac (x86_64, macOS 26.7.1) has an **Apple T2 Security Chip**. `age-plugin-se` requires "macOS 14 (Sonoma) with a Secure Enclave processor" and doesn't mention Apple Silicon. Homebrew has no Intel bottle. A `swift build` of v0.2.1 fails at the manifest (`.macOS(.v26)` can't be resolved with PackageDescription 6.2, CommandLineTools Swift 6.3.3). The next step is to patch the platform declaration (or build with full Xcode) and test `keygen` on T2.
+- 2026-10-28: `age-plugin-yubikey` source (main @ cafbc75, version still 0.5.1):
+  - Output is localized via Fluent (`LANG`/`LC_ALL`), so sopsy runs it under `LC_ALL=C`.
+  - The next release prints `age1tag1…` recipients instead of `age1yubikey1…`. Keys from 0.5.0 and earlier keep `# Legacy recipient: age1yubikey1…`, which sopsy prefers. Encrypting to `age1tag1…` needs a client with native support, or the plugin on `PATH` as `age-plugin-tag`. To verify: whether sops' Go age supports `age1tag`. If it doesn't, `deps`/`doctor` should create or check an `age-plugin-tag` symlink.
+  - From the plugin's own help text: touch `cached` lasts 15 seconds; PIN `once` means "once per session".
+  - `print_identity` also writes `Recipient: …` to stderr when not attached to a TTY. sopsy parses stdout only.
