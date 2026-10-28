@@ -10,6 +10,7 @@
 //! (groups, priority, repo key policy).
 
 pub mod enclave;
+pub mod yubikey;
 
 use std::fmt;
 
@@ -18,6 +19,8 @@ use std::fmt;
 pub enum Store {
     /// Apple Secure Enclave via `age-plugin-se`.
     Enclave,
+    /// YubiKey PIV slot via `age-plugin-yubikey`.
+    YubiKey,
 }
 
 /// How strongly a store protects the private key, used to rank stores.
@@ -35,7 +38,7 @@ impl Store {
     /// The store's protection class.
     pub fn kind(self) -> StoreKind {
         match self {
-            Store::Enclave => StoreKind::Hardware,
+            Store::Enclave | Store::YubiKey => StoreKind::Hardware,
         }
     }
 
@@ -43,6 +46,7 @@ impl Store {
     pub fn as_str(self) -> &'static str {
         match self {
             Store::Enclave => "enclave",
+            Store::YubiKey => "yubikey",
         }
     }
 
@@ -53,6 +57,8 @@ impl Store {
     pub fn from_recipient(public_key: &str) -> Option<Self> {
         if public_key.starts_with(enclave::RECIPIENT_PREFIX) {
             Some(Store::Enclave)
+        } else if yubikey::is_recipient(public_key) {
+            Some(Store::YubiKey)
         } else {
             None
         }
@@ -83,6 +89,7 @@ mod tests {
     #[test]
     fn hardware_stores_rank_above_software() {
         assert_eq!(Store::Enclave.kind(), StoreKind::Hardware);
+        assert_eq!(Store::YubiKey.kind(), StoreKind::Hardware);
         assert!(StoreKind::Hardware < StoreKind::Software);
         assert!(StoreKind::Software < StoreKind::Plaintext);
     }
@@ -90,11 +97,17 @@ mod tests {
     #[test]
     fn store_names_round_trip_through_display() {
         assert_eq!(Store::Enclave.to_string(), "enclave");
+        assert_eq!(Store::YubiKey.to_string(), "yubikey");
     }
 
     #[test]
     fn infers_store_from_recipient_prefix() {
         assert_eq!(Store::from_recipient("age1se1qabc"), Some(Store::Enclave));
+        assert_eq!(
+            Store::from_recipient("age1yubikey1qabc"),
+            Some(Store::YubiKey)
+        );
+        assert_eq!(Store::from_recipient("age1tag1qabc"), Some(Store::YubiKey));
         assert_eq!(Store::from_recipient("age1qportable"), None);
     }
 }
