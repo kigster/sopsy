@@ -20,7 +20,7 @@
 //! `age-plugin-yubikey`) so tests can inject a fake that emits canned output.
 
 use std::ffi::OsString;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 use super::{GeneratedIdentity, Store};
 use crate::error::{Error, Result};
@@ -220,11 +220,12 @@ pub fn list(all: bool) -> Result<Vec<SlotIdentity>> {
 /// Generate a new identity in a free (or the given) slot (`--generate`).
 ///
 /// The plugin itself prompts for the PIN (and to change a default PIN/PUK on
-/// first use) and asks for a touch, so this must run attached to a terminal.
+/// first use) and asks for a touch, so stdin and stderr stay attached to the
+/// user's terminal and only stdout (the identity file) is captured.
 pub fn generate(options: &GenerateOptions, extra_args: &[String]) -> Result<GeneratedIdentity> {
     let mut args = options.to_args()?;
     args.extend(extra_args.iter().cloned());
-    let output = run(&args)?;
+    let output = run_interactive(&args)?;
     single_identity(&String::from_utf8_lossy(&output.stdout))
 }
 
@@ -243,11 +244,7 @@ pub fn identity_for(serial: u32, slot: u8) -> Result<GeneratedIdentity> {
 /// Run the plugin with `args` in the C locale, mapping a non-zero exit to
 /// [`Error::ProcessFailed`].
 fn run(args: &[String]) -> Result<Output> {
-    let output = Command::new(plugin_bin())
-        .args(args)
-        .env("LC_ALL", "C")
-        .env("LANG", "C")
-        .output()?;
+    let output = plugin_command(args).output()?;
     if !output.status.success() {
         return Err(Error::ProcessFailed {
             tool: PLUGIN_BIN.to_string(),
@@ -256,6 +253,31 @@ fn run(args: &[String]) -> Result<Output> {
         });
     }
     Ok(output)
+}
+
+/// Like [`run`], but the plugin keeps the terminal for its PIN and touch
+/// prompts. Its errors go straight to the user, so the error message points there.
+fn run_interactive(args: &[String]) -> Result<Output> {
+    let output = plugin_command(args)
+        .stdin(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .stdout(Stdio::piped())
+        .spawn()?
+        .wait_with_output()?;
+    if !output.status.success() {
+        return Err(Error::ProcessFailed {
+            tool: PLUGIN_BIN.to_string(),
+            code: output.status.code().unwrap_or(-1),
+            message: "see the plugin's output above".to_string(),
+        });
+    }
+    Ok(output)
+}
+
+fn plugin_command(args: &[String]) -> Command {
+    let mut command = Command::new(plugin_bin());
+    command.args(args).env("LC_ALL", "C").env("LANG", "C");
+    command
 }
 
 fn validate_slot(slot: u8) -> Result<u8> {

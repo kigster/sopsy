@@ -154,9 +154,7 @@ fn nonzero_exit_surfaces_stderr() {
     let dir = TempDir::new().unwrap();
     let script = write_fake_plugin(dir.path(), "echo 'no YubiKey found' 1>&2\nexit 2\n");
 
-    let err = with_plugin(&script, || {
-        yubikey::generate(&GenerateOptions::new("x"), &[]).unwrap_err()
-    });
+    let err = with_plugin(&script, || yubikey::list(false).unwrap_err());
 
     match err {
         Error::ProcessFailed {
@@ -167,6 +165,26 @@ fn nonzero_exit_surfaces_stderr() {
             assert_eq!(tool, yubikey::PLUGIN_BIN);
             assert_eq!(code, 2);
             assert_eq!(message, "no YubiKey found");
+        }
+        other => panic!("expected ProcessFailed, got {other:?}"),
+    }
+}
+
+#[test]
+#[serial]
+fn generate_leaves_prompts_on_the_terminal() {
+    let dir = TempDir::new().unwrap();
+    // The plugin's stderr goes to the user's terminal, not into the error.
+    let script = write_fake_plugin(dir.path(), "echo 'PIN prompt' 1>&2\nexit 3\n");
+
+    let err = with_plugin(&script, || {
+        yubikey::generate(&GenerateOptions::new("x"), &[]).unwrap_err()
+    });
+
+    match err {
+        Error::ProcessFailed { code, message, .. } => {
+            assert_eq!(code, 3);
+            assert_eq!(message, "see the plugin's output above");
         }
         other => panic!("expected ProcessFailed, got {other:?}"),
     }
