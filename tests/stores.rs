@@ -255,6 +255,50 @@ fn init_rejects_stores_outside_the_allowed_set() {
 }
 
 #[test]
+fn init_refuses_a_broken_sops_yaml_before_generating_a_key() {
+    let sb = Sandbox::new();
+    std::fs::write(
+        sb.path().join(".sops.yaml"),
+        "creation_rules:\n  - path_regex: '\\.encrypted$'\n    age: 'n'\n",
+    )
+    .unwrap();
+    sb.sopsy()
+        .args(["init", "-s", "file", "--no-emergency-keys"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "lists `n`, which is not an age public key",
+        ));
+    assert!(!sb.keys_file().exists(), "no key may be generated");
+}
+
+#[test]
+fn init_adds_its_key_to_an_existing_sops_yaml() {
+    let sb = Sandbox::new();
+    let other = "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p";
+    std::fs::write(
+        sb.path().join(".sops.yaml"),
+        format!("creation_rules:\n  - path_regex: '\\.encrypted$'\n    age: '{other}'\n"),
+    )
+    .unwrap();
+    sb.sopsy()
+        .args(["init", "-s", "file", "--no-emergency-keys"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Added your key to the existing .sops.yaml",
+        ));
+    let rules = sb.read(".sops.yaml");
+    let config = sb.read(".sopsy.yml");
+    let mine = config
+        .split_whitespace()
+        .find(|w| w.starts_with("age1") && *w != other)
+        .unwrap();
+    assert!(rules.contains(other) && rules.contains(mine), "{rules}");
+    sb.assert_decrypts();
+}
+
+#[test]
 fn init_rejects_a_pasted_non_key() {
     let sb = Sandbox::new();
     sb.sopsy()
