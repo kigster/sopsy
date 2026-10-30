@@ -119,9 +119,18 @@ Any active member checks out your branch and runs `sopsy approve alice`. That ad
 
 Once it's merged, `git pull` and you're in.
 
-> [!NOTE]
->
-> No Apple Silicon / Secure Enclave? You can still participate with a software `age` key (`age-keygen -o ~/.config/sops/age/keys.txt`) and pass that public key to `sopsy join alice --public-key age1…` — you just don't get hardware protection. Point `SOPS_AGE_KEY_FILE` at your key file so `sops` can find it.
+### Choosing where your key lives
+
+`sopsy join` generates your key in the most secure **store** your machine supports, in this order: `enclave` (Apple Silicon), `yubikey` (a plugged-in YubiKey), `keychain` (macOS Keychain or Linux Secret Service), then `file` (plaintext, last resort). Run `sopsy doctor` to see which are available. The repository may allow only some of them (`key_policy.required` in `.sopsy.yml`, set by `sopsy init --require`).
+
+```bash
+sopsy join alice --store yubikey                     # PIN once per session, touch cached 15s
+sopsy join alice --store yubikey --pin-policy always --touch-policy always
+sopsy join alice --store keychain                    # software key, no hardware needed
+SOPSY_PRIVATE_KEY_STORE_PRIORITY=exthardware,software sopsy join alice
+```
+
+With a YubiKey, the plugin asks for its PIN (and to change the factory PIN on first use) and for a touch. An existing sopsy-usable key with the same policies is reused; pass `--new-slot` for a fresh one. `--without-touch-id` drops the touch requirement (YubiKey) or Touch ID (Enclave).
 
 ## Day-to-day workflow
 
