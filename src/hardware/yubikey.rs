@@ -22,7 +22,7 @@
 use std::ffi::OsString;
 use std::process::{Command, Output, Stdio};
 
-use super::{GeneratedIdentity, Store};
+use super::{Availability, GeneratedIdentity, Store};
 use crate::error::{Error, Result};
 
 /// The default name of the external binary this module drives.
@@ -49,7 +49,7 @@ pub fn is_recipient(public_key: &str) -> bool {
 }
 
 /// When the YubiKey asks for its PIN. Fixed at generation time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum PinPolicy {
     /// Every decryption.
     Always,
@@ -60,7 +60,7 @@ pub enum PinPolicy {
 }
 
 /// When the YubiKey requires a physical touch. Fixed at generation time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum TouchPolicy {
     /// Every decryption.
     Always,
@@ -205,6 +205,82 @@ pub fn ensure_available() -> Result<()> {
         "{} (install it with `brew install age-plugin-yubikey`; on Linux also run `pcscd`)",
         bin.to_string_lossy()
     )))
+}
+
+/// Environment variable naming a command whose stdout lists USB devices,
+/// replacing the platform probe (`ioreg` on macOS, sysfs on Linux). For tests.
+pub const USB_LIST_BIN_ENV: &str = "SOPSY_USB_LIST_BIN";
+
+/// Whether the YubiKey store can be used: a PIV-capable YubiKey is plugged in
+/// and `age-plugin-yubikey` is installed.
+pub fn probe() -> Availability {
+    match (device_present(), which::which(plugin_bin()).is_ok()) {
+        (true, true) => Availability::Ready,
+        (true, false) => Availability::MissingTool {
+            install: "brew install age-plugin-yubikey".into(),
+        },
+        (false, _) => Availability::Unavailable {
+            reason: "no YubiKey with PIV (CCID) is plugged in".into(),
+        },
+    }
+}
+
+/// Whether a PIV-capable YubiKey is connected.
+pub fn device_present() -> bool {
+    usb_listing().is_some_and(|listing| listing_has_piv_yubikey(&listing))
+}
+
+fn usb_listing() -> Option<String> {
+    if let Some(bin) = std::env::var_os(USB_LIST_BIN_ENV) {
+        return capture(Command::new(bin));
+    }
+    if cfg!(target_os = "macos") {
+        let mut ioreg = Command::new("ioreg");
+        ioreg.args(["-p", "IOUSB", "-w0"]);
+        return capture(ioreg);
+    }
+    let entries = std::fs::read_dir("/sys/bus/usb/devices").ok()?;
+    Some(
+        entries
+            .flatten()
+            .filter_map(|e| std::fs::read_to_string(e.path().join("product")).ok())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+fn capture(mut command: Command) -> Option<String> {
+    let output = command.stderr(Stdio::null()).output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// A YubiKey exposes PIV through its CCID interface, so the product name must
+/// mention both (`YubiKey OTP+FIDO+CCID`). FIDO-only Security Keys can't hold
+/// an age key.
+fn listing_has_piv_yubikey(listing: &str) -> bool {
+    listing.lines().any(|line| {
+        let line = line.to_ascii_lowercase();
+        line.contains("yubikey") && line.contains("ccid")
+    })
+}
+
+/// Pick an existing identity to reuse instead of consuming a new slot: the
+/// requested slot if there is one, else the first key whose PIN and touch
+/// policies match. Restricted to the requested serial when given.
+pub fn find_reusable<'a>(
+    identities: &'a [SlotIdentity],
+    options: &GenerateOptions,
+) -> Option<&'a SlotIdentity> {
+    identities
+        .iter()
+        .filter(|id| options.serial.is_none_or(|s| s == id.serial))
+        .find(|id| match options.slot {
+            Some(slot) => id.slot == slot,
+            None => id.matches_policies(options.pin_policy, options.touch_policy),
+        })
 }
 
 /// List the age identities on every connected YubiKey (`--list`).
@@ -580,6 +656,38 @@ age1tag1qsecond
         assert!(is_recipient("age1tag1qabc"));
         assert!(!is_recipient("age1se1qabc"));
         assert!(!is_recipient("age1qabc"));
+    }
+
+    #[test]
+    fn detects_piv_capable_yubikeys_only() {
+        let ioreg = "+-o Root\n  +-o YubiKey OTP+FIDO+CCID@20130000  <class IOUSBHostDevice>\n";
+        assert!(listing_has_piv_yubikey(ioreg));
+        assert!(listing_has_piv_yubikey("YubiKey CCID\n"));
+        assert!(!listing_has_piv_yubikey(
+            "Security Key by Yubico\nYubiKey OTP+FIDO\n"
+        ));
+        assert!(!listing_has_piv_yubikey(""));
+    }
+
+    #[test]
+    fn reuses_requested_slot_or_matching_policies() {
+        let ids = parse_blocks(LIST_TWO);
+        let mut opts = GenerateOptions::new("x");
+        opts.pin_policy = PinPolicy::Always;
+        opts.touch_policy = TouchPolicy::Always;
+        assert_eq!(find_reusable(&ids, &opts).map(|i| i.slot), Some(1));
+
+        opts.serial = Some(87654321);
+        assert_eq!(
+            find_reusable(&ids, &opts),
+            None,
+            "policies differ on that key"
+        );
+
+        opts.slot = Some(2);
+        assert_eq!(find_reusable(&ids, &opts).map(|i| i.serial), Some(87654321));
+
+        assert_eq!(find_reusable(&ids, &GenerateOptions::new("x")), None);
     }
 
     #[test]

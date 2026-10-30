@@ -98,22 +98,62 @@ pub fn store_identity(label: &str, public_key: &str, identity: &str) -> Result<P
     Ok(path)
 }
 
-/// Point `cmd` (a `sops` invocation) at the local [`keys_file`] so it can find
-/// the Secure Enclave identity, unless the user already configured one.
-///
-/// Setting `SOPS_AGE_KEY_FILE` explicitly removes any ambiguity about the
-/// platform default path across `sops`/`age` versions. We never override an
-/// identity the user supplied via `SOPS_AGE_KEY_FILE`/`SOPS_AGE_KEY` (e.g. a
-/// break-glass key restored for recovery).
-pub fn configure_sops_env(cmd: &mut Command) {
-    if std::env::var_os(SOPS_AGE_KEY_FILE_ENV).is_some()
-        || std::env::var_os(SOPS_AGE_KEY_ENV).is_some()
+/// Comment marker recording that a recipient's secret lives in the OS keyring.
+const KEYCHAIN_MARKER: &str = "# sopsy-keychain: ";
+
+/// Record in the [`keys_file`] that `public_key`'s secret lives in the OS
+/// keyring, so [`configure_sops_env`] knows to fetch it. Only a comment is
+/// written; `sops` ignores it. Idempotent.
+pub fn register_keychain_key(label: &str, public_key: &str) -> Result<PathBuf> {
+    let path = keys_file();
+    if keychain_keys_in(&std::fs::read_to_string(&path).unwrap_or_default())
+        .iter()
+        .any(|k| k == public_key)
     {
+        return Ok(path);
+    }
+    store_identity(label, public_key, &format!("{KEYCHAIN_MARKER}{public_key}"))
+}
+
+/// Public keys whose secrets the keys file says are in the OS keyring.
+fn keychain_keys_in(contents: &str) -> Vec<String> {
+    contents
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix(KEYCHAIN_MARKER))
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty())
+        .collect()
+}
+
+/// Point `cmd` (a `sops` invocation) at the local identities, unless the user
+/// already supplied a literal key.
+///
+/// - `SOPS_AGE_KEY_FILE` is set to the [`keys_file`] (hardware handles and
+///   `file`-store keys), unless the user set it, which removes any ambiguity
+///   about the platform default path across `sops`/`age` versions.
+/// - Keys kept in the OS keyring are read and handed to this child process
+///   only, via `SOPS_AGE_KEY`; `sops` merges them with the key file.
+///
+/// A user-supplied `SOPS_AGE_KEY` (e.g. a restored break-glass key) is never
+/// touched.
+pub fn configure_sops_env(cmd: &mut Command) {
+    if std::env::var_os(SOPS_AGE_KEY_ENV).is_some() {
         return;
     }
     let path = keys_file();
-    if path.exists() {
-        cmd.env(SOPS_AGE_KEY_FILE_ENV, path);
+    if !path.exists() {
+        return;
+    }
+    if std::env::var_os(SOPS_AGE_KEY_FILE_ENV).is_none() {
+        cmd.env(SOPS_AGE_KEY_FILE_ENV, &path);
+    }
+    let secrets: Vec<String> =
+        keychain_keys_in(&std::fs::read_to_string(&path).unwrap_or_default())
+            .iter()
+            .filter_map(|pk| crate::hardware::keychain::read(pk).ok().flatten())
+            .collect();
+    if !secrets.is_empty() {
+        cmd.env(SOPS_AGE_KEY_ENV, secrets.join("\n"));
     }
 }
 
@@ -151,6 +191,13 @@ mod tests {
             Some(v) => unsafe { std::env::set_var(SOPS_AGE_KEY_FILE_ENV, v) },
             None => unsafe { std::env::remove_var(SOPS_AGE_KEY_FILE_ENV) },
         }
+    }
+
+    #[test]
+    fn keychain_markers_are_parsed_from_comments() {
+        let contents =
+            "# sopsy: kig\n# sopsy-keychain: age1abc\nAGE-PLUGIN-SE-1X\n#sopsy-keychain: nope\n";
+        assert_eq!(keychain_keys_in(contents), ["age1abc"]);
     }
 
     /// `store_identity` writes the handle and is idempotent.
