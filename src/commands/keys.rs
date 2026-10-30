@@ -51,6 +51,7 @@ pub(crate) fn generate(
         yubikey_opts.touch_policy = touch;
     }
     let mut new_slot = key.new_slot;
+    let mut pin_changed = false;
     if store == Store::YubiKey {
         if yubikey_opts.serial.is_none() {
             yubikey_opts.serial = choose_yubikey(ui)?;
@@ -62,7 +63,7 @@ pub(crate) fn generate(
             }
         }
         if new_slot && ui.is_interactive() {
-            offer_separate_puk(ui, yubikey_opts.serial)?;
+            pin_changed = offer_separate_puk(ui, yubikey_opts.serial)?;
         }
     }
     let options = KeyOptions {
@@ -76,8 +77,17 @@ pub(crate) fn generate(
         // The YubiKey plugin prompts for the PIN and a touch on the terminal,
         // so it must not run under a spinner.
         Store::YubiKey => {
-            for line in YUBIKEY_PROMPTS {
-                ui.info(line);
+            // Reusing a chosen slot only reads its stub: no PIN, no touch.
+            // After sopsy changed the PIN and PUK, the factory-settings part is moot.
+            if options.yubikey.slot.is_none() {
+                let shown = if pin_changed {
+                    2
+                } else {
+                    YUBIKEY_PROMPTS.len()
+                };
+                for line in &YUBIKEY_PROMPTS[..shown] {
+                    ui.info(line);
+                }
             }
             hardware::generate(store, &options, extra_args)?
         }
@@ -177,7 +187,8 @@ fn choose_yubikey(ui: &Ui) -> Result<Option<u32>> {
 /// The plugin sets a factory-default PUK to the new PIN. Offer to give the
 /// PUK its own value first, with `ykman`; the PIN must change too, or the
 /// plugin would still see the factory PIN and overwrite the PUK again.
-fn offer_separate_puk(ui: &Ui, serial: Option<u32>) -> Result<()> {
+/// Returns whether the PIN and PUK were changed.
+fn offer_separate_puk(ui: &Ui, serial: Option<u32>) -> Result<bool> {
     const SEPARATE: &str = "Yes, set PUK separately.";
     const SAME: &str = "No, it's ok to keep them the same, just not the factory value.";
     let picked = ui.select(
@@ -187,7 +198,7 @@ fn offer_separate_puk(ui: &Ui, serial: Option<u32>) -> Result<()> {
         vec![SEPARATE.into(), SAME.into()],
     )?;
     if picked != SEPARATE {
-        return Ok(());
+        return Ok(false);
     }
     if !yubikey::ykman_available() {
         ui.warn("Setting the PUK separately needs ykman (YubiKey Manager): brew install ykman");
@@ -196,7 +207,7 @@ fn offer_separate_puk(ui: &Ui, serial: Option<u32>) -> Result<()> {
             "--yubikey-serial",
             false,
         )? {
-            return Ok(());
+            return Ok(false);
         }
         return Err(Error::Validation(
             "install ykman (`brew install ykman`) and run this again".into(),
@@ -208,7 +219,7 @@ fn offer_separate_puk(ui: &Ui, serial: Option<u32>) -> Result<()> {
     ui.info("Now the PIN: the current one (factory: 123456), then the new one twice (6 to 8 characters).");
     yubikey::ykman_change(serial, yubikey::Credential::Pin)?;
     ui.success("PUK and PIN changed; the plugin will ask only for your new PIN.");
-    Ok(())
+    Ok(true)
 }
 
 /// Offer the age keys already on the YubiKey, matching policies first.
