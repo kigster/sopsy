@@ -19,6 +19,7 @@
 //! environment variable is set, or when stdout is not a TTY.
 
 use std::io::{IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressStyle};
@@ -29,6 +30,21 @@ use owo_colors::{OwoColorize, Style};
 use crate::error::{Error, Result};
 
 mod checklist;
+
+/// Whether the last line printed is blank, so a prompt doesn't add a second.
+static AT_BLANK_LINE: AtomicBool = AtomicBool::new(false);
+
+/// `println!` that keeps [`AT_BLANK_LINE`] up to date.
+macro_rules! out {
+    () => {{
+        println!();
+        AT_BLANK_LINE.store(true, Ordering::Relaxed);
+    }};
+    ($($arg:tt)*) => {{
+        println!($($arg)*);
+        AT_BLANK_LINE.store(false, Ordering::Relaxed);
+    }};
+}
 
 /// Presentation handle threaded through commands.
 ///
@@ -136,7 +152,7 @@ impl Ui {
 
     /// Print a green `✔` success line.
     pub fn success(&self, msg: impl AsRef<str>) {
-        println!(
+        out!(
             "{} {}",
             self.paint("✔", Style::new().green().bold()),
             msg.as_ref()
@@ -145,7 +161,7 @@ impl Ui {
 
     /// Print a red `✗` failure line.
     pub fn failure(&self, msg: impl AsRef<str>) {
-        println!(
+        out!(
             "{} {}",
             self.paint("✗", Style::new().red().bold()),
             msg.as_ref()
@@ -154,7 +170,7 @@ impl Ui {
 
     /// Print a yellow `⚠` warning line.
     pub fn warn(&self, msg: impl AsRef<str>) {
-        println!(
+        out!(
             "{} {}",
             self.paint("⚠", Style::new().yellow().bold()),
             msg.as_ref()
@@ -163,7 +179,7 @@ impl Ui {
 
     /// Print a blue `ℹ` informational line.
     pub fn info(&self, msg: impl AsRef<str>) {
-        println!(
+        out!(
             "{} {}",
             self.paint("ℹ", Style::new().blue().bold()),
             msg.as_ref()
@@ -173,7 +189,7 @@ impl Ui {
     /// Print a dimmed line, only when verbose mode is enabled.
     pub fn debug(&self, msg: impl AsRef<str>) {
         if self.verbose {
-            println!("{}", self.paint(msg.as_ref(), Style::new().dimmed()));
+            out!("{}", self.paint(msg.as_ref(), Style::new().dimmed()));
         }
     }
 
@@ -183,7 +199,7 @@ impl Ui {
     /// selected and run as-is. Used to present the `git`/`gh` commands the
     /// `--git` flow suggests.
     pub fn command(&self, cmd: impl AsRef<str>) {
-        println!("  {}", self.paint(cmd.as_ref(), Style::new().bold().cyan()));
+        out!("  {}", self.paint(cmd.as_ref(), Style::new().bold().cyan()));
     }
 
     // ----- Full-width banner boxes -----------------------------------------
@@ -217,10 +233,10 @@ impl Ui {
     fn banner(&self, glyph: &str, msg: &str, style: Style) {
         let width = term_width().max(20);
         let lines = wrap_text(msg, width - 6);
-        println!();
+        out!();
         if self.color {
             let pad = " ".repeat(width);
-            println!("{}", self.paint(&pad, style));
+            out!("{}", self.paint(&pad, style));
             for (i, line) in lines.iter().enumerate() {
                 let lead = if i == 0 {
                     format!("  {glyph} ")
@@ -229,11 +245,11 @@ impl Ui {
                 };
                 let used = lead.chars().count() + line.chars().count();
                 let text = format!("{lead}{line}{}", " ".repeat(width.saturating_sub(used)));
-                println!("{}", self.paint(&text, style));
+                out!("{}", self.paint(&text, style));
             }
-            println!("{}", self.paint(&pad, style));
+            out!("{}", self.paint(&pad, style));
         } else {
-            println!("┌{}┐", "─".repeat(width - 2));
+            out!("┌{}┐", "─".repeat(width - 2));
             for (i, line) in lines.iter().enumerate() {
                 let lead = if i == 0 {
                     format!("{glyph} ")
@@ -241,11 +257,11 @@ impl Ui {
                     "  ".into()
                 };
                 let used = 4 + lead.chars().count() + line.chars().count();
-                println!("│ {lead}{line}{} │", " ".repeat(width.saturating_sub(used)));
+                out!("│ {lead}{line}{} │", " ".repeat(width.saturating_sub(used)));
             }
-            println!("└{}┘", "─".repeat(width - 2));
+            out!("└{}┘", "─".repeat(width - 2));
         }
-        println!();
+        out!();
     }
 
     /// Print a section header — bold white text on a yellow band padded to
@@ -253,16 +269,24 @@ impl Ui {
     /// below. Longer titles are not truncated — the band simply extends.
     /// Without color the title is printed plainly (no invisible padding for
     /// logs/pipes).
+    /// Print an empty line.
+    pub fn blank(&self) {
+        out!();
+    }
+
     pub fn header(&self, title: impl AsRef<str>) {
         let title = title.as_ref();
-        println!();
-        println!();
+        // Two blank lines above the band, counting one a prompt already left.
+        if !AT_BLANK_LINE.load(Ordering::Relaxed) {
+            out!();
+        }
+        out!();
         if self.color {
             // HEADER_WIDTH columns total: two leading spaces (title starts on
             // column 3) + title + padding out to the edge.
             let pad = Self::HEADER_WIDTH.saturating_sub(title.chars().count() + 2);
             let band = format!("  {title}{}", " ".repeat(pad));
-            println!(
+            out!(
                 "{}",
                 // Two separate SGR sequences with the background opened FIRST:
                 // a single combined `38;2;R;G;B;43;1` run-on can trip up SGR
@@ -276,9 +300,9 @@ impl Ui {
                 )
             );
         } else {
-            println!("{title}");
+            out!("{title}");
         }
-        println!();
+        out!();
     }
 
     /// Print a line whose characters cycle through a rainbow of colors.
@@ -289,7 +313,7 @@ impl Ui {
     pub fn animated_line(&self, text: impl AsRef<str>) {
         let text = text.as_ref();
         if !self.color {
-            println!("{text}");
+            out!("{text}");
             return;
         }
         // A small palette cycled per-character for a playful gradient effect.
@@ -306,7 +330,7 @@ impl Ui {
             let style = palette[i % palette.len()];
             out.push_str(&ch.to_string().style(style).to_string());
         }
-        println!("{out}");
+        out!("{out}");
     }
 
     /// Create an `indicatif` spinner with a playful message.
@@ -356,12 +380,14 @@ impl Ui {
                 flag: "an interactive terminal (this step cannot be scripted)".to_string(),
             });
         }
-        println!();
+        if !AT_BLANK_LINE.load(Ordering::Relaxed) {
+            out!();
+        }
         print!("{} ", self.paint(prompt, Style::new().green()));
         let _ = std::io::stdout().flush();
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
-        println!();
+        out!();
         Ok(())
     }
 
@@ -446,10 +472,14 @@ impl Ui {
     }
 
     /// Run a prompt with a blank line before the question and after the answer.
+    /// Consecutive prompts share one blank line.
     fn spaced<T>(&self, prompt: impl FnOnce() -> Result<T>) -> Result<T> {
-        eprintln!();
+        if !AT_BLANK_LINE.load(Ordering::Relaxed) {
+            eprintln!();
+        }
         let answer = prompt()?;
         eprintln!();
+        AT_BLANK_LINE.store(true, Ordering::Relaxed);
         Ok(answer)
     }
 
