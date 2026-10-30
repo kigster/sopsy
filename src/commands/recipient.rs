@@ -23,9 +23,10 @@ use crate::cli::{
     RecipientAddArgs, RecipientBreakGlassArgs, RecipientCiArgs, RecipientCommand,
     RecipientKeygenArgs, RecipientRemoveArgs,
 };
+use crate::commands::keys;
 use crate::config::{CONFIG_FILE_NAME, Config, Recipient};
 use crate::error::{Error, Result};
-use crate::hardware::enclave;
+use crate::hardware::StoreKind;
 use crate::ui::Ui;
 use crate::{age, git, sops};
 
@@ -157,6 +158,18 @@ fn add(ui: &Ui, args: &RecipientAddArgs) -> Result<()> {
         ));
     }
 
+    // Member keys must come from a store the repository allows; break-glass
+    // keys are portable by design and exempt.
+    let store = if args.break_glass {
+        None
+    } else {
+        keys::check_allowed(
+            config.allowed_stores()?.as_deref(),
+            &public_key,
+            args.store.and_then(|s| s.store()),
+        )?
+    };
+
     // Reject duplicates by name or by key.
     if config.recipient(&name).is_some() {
         return Err(Error::Validation(format!(
@@ -181,7 +194,7 @@ fn add(ui: &Ui, args: &RecipientAddArgs) -> Result<()> {
     // Append to `.sopsy.yml`.
     let recipient = Recipient {
         break_glass: args.break_glass,
-        ..Recipient::new(&name, &public_key)
+        ..Recipient::new(&name, &public_key).with_store(store)
     };
     config.recipients.push(recipient);
     config.save_to_dir(&repo)?;
@@ -392,10 +405,11 @@ fn list(ui: &Ui) -> Result<()> {
         "NAME",
         "USERNAME",
         "PUBLIC KEY",
+        "STORE",
         "BREAK-GLASS",
         "APPROVED BY",
     ];
-    let rows: Vec<[String; 5]> = config
+    let rows: Vec<[String; 6]> = config
         .recipients
         .iter()
         .map(|r| {
@@ -403,6 +417,9 @@ fn list(ui: &Ui) -> Result<()> {
                 truncate(&r.name, NAME_COL_MAX),
                 truncate(r.username.as_deref().unwrap_or(""), USERNAME_COL_MAX),
                 truncate(&r.public_key, KEY_COL_MAX),
+                r.effective_store()
+                    .map(|s| format!("{s} ({})", s.kind().as_str()))
+                    .unwrap_or_default(),
                 if r.break_glass { "★ yes" } else { "" }.to_string(),
                 approved_cell(r),
             ]
@@ -418,13 +435,13 @@ fn list(ui: &Ui) -> Result<()> {
         }
     }
     // The last column never needs trailing padding.
-    let pad = |cells: [&str; 5]| -> Vec<String> {
+    let pad = |cells: [&str; 6]| -> Vec<String> {
         let mut out: Vec<String> = cells
             .iter()
             .zip(widths.iter())
             .map(|(cell, w)| format!("{cell:<w$}"))
             .collect();
-        out[4] = cells[4].to_string();
+        out[5] = cells[5].to_string();
         out
     };
 
@@ -436,15 +453,16 @@ fn list(ui: &Ui) -> Result<()> {
     }
 
     for row in &rows {
-        let cells = pad([&row[0], &row[1], &row[2], &row[3], &row[4]]);
+        let cells = pad([&row[0], &row[1], &row[2], &row[3], &row[4], &row[5]]);
         if ui.color_enabled() {
             println!(
-                "{}  {}  {}  {}  {}",
+                "{}  {}  {}  {}  {}  {}",
                 cells[0].green().bold(),
                 cells[1].cyan(),
                 cells[2].dimmed(),
-                cells[3].yellow().bold(),
-                cells[4]
+                cells[3].magenta(),
+                cells[4].yellow().bold(),
+                cells[5]
             );
         } else {
             println!("{}", cells.join("  ").trim_end());
@@ -484,28 +502,45 @@ fn date_only(rfc3339: &str) -> &str {
     rfc3339.split('T').next().unwrap_or(rfc3339)
 }
 
-/// Generate a fresh Secure Enclave identity and print it.
+/// Generate a fresh identity and print it.
 ///
-/// This is a stateless helper: it does **not** touch `.sopsy.yml` or
+/// Stateless with respect to the repo: it does **not** touch `.sopsy.yml` or
 /// `.sops.yaml`. Use the printed public key with `sopsy recipient add` to
-/// register it. Trailing args after `--` are forwarded to `age-plugin-se keygen`.
+/// register it. Hardware stores print their (non-secret) identity handle;
+/// `keychain` and `file` keys are saved locally instead, since printing them
+/// would put a secret on the terminal. When run inside a sopsy repository, its
+/// allowed key stores apply. Trailing args after `--` go to the store's plugin.
 fn keygen(ui: &Ui, args: &RecipientKeygenArgs) -> Result<()> {
     ui.header("sopsy recipient keygen");
 
-    enclave::ensure_available()?;
-    let spinner = ui.spinner("Generating Secure Enclave identity (Touch ID may prompt)…");
-    let identity = enclave::generate_identity_with_args(&args.age_args);
-    spinner.finish_and_clear();
-    let identity = identity?;
-
-    ui.success("Generated a Secure Enclave-backed identity.");
-    ui.info("The private key stays in the Secure Enclave and never leaves this device.");
+    let allowed = current_repo_root()
+        .ok()
+        .and_then(|root| Config::load_from_dir(root).ok())
+        .map(|config| config.allowed_stores())
+        .transpose()?
+        .flatten();
+    let label = system_username().unwrap_or_else(|| "sopsy".to_string());
+    let identity = keys::generate(
+        ui,
+        &args.key,
+        &label,
+        allowed.as_deref(),
+        false,
+        &args.age_args,
+        false,
+    )?;
 
     ui.header("Public key (share this; register with `sopsy recipient add`)");
     ui.animated_line(&identity.public_key);
 
-    ui.header("Identity reference (store this where you keep your age identities)");
-    println!("{}", identity.identity);
+    if identity.store.kind() == StoreKind::Hardware {
+        ui.header("Identity reference (store this where you keep your age identities)");
+        println!("{}", identity.identity);
+    } else {
+        // A software key is saved locally; printing it would leak the secret.
+        let location = crate::hardware::persist(&label, &identity)?;
+        ui.success(format!("Stored your identity in {location}."));
+    }
 
     Ok(())
 }

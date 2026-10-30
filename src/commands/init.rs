@@ -15,10 +15,12 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::cli::{InitArgs, RecipientBreakGlassArgs, RecipientCommand};
+use crate::commands::keys;
 use crate::commands::recipient::system_username;
+use crate::config::KeyPolicy;
 use crate::config::{CONFIG_FILE_NAME, Config, Recipient};
 use crate::error::{Error, Result};
-use crate::hardware::enclave;
+use crate::hardware::{self, Availability, Store};
 use crate::sops::{self, FileType};
 use crate::ui::Ui;
 use crate::{git, keystore};
@@ -55,8 +57,15 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
     sops::ensure_available()?;
     ui.success("Found `sops`.");
 
-    // 3. Acquire the recipient (existing key or generated Secure Enclave one).
-    let recipient = acquire_recipient(ui, args)?;
+    // 3. Decide which key stores members may use, then acquire the admin's
+    //    recipient (an existing key, or one generated in an allowed store).
+    let required = resolve_required(ui, args)?;
+    let allowed = if required.is_empty() {
+        None
+    } else {
+        Some(hardware::expand_selectors(&required)?)
+    };
+    let recipient = acquire_recipient(ui, args, allowed.as_deref())?;
 
     // 4. Print the public recipient prominently.
     ui.header("Your repository recipient");
@@ -140,6 +149,7 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
     let config = Config {
         recipients: vec![recipient.clone()],
         sops_version: detect_sops_version(),
+        key_policy: (!required.is_empty()).then_some(KeyPolicy { required }),
         ..Config::default()
     };
     let config_path = config.save_to_dir(&root)?;
@@ -259,25 +269,75 @@ fn guard_repo_root(ui: &Ui, cwd: &Path, root: &Path, args: &InitArgs) -> Result<
     Ok(())
 }
 
-fn acquire_recipient(ui: &Ui, args: &InitArgs) -> Result<Recipient> {
+/// The repository's allowed key stores: `--require`, else (interactively) a
+/// multi-select over every store. Empty means unrestricted.
+fn resolve_required(ui: &Ui, args: &InitArgs) -> Result<Vec<String>> {
+    if !args.require.is_empty() {
+        // Validate now so a typo fails before anything is written.
+        hardware::expand_selectors(&args.require)?;
+        return Ok(args
+            .require
+            .iter()
+            .map(|r| r.trim().to_ascii_lowercase())
+            .filter(|r| !r.is_empty())
+            .collect());
+    }
+    if !ui.is_interactive() {
+        return Ok(Vec::new());
+    }
+    let options: Vec<String> = Store::ALL
+        .iter()
+        .map(|s| {
+            let here = match s.probe() {
+                Availability::Ready => "available here".to_string(),
+                Availability::MissingTool { install } => format!("needs `{install}`"),
+                Availability::Unavailable { reason } => format!("not here: {reason}"),
+            };
+            format!("{s} — {} ({}; {here})", s.display_name(), s.kind().as_str())
+        })
+        .collect();
+    let picked = ui.multi_select_all(
+        "Which key stores may members of this repository use? (space toggles)",
+        "--require",
+        options,
+    )?;
+    let picked: Vec<String> = picked
+        .iter()
+        .filter_map(|p| p.split_whitespace().next().map(str::to_string))
+        .collect();
+    if picked.is_empty() {
+        return Err(Error::Validation(
+            "select at least one key store (or pass --require)".into(),
+        ));
+    }
+    // Everything selected is the same as no restriction; don't record it.
+    Ok(if picked.len() == Store::ALL.len() {
+        Vec::new()
+    } else {
+        picked
+    })
+}
+
+fn acquire_recipient(ui: &Ui, args: &InitArgs, allowed: Option<&[Store]>) -> Result<Recipient> {
     let name = args
         .recipient_name
         .clone()
         .unwrap_or_else(|| DEFAULT_RECIPIENT_NAME.to_string());
 
     if let Some(public_key) = args.public_key.as_deref() {
+        let public_key = keys::validate_public_key(public_key)?;
+        let store = keys::check_allowed(allowed, &public_key, args.key.store.store())?;
         ui.success(format!("Using supplied age public key for `{name}`."));
-        return Ok(recipient_with_optional_username(
-            name,
-            public_key,
-            args.username.clone(),
-        ));
+        return Ok(
+            recipient_with_optional_username(name, public_key, args.username.clone())
+                .with_store(store),
+        );
     }
 
     if args.no_generate {
         return Err(Error::Validation(
             "no recipient key available: pass --public-key <age1...>, \
-             or drop --no-generate to create a Secure Enclave identity"
+             or drop --no-generate to create an identity"
                 .to_string(),
         ));
     }
@@ -285,36 +345,26 @@ fn acquire_recipient(ui: &Ui, args: &InitArgs) -> Result<Recipient> {
     // Interactive escape hatch: let the user paste an existing key.
     if ui.is_interactive() {
         let generate = ui.confirm(
-            "Generate a new Secure Enclave-backed identity? (No = paste an existing public key)",
+            "Generate a new identity for this repository? (No = paste an existing public key)",
             "--public-key",
             true,
         )?;
         if !generate {
-            let public_key = ui.text("Paste your age public key (age1...):", "--public-key")?;
-            return Ok(recipient_with_optional_username(
-                name,
-                public_key,
-                args.username.clone(),
-            ));
+            let public_key = keys::validate_public_key(
+                &ui.text("Paste your age public key (age1...):", "--public-key")?,
+            )?;
+            let store = keys::check_allowed(allowed, &public_key, args.key.store.store())?;
+            return Ok(
+                recipient_with_optional_username(name, public_key, args.username.clone())
+                    .with_store(store),
+            );
         }
     }
 
-    // Generate a Secure Enclave-backed identity.
-    enclave::ensure_available()?;
-    let spinner = ui.spinner("Generating Secure Enclave identity (Touch ID may prompt)…");
-    let identity = enclave::generate_identity(None);
-    spinner.finish_and_clear();
-    let identity = identity?;
-    ui.success("Created a Secure Enclave-backed identity.");
-    ui.info("The private key stays in the Secure Enclave and never leaves this device.");
-
-    // Persist the identity handle so `sops` can find it to decrypt/re-key. The
-    // handle is not secret (it only works on this device, behind Touch ID), but
-    // without it `sops updatekeys` fails with "identity did not match any of the
-    // recipients" — which is exactly what breaks the break-glass step below.
-    let keys_path = keystore::store_identity(&name, &identity.public_key, &identity.identity)?;
-    ui.success(format!("Stored your identity in {}.", keys_path.display()));
-    ui.info("It is safe on disk: it only works on this device, behind Touch ID.");
+    // Generate the identity and persist its local half so `sops` can find it
+    // to decrypt/re-key; without it `sops updatekeys` fails with "identity did
+    // not match any of the recipients", which breaks the break-glass step below.
+    let identity = keys::generate(ui, &args.key, &name, allowed, false, &[], true)?;
 
     // Make it obvious a key was generated: show the public key, then pause so
     // the user can take it in before the bootstrap output scrolls on.
@@ -324,7 +374,7 @@ fn acquire_recipient(ui: &Ui, args: &InitArgs) -> Result<Recipient> {
 
     // Record who generated this key (default to the system user at the prompt).
     let username = resolve_username(ui, args)?;
-    Ok(make_recipient(name, identity.public_key, username))
+    Ok(make_recipient(name, identity.public_key, username).with_store(Some(identity.store)))
 }
 
 /// Build a [`Recipient`], attaching `username` only when it is `Some`.
