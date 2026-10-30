@@ -891,7 +891,7 @@ pub(crate) fn run_updatekeys(ui: &Ui, repo: &Path, skip: bool) -> Result<()> {
         ui.info("no encrypted files found to re-encrypt");
         return Ok(());
     }
-    ui.info("re-encrypting secrets for the updated recipient set (Touch ID may prompt)…");
+    ui.info("re-encrypting secrets for the updated recipient set (your key may ask for a touch or PIN)…");
     for file in &files {
         updatekeys_file(file)?;
     }
