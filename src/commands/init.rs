@@ -168,10 +168,10 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
     //     is the moment the owner is most likely to actually do it. Run with
     //     staging suppressed so init emits a single --git summary at the end
     //     rather than the ceremony advising separately (step 12).
-    maybe_setup_break_glass(&ui.without_git(), &root, args)?;
+    let has_break_glass = maybe_setup_break_glass(&ui.without_git(), &root, args)?;
 
     // 11. Final, colorful health summary.
-    print_summary(ui, &recipient);
+    print_summary(ui, &recipient, has_break_glass);
 
     // 12. With --git, stage exactly the files init creates and print commit/PR
     //     steps. This is the whole set (the break-glass ceremony above ran with
@@ -197,7 +197,7 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
 /// prompt in interactive mode and skip (with guidance) when non-interactive.
 /// Delegates to `sopsy recipient break-glass` so the ceremony (write → copy to
 /// 1Password → delete → register + re-key) is identical to the standalone path.
-fn maybe_setup_break_glass(ui: &Ui, root: &Path, args: &InitArgs) -> Result<()> {
+fn maybe_setup_break_glass(ui: &Ui, root: &Path, args: &InitArgs) -> Result<bool> {
     let want = if args.no_break_glass {
         false
     } else if args.break_glass {
@@ -205,7 +205,7 @@ fn maybe_setup_break_glass(ui: &Ui, root: &Path, args: &InitArgs) -> Result<()> 
     } else if ui.is_interactive() {
         ui.confirm(
             "Set up a break-glass emergency key now? (strongly recommended)",
-            "--break-glass",
+            "--generate-emergency-keys",
             true,
         )?
     } else {
@@ -215,7 +215,7 @@ fn maybe_setup_break_glass(ui: &Ui, root: &Path, args: &InitArgs) -> Result<()> 
     if !want {
         ui.warn("No break-glass key yet. Create one ASAP with:");
         ui.warn("    sopsy recipient break-glass -o break-glass");
-        return Ok(());
+        return Ok(false);
     }
 
     let break_glass_args = RecipientBreakGlassArgs {
@@ -224,7 +224,8 @@ fn maybe_setup_break_glass(ui: &Ui, root: &Path, args: &InitArgs) -> Result<()> 
         force: false,
         no_updatekeys: false,
     };
-    crate::commands::recipient::run(ui, &RecipientCommand::BreakGlass(break_glass_args))
+    crate::commands::recipient::run(ui, &RecipientCommand::BreakGlass(break_glass_args))?;
+    Ok(true)
 }
 
 /// Determine the age recipient for this repository.
@@ -397,7 +398,7 @@ fn acquire_recipient(ui: &Ui, args: &InitArgs, allowed: Option<&[Store]>) -> Res
 
     // Make it obvious a key was generated: show the public key, then pause so
     // the user can take it in before the bootstrap output scrolls on.
-    ui.header("Your newly generated public key");
+    ui.header("Your public key");
     ui.animated_line(&identity.public_key);
     ui.pause(Duration::from_secs(2));
 
@@ -496,7 +497,7 @@ fn detect_sops_version() -> Option<String> {
 }
 
 /// Print the closing health summary and the break-glass reminder.
-fn print_summary(ui: &Ui, recipient: &Recipient) {
+fn print_summary(ui: &Ui, recipient: &Recipient, has_break_glass: bool) {
     ui.banner_success("All set — your repository is ready");
     ui.success("sops configured (.sops.yaml)");
     ui.success("plaintext .env ignored by git");
@@ -505,12 +506,16 @@ fn print_summary(ui: &Ui, recipient: &Recipient) {
         "recipient `{}` recorded in .sopsy.yml",
         recipient.name
     ));
-    ui.banner_warn(
-        "IMPORTANT — Break-glass: create a separate emergency age key pair and store it \
-         offline (e.g. in 1Password), shared with only a few admins, then register it via \
-         `sopsy recipient add break-glass --break-glass`. Without it, losing your Secure \
-         Enclave device means losing access to every secret.",
-    );
+    if has_break_glass {
+        ui.blank();
+    } else {
+        ui.banner_warn(
+            "IMPORTANT — Break-glass: create a separate emergency age key and store it offline \
+             (e.g. in 1Password), shared with only a few admins: `sopsy recipient break-glass \
+             -o break-glass`. Without it, losing the device or keychain that holds your key \
+             means losing access to every secret.",
+        );
+    }
     ui.animated_line("Happy encrypting!");
 }
 
