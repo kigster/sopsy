@@ -1,6 +1,6 @@
 //! Helpers for generating **portable** age key pairs via external `age-keygen`.
 //!
-//! Unlike Secure Enclave identities (see [`crate::enclave`]), these are ordinary
+//! Unlike Secure Enclave identities (see [`crate::hardware::enclave`]), these are ordinary
 //! X25519 age keys whose private half is a portable string. sopsy uses them for
 //! the **break-glass** emergency recipient, which must be exportable so it can be
 //! stored offline (e.g. in 1Password) rather than bound to a single device.

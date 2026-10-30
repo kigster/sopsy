@@ -1,4 +1,4 @@
-//! Integration tests for [`sopsy::enclave`].
+//! Integration tests for [`sopsy::hardware::enclave`].
 //!
 //! Real Secure Enclave identity generation requires Apple hardware and user
 //! interaction, so these drive a **fake** `age-plugin-se` shell script injected
@@ -9,7 +9,7 @@ use std::path::Path;
 
 use assert_fs::TempDir;
 use serial_test::serial;
-use sopsy::enclave;
+use sopsy::hardware::enclave;
 
 /// Write an executable fake `age-plugin-se` to `dir` that emits `body` (verbatim
 /// shell after the shebang) and return its path.

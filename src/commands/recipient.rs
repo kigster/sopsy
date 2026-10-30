@@ -25,8 +25,9 @@ use crate::cli::{
 };
 use crate::config::{CONFIG_FILE_NAME, Config, Recipient};
 use crate::error::{Error, Result};
+use crate::hardware::enclave;
 use crate::ui::Ui;
-use crate::{age, enclave, git, sops};
+use crate::{age, git, sops};
 
 /// Conventional name of the `sops` configuration file.
 pub(crate) const SOPS_CONFIG_FILE_NAME: &str = ".sops.yaml";

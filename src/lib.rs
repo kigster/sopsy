@@ -13,15 +13,15 @@
 //! - [`config`] — serde model for `.sopsy.yml`.
 //! - [`error`] — the library [`Error`](error::Error) enum and [`Result`].
 //! - [`commands`] — one module per subcommand.
-//! - [`sops`], [`enclave`], [`age`], [`git`] — helpers wrapping external tools.
+//! - [`sops`], [`hardware`], [`age`], [`git`] — helpers wrapping external tools.
 
 pub mod age;
 pub mod cli;
 pub mod commands;
 pub mod config;
-pub mod enclave;
 pub mod error;
 pub mod git;
+pub mod hardware;
 pub mod help;
 pub mod keystore;
 pub mod sops;
