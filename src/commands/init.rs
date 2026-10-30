@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use crate::cli::{InitArgs, RecipientBreakGlassArgs, RecipientCommand};
 use crate::commands::keys;
-use crate::commands::recipient::system_username;
+use crate::commands::recipient::{self, system_username};
 use crate::config::KeyPolicy;
 use crate::config::{CONFIG_FILE_NAME, Config, Recipient};
 use crate::error::{Error, Result};
@@ -53,9 +53,14 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
     guard_repo_root(ui, &cwd, &root, args)?;
     ui.success(format!("Git repository: {}", root.display()));
 
-    // 2. Preflight the tools we depend on.
+    // 2. Preflight the tools we depend on, and an existing `.sops.yaml` (so a
+    //    broken one fails before a key is generated for it).
     sops::ensure_available()?;
     ui.success("Found `sops`.");
+    let sops_yaml = root.join(".sops.yaml");
+    if sops_yaml.exists() && !args.force {
+        check_existing_sops_yaml(&sops_yaml)?;
+    }
 
     // 3. Decide which key stores members may use, then acquire the admin's
     //    recipient (an existing key, or one generated in an allowed store).
@@ -75,10 +80,14 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
     }
     ui.animated_line(&recipient.public_key);
 
-    // 5. `.sops.yaml` creation rules.
-    let sops_yaml = root.join(".sops.yaml");
+    // 5. `.sops.yaml` creation rules. An existing one keeps its rules and
+    //    recipients, and gains the admin's key so the admin can decrypt.
     if sops_yaml.exists() && !args.force {
-        ui.warn(".sops.yaml already exists; leaving it untouched (pass --force to overwrite).");
+        if recipient::add_key_to_sops_yaml(&sops_yaml, &recipient.public_key)? > 0 {
+            ui.success("Added your key to the existing .sops.yaml (pass --force to replace it).");
+        } else {
+            ui.info(".sops.yaml already lists your key; keeping it.");
+        }
     } else {
         std::fs::write(&sops_yaml, render_sops_yaml(&recipient.public_key))?;
         ui.success("Wrote .sops.yaml creation rules.");
@@ -231,6 +240,26 @@ fn maybe_setup_break_glass(ui: &Ui, root: &Path, args: &InitArgs) -> Result<()> 
 /// sopsy would then write `.sops.yaml`/`.sopsy.yml` there and try to scan it.
 /// When the resolved root is not the current directory, warn (loudly if it is
 /// `$HOME`) and require confirmation (or `--force`).
+/// Refuse an existing `.sops.yaml` that lists anything but age public keys:
+/// `sops` would reject it only after a key had been generated for it.
+fn check_existing_sops_yaml(path: &Path) -> Result<()> {
+    let keys = recipient::sops_yaml_age_keys(path)?;
+    let bad: Vec<String> = keys
+        .iter()
+        .filter(|k| keys::validate_public_key(k).is_err())
+        .map(|k| format!("`{k}`"))
+        .collect();
+    if bad.is_empty() {
+        return Ok(());
+    }
+    Err(Error::Validation(format!(
+        "{} lists {}, which {} not an age public key; fix the file, or pass --force to replace it",
+        path.display(),
+        bad.join(", "),
+        if bad.len() == 1 { "is" } else { "are" }
+    )))
+}
+
 fn guard_repo_root(ui: &Ui, cwd: &Path, root: &Path, args: &InitArgs) -> Result<()> {
     let same = std::fs::canonicalize(cwd).ok() == std::fs::canonicalize(root).ok();
     if same {

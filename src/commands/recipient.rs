@@ -1058,6 +1058,23 @@ pub(crate) fn add_key_to_sops_yaml(path: &Path, key: &str) -> Result<usize> {
     })
 }
 
+/// Every age key listed by any creation rule in the `.sops.yaml` at `path`.
+pub(crate) fn sops_yaml_age_keys(path: &Path) -> Result<Vec<String>> {
+    let raw = std::fs::read_to_string(path)?;
+    let doc: Value = serde_yaml_ng::from_str(&raw).map_err(|source| Error::Parse {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    Ok(doc
+        .get("creation_rules")
+        .and_then(Value::as_sequence)
+        .into_iter()
+        .flatten()
+        .filter_map(|rule| rule.get("age"))
+        .flat_map(parse_age_keys)
+        .collect())
+}
+
 /// Remove `key` from the `age:` list of every creation rule in the `.sops.yaml`
 /// at `path`. Returns how many rules were modified.
 fn remove_key_from_sops_yaml(path: &Path, key: &str) -> Result<usize> {
@@ -1100,8 +1117,10 @@ where
         }
     }
 
-    let serialized = serde_yaml_ng::to_string(&doc)?;
-    std::fs::write(path, serialized)?;
+    // Re-serializing drops comments, so leave an unchanged file alone.
+    if modified > 0 {
+        std::fs::write(path, serde_yaml_ng::to_string(&doc)?)?;
+    }
     Ok(modified)
 }
 
