@@ -8,6 +8,7 @@ use crate::hardware::{
     self, Availability, GeneratedIdentity, KeyOptions, Store, StoreKind, yubikey,
 };
 use crate::ui::Ui;
+use clap::ValueEnum;
 
 /// Choose a store, generate a key in it and, with `persist`, save the local
 /// identity. `label` names the key (recipient name).
@@ -37,11 +38,23 @@ pub(crate) fn generate(
     if let Some(touch) = key.touch_policy {
         yubikey_opts.touch_policy = touch;
     }
+    let mut new_slot = key.new_slot;
+    if store == Store::YubiKey {
+        if yubikey_opts.serial.is_none() {
+            yubikey_opts.serial = choose_yubikey(ui)?;
+        }
+        if yubikey_opts.slot.is_none() && !new_slot && ui.is_interactive() {
+            match choose_slot(ui, &yubikey_opts)? {
+                Some(slot) => yubikey_opts.slot = Some(slot),
+                None => new_slot = true,
+            }
+        }
+    }
     let options = KeyOptions {
         label: label.to_string(),
         without_touch,
         yubikey: yubikey_opts,
-        new_slot: key.new_slot,
+        new_slot,
     };
 
     let (identity, reused) = match store {
@@ -67,7 +80,9 @@ pub(crate) fn generate(
         }
     };
     if reused {
-        ui.success("Reusing the existing age key on your YubiKey (pass --new-slot for a new one).");
+        ui.success(
+            "Reusing the existing age key on your YubiKey (pass --always-new-slot for a new one).",
+        );
     } else {
         ui.success(format!(
             "Created a {}-backed identity.",
@@ -108,6 +123,89 @@ fn choose_store(ui: &Ui, key: &StoreArgs, allowed: Option<&[Store]>) -> Result<S
     let picked = ui.select("Where should your private key live?", "--store", options)?;
     let name = picked.split_whitespace().next().unwrap_or_default();
     name.parse()
+}
+
+/// With several YubiKeys plugged in, ask which one to use. `None` means
+/// there is only one, so the plugin needs no `--serial`.
+fn choose_yubikey(ui: &Ui) -> Result<Option<u32>> {
+    let count = yubikey::device_count();
+    if count <= 1 {
+        return Ok(None);
+    }
+    if !ui.is_interactive() {
+        return Err(Error::Validation(format!(
+            "{count} YubiKeys are plugged in; unplug all but one, or pass --yubikey-serial"
+        )));
+    }
+    let serials = yubikey::known_serials();
+    let prompt = format!("{count} YubiKeys are plugged in. Which one should hold your key?");
+    let typed = if serials.len() >= count {
+        let options = serials.iter().map(u32::to_string).collect();
+        ui.select(&prompt, "--yubikey-serial", options)?
+    } else {
+        // YubiKeys hide their serial from USB, so some may be unknown.
+        ui.info(
+            "The serial number is printed on each YubiKey (`ykman list --serials` shows it too).",
+        );
+        if !serials.is_empty() {
+            ui.info(format!("Serials sopsy can see: {}", join(&serials)));
+        }
+        ui.text(&format!("{prompt} Serial number:"), "--yubikey-serial")?
+    };
+    typed.trim().parse().map(Some).map_err(|_| {
+        Error::Validation(format!("`{}` is not a YubiKey serial number", typed.trim()))
+    })
+}
+
+/// Offer the age keys already on the YubiKey, matching policies first.
+/// `None` means generate a new key.
+fn choose_slot(ui: &Ui, opts: &yubikey::GenerateOptions) -> Result<Option<u8>> {
+    let mut existing: Vec<_> = yubikey::list(false)?
+        .into_iter()
+        .filter(|id| opts.serial.is_none_or(|s| s == id.serial))
+        .collect();
+    if existing.is_empty() {
+        return Ok(None);
+    }
+    existing.sort_by_key(|id| !id.matches_policies(opts.pin_policy, opts.touch_policy));
+    const NEW: &str = "Generate a new key in the next free slot";
+    let mut options: Vec<String> = existing
+        .iter()
+        .map(|id| {
+            format!(
+                "slot {} — {} (serial {}, PIN {}, touch {})",
+                id.slot,
+                id.name,
+                id.serial,
+                policy_name(id.pin_policy),
+                policy_name(id.touch_policy)
+            )
+        })
+        .collect();
+    options.push(NEW.into());
+    let picked = ui.select(
+        "Your YubiKey already holds age keys. Reuse one?",
+        "--always-new-slot",
+        options,
+    )?;
+    Ok(picked
+        .strip_prefix("slot ")
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|slot| slot.parse().ok()))
+}
+
+fn policy_name<P: ValueEnum>(policy: Option<P>) -> String {
+    policy
+        .and_then(|p| p.to_possible_value())
+        .map_or_else(|| "unknown".into(), |v| v.get_name().to_string())
+}
+
+fn join(serials: &[u32]) -> String {
+    serials
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Say so when the chosen store keeps the secret in software.

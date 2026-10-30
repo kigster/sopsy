@@ -91,7 +91,7 @@ This generates your Secure Enclave identity (Touch ID may prompt; the private ke
 
 > [!TIP]
 >
-> Already have a Secure Enclave public key? Skip generation with `sopsy join alice --public-key age1se1…`.
+> Already have a Secure Enclave public key? Skip generation with `sopsy join alice --age-public-key age1se1…`.
 
 > [!TIP]
 >
@@ -125,12 +125,12 @@ Once it's merged, `git pull` and you're in.
 
 ```bash
 sopsy join alice --store yubikey                     # PIN once per session, touch cached 15s
-sopsy join alice --store yubikey --pin-policy always --touch-policy always
+sopsy join alice --store yubikey --yubikey-pin-policy always --yubikey-touch-policy always
 sopsy join alice --store keychain                    # software key, no hardware needed
 SOPSY_PRIVATE_KEY_STORE_PRIORITY=exthardware,software sopsy join alice
 ```
 
-With a YubiKey, the plugin asks for its PIN (and to change the factory PIN on first use) and for a touch. An existing sopsy-usable key with the same policies is reused; pass `--new-slot` for a fresh one. `--without-touch-id` drops the touch requirement (YubiKey) or Touch ID (Enclave).
+With a YubiKey, the plugin asks for its PIN (and to change the factory PIN on first use) and for a touch. An existing sopsy-usable key with the same policies is reused; pass `--always-new-slot` for a fresh one. With several YubiKeys plugged in, sopsy asks which one to use. `--without-touch-id` drops the touch requirement (YubiKey) or Touch ID (Enclave).
 
 ## Day-to-day workflow
 

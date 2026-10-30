@@ -53,7 +53,8 @@ pub fn is_recipient(public_key: &str) -> bool {
 pub enum PinPolicy {
     /// Every decryption.
     Always,
-    /// Once per session (until the key is unplugged).
+    /// Once per session (until the key is unplugged). Called `once` by the plugin.
+    #[value(name = "cached", alias = "once")]
     Once,
     /// Never.
     Never,
@@ -227,7 +228,35 @@ pub fn probe() -> Availability {
 
 /// Whether a PIV-capable YubiKey is connected.
 pub fn device_present() -> bool {
-    usb_listing().is_some_and(|listing| listing_has_piv_yubikey(&listing))
+    device_count() > 0
+}
+
+/// How many PIV-capable YubiKeys are connected.
+pub fn device_count() -> usize {
+    usb_listing().map_or(0, |listing| count_piv_yubikeys(&listing))
+}
+
+/// Environment variable that overrides the `ykman` binary. For tests.
+pub const YKMAN_BIN_ENV: &str = "SOPSY_YKMAN_BIN";
+
+/// Serials of the connected YubiKeys that can be learned without a PIN.
+///
+/// YubiKeys hide their serial from USB by default, so this asks `ykman list
+/// --serials` when it is installed, and adds the serials of keys that already
+/// hold an age identity. It may return fewer serials than [`device_count`].
+pub fn known_serials() -> Vec<u32> {
+    let ykman = std::env::var_os(YKMAN_BIN_ENV).unwrap_or_else(|| OsString::from("ykman"));
+    let mut command = Command::new(ykman);
+    command.args(["list", "--serials"]);
+    let mut serials: Vec<u32> = capture(command)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect();
+    serials.extend(list(true).unwrap_or_default().iter().map(|id| id.serial));
+    serials.sort_unstable();
+    serials.dedup();
+    serials
 }
 
 fn usb_listing() -> Option<String> {
@@ -260,11 +289,14 @@ fn capture(mut command: Command) -> Option<String> {
 /// A YubiKey exposes PIV through its CCID interface, so the product name must
 /// mention both (`YubiKey OTP+FIDO+CCID`). FIDO-only Security Keys can't hold
 /// an age key.
-fn listing_has_piv_yubikey(listing: &str) -> bool {
-    listing.lines().any(|line| {
-        let line = line.to_ascii_lowercase();
-        line.contains("yubikey") && line.contains("ccid")
-    })
+fn count_piv_yubikeys(listing: &str) -> usize {
+    listing
+        .lines()
+        .filter(|line| {
+            let line = line.to_ascii_lowercase();
+            line.contains("yubikey") && line.contains("ccid")
+        })
+        .count()
 }
 
 /// Pick an existing identity to reuse instead of consuming a new slot: the
@@ -659,14 +691,15 @@ age1tag1qsecond
     }
 
     #[test]
-    fn detects_piv_capable_yubikeys_only() {
+    fn counts_piv_capable_yubikeys_only() {
         let ioreg = "+-o Root\n  +-o YubiKey OTP+FIDO+CCID@20130000  <class IOUSBHostDevice>\n";
-        assert!(listing_has_piv_yubikey(ioreg));
-        assert!(listing_has_piv_yubikey("YubiKey CCID\n"));
-        assert!(!listing_has_piv_yubikey(
-            "Security Key by Yubico\nYubiKey OTP+FIDO\n"
-        ));
-        assert!(!listing_has_piv_yubikey(""));
+        assert_eq!(count_piv_yubikeys(ioreg), 1);
+        assert_eq!(count_piv_yubikeys("YubiKey CCID\nYubiKey FIDO+CCID\n"), 2);
+        assert_eq!(
+            count_piv_yubikeys("Security Key by Yubico\nYubiKey OTP+FIDO\n"),
+            0
+        );
+        assert_eq!(count_piv_yubikeys(""), 0);
     }
 
     #[test]
