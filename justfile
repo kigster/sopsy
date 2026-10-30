@@ -36,7 +36,7 @@ fmt:
 
 # Show warnings
 warnings:
-    cargo clippy -- -D warmings
+    cargo clippy -- -D warnings
 
 # Run tests
 test:

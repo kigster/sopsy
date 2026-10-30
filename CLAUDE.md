@@ -15,7 +15,7 @@ The `justfile` is the task runner (`just <recipe>`); recipes wrap `cargo`:
 - `just run` — runs `cargo run -- doctor`
 - `just test` / `cargo test`
 - `just fmt` — `cargo fmt`
-- `just warnings` — `cargo clippy -- -D warnings` (note: the recipe currently has a typo `-D warmings`; the intent is to deny warnings)
+  - `just warnings` — `cargo clippy -- -D warnings` (note: the recipe currently has a typo `-D warnings`; the intent is to deny warnings)
 - `just publish` — full release gate: fmt → warnings → test → package → publish-dry-run → `cargo publish`
 
 Run a single test: `cargo test <test_name>`. Run the CLI directly: `cargo run -- <subcommand>` (e.g. `cargo run -- edit secrets.yaml -- --in-place`).
