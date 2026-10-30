@@ -297,7 +297,7 @@ fn resolve_required(ui: &Ui, args: &InitArgs) -> Result<Vec<String>> {
         })
         .collect();
     let picked = ui.multi_select_all(
-        "Which key stores may members of this repository use? (space toggles)",
+        "Which key stores may members of this repository use?",
         "--require",
         options,
     )?;

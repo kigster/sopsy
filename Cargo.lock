@@ -1151,6 +1151,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "color-eyre",
+ "crossterm",
  "ctrlc",
  "humantime",
  "indicatif",

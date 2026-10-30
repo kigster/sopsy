@@ -21,10 +21,12 @@ use std::io::{IsTerminal, Write};
 use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressStyle};
-use inquire::{Confirm, MultiSelect, Select, Text};
+use inquire::{Confirm, Select, Text};
 use owo_colors::{OwoColorize, Style};
 
 use crate::error::{Error, Result};
+
+mod checklist;
 
 /// Presentation handle threaded through commands.
 ///
@@ -381,10 +383,7 @@ impl Ui {
         flag: &str,
         options: Vec<String>,
     ) -> Result<Vec<String>> {
-        self.ensure_interactive(prompt, flag)?;
-        MultiSelect::new(prompt, options)
-            .prompt()
-            .map_err(into_other)
+        self.checklist(prompt, flag, options, &[])
     }
 
     /// Like [`Ui::multi_select`], with every option selected to start with.
@@ -394,12 +393,26 @@ impl Ui {
         flag: &str,
         options: Vec<String>,
     ) -> Result<Vec<String>> {
-        self.ensure_interactive(prompt, flag)?;
         let all: Vec<usize> = (0..options.len()).collect();
-        MultiSelect::new(prompt, options)
-            .with_default(&all)
-            .prompt()
-            .map_err(into_other)
+        self.checklist(prompt, flag, options, &all)
+    }
+
+    // Irreducible interactive tail: the key handling and rendering are
+    // unit-tested in `checklist`; this needs a real TTY.
+    fn checklist(
+        &self,
+        prompt: &str,
+        flag: &str,
+        options: Vec<String>,
+        checked: &[usize],
+    ) -> Result<Vec<String>> {
+        self.ensure_interactive(prompt, flag)?;
+        checklist::run(prompt, options, checked, self.color)?.ok_or_else(|| {
+            into_other(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "prompt canceled",
+            ))
+        })
     }
 
     /// Ask the user a yes/no question with a default.
