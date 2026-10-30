@@ -157,17 +157,26 @@ impl Checklist {
     /// column) and one row per option, each cut to `width` cells (0 = no limit).
     pub(crate) fn lines(&self, prompt: &str, color: bool, width: usize) -> Vec<String> {
         let hint = if self.single { SINGLE_HINT } else { HINT };
-        let question = format!("  {prompt}");
-        let question = if color {
-            question.green().to_string()
+        // The question wraps (never truncates); every other line is cut to fit.
+        let question: Vec<String> = if width == 0 {
+            vec![prompt.to_string()]
         } else {
-            question
-        };
-        let mut lines = vec![question, hint.to_string()];
+            super::wrap_text(prompt, width.saturating_sub(2))
+        }
+        .into_iter()
+        .map(|l| {
+            let l = format!("  {l}");
+            if color { l.green().to_string() } else { l }
+        })
+        .collect();
+        let mut lines = vec![hint.to_string()];
         if !self.available.is_empty() {
             lines.extend(COLUMN_HEADER.iter().map(|l| l.to_string()));
         }
-        let mut lines: Vec<String> = lines.iter().map(|l| truncate(l, width)).collect();
+        let mut lines: Vec<String> = question
+            .into_iter()
+            .chain(lines.iter().map(|l| truncate(l, width)))
+            .collect();
         lines.extend(self.rows(color, width));
         lines
     }
@@ -410,6 +419,12 @@ mod tests {
     #[test]
     fn the_question_is_green() {
         assert_eq!(list().lines("Pick?", true, 0)[0], "\x1b[32m  Pick?\x1b[39m");
+    }
+
+    #[test]
+    fn a_long_question_wraps_instead_of_being_cut() {
+        let lines = list().lines("one two three four", false, 14);
+        assert_eq!(&lines[..3], ["  one two", "  three four", "    Select or…"]);
     }
 
     #[test]
