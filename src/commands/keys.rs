@@ -61,6 +61,9 @@ pub(crate) fn generate(
                 None => new_slot = true,
             }
         }
+        if new_slot && ui.is_interactive() {
+            offer_separate_puk(ui, yubikey_opts.serial)?;
+        }
     }
     let options = KeyOptions {
         label: label.to_string(),
@@ -169,6 +172,43 @@ fn choose_yubikey(ui: &Ui) -> Result<Option<u32>> {
     typed.trim().parse().map(Some).map_err(|_| {
         Error::Validation(format!("`{}` is not a YubiKey serial number", typed.trim()))
     })
+}
+
+/// The plugin sets a factory-default PUK to the new PIN. Offer to give the
+/// PUK its own value first, with `ykman`; the PIN must change too, or the
+/// plugin would still see the factory PIN and overwrite the PUK again.
+fn offer_separate_puk(ui: &Ui, serial: Option<u32>) -> Result<()> {
+    const SEPARATE: &str = "Yes, set PUK separately.";
+    const SAME: &str = "No, it's ok to keep them the same, just not the factory value.";
+    let picked = ui.select(
+        "If your YubiKey has a default factory PUK (the 'forgot PIN' special recovery PIN), \
+         would you like to set it to something different than your YubiKey PIN?",
+        "--yubikey-serial",
+        vec![SEPARATE.into(), SAME.into()],
+    )?;
+    if picked != SEPARATE {
+        return Ok(());
+    }
+    if !yubikey::ykman_available() {
+        ui.warn("Setting the PUK separately needs ykman (YubiKey Manager): brew install ykman");
+        if ui.confirm(
+            "Continue with the PUK set to your PIN instead?",
+            "--yubikey-serial",
+            false,
+        )? {
+            return Ok(());
+        }
+        return Err(Error::Validation(
+            "install ykman (`brew install ykman`) and run this again".into(),
+        ));
+    }
+    ui.info("First the PUK: ykman asks for the current one (factory: 12345678), then the new one twice.");
+    ui.info("Use 6 to 8 characters, and keep it somewhere safe, apart from your PIN.");
+    yubikey::ykman_change(serial, yubikey::Credential::Puk)?;
+    ui.info("Now the PIN: the current one (factory: 123456), then the new one twice (6 to 8 characters).");
+    yubikey::ykman_change(serial, yubikey::Credential::Pin)?;
+    ui.success("PUK and PIN changed; the plugin will ask only for your new PIN.");
+    Ok(())
 }
 
 /// Offer the age keys already on the YubiKey, matching policies first.

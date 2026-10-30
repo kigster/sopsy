@@ -239,14 +239,62 @@ pub fn device_count() -> usize {
 /// Environment variable that overrides the `ykman` binary. For tests.
 pub const YKMAN_BIN_ENV: &str = "SOPSY_YKMAN_BIN";
 
+fn ykman_bin() -> OsString {
+    std::env::var_os(YKMAN_BIN_ENV).unwrap_or_else(|| OsString::from("ykman"))
+}
+
+/// Whether `ykman` (YubiKey Manager) is installed.
+pub fn ykman_available() -> bool {
+    which::which(ykman_bin()).is_ok()
+}
+
+/// What [`ykman_change`] can change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Credential {
+    Pin,
+    Puk,
+}
+
+fn ykman_change_args(serial: Option<u32>, credential: Credential) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(serial) = serial {
+        args.extend(["--device".to_string(), serial.to_string()]);
+    }
+    args.extend(["piv", "access"].map(String::from));
+    args.push(
+        match credential {
+            Credential::Pin => "change-pin",
+            Credential::Puk => "change-puk",
+        }
+        .to_string(),
+    );
+    args
+}
+
+/// Change the PIN or PUK with `ykman`, which prompts on the terminal for the
+/// current value and the new one.
+pub fn ykman_change(serial: Option<u32>, credential: Credential) -> Result<()> {
+    let status = Command::new(ykman_bin())
+        .args(ykman_change_args(serial, credential))
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(Error::ProcessFailed {
+            tool: "ykman".to_string(),
+            code: status.code().unwrap_or(-1),
+            message: "see ykman's output above".to_string(),
+        })
+    }
+}
+
 /// Serials of the connected YubiKeys that can be learned without a PIN.
 ///
 /// YubiKeys hide their serial from USB by default, so this asks `ykman list
 /// --serials` when it is installed, and adds the serials of keys that already
 /// hold an age identity. It may return fewer serials than [`device_count`].
 pub fn known_serials() -> Vec<u32> {
-    let ykman = std::env::var_os(YKMAN_BIN_ENV).unwrap_or_else(|| OsString::from("ykman"));
-    let mut command = Command::new(ykman);
+    let mut command = Command::new(ykman_bin());
     command.args(["list", "--serials"]);
     let mut serials: Vec<u32> = capture(command)
         .unwrap_or_default()
@@ -700,6 +748,18 @@ age1tag1qsecond
             0
         );
         assert_eq!(count_piv_yubikeys(""), 0);
+    }
+
+    #[test]
+    fn ykman_changes_the_puk_or_pin_on_the_chosen_device() {
+        assert_eq!(
+            ykman_change_args(None, Credential::Puk),
+            ["piv", "access", "change-puk"]
+        );
+        assert_eq!(
+            ykman_change_args(Some(19108090), Credential::Pin),
+            ["--device", "19108090", "piv", "access", "change-pin"]
+        );
     }
 
     #[test]
