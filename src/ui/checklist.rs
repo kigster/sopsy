@@ -2,14 +2,24 @@
 //!
 //! `inquire`'s multi-select styles every unchecked row alike, so it cannot
 //! colour a row by whether it is checked. Here the row under the cursor is
-//! bold yellow behind a `❯`, checked rows are bold green with `[✔]`, and
-//! unchecked rows are bold black with `[ ]`. An optional column after the
-//! checkbox, headed [`AVAILABLE_HEADER`], marks each option available (✅) or
-//! not (`[ｘ]`, white on red).
+//! bold yellow, checked rows are green with `[✔]`, and unchecked rows are
+//! plain with `[ ]`. An optional column after the checkbox marks each option
+//! supported by this machine (✅) or not (🟥), under a header that points at
+//! both columns:
 //!
-//! The state machine ([`Checklist::apply`]) and row rendering
-//! ([`Checklist::rows`]) are plain functions and unit-tested; [`run`] is the
-//! thin raw-mode loop around them that needs a real terminal.
+//! ```text
+//!   Which key stores may members of this repository use?
+//!     Select or deselect with a space bar.
+//!       ┃   Method supported by this hardware?
+//!       ┃   ┃    (If this machine lacks a method other machines may support)
+//!   ━━━━┻━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//!      [✔]  🟥   enclave — Secure Enclave (MacOS, Silicon CPU)
+//!      [✔]  ✅   yubikey — YubiKey (hardware)
+//! ```
+//!
+//! The state machine ([`Checklist::apply`]) and rendering ([`Checklist::lines`])
+//! are plain functions and unit-tested; [`run`] is the thin raw-mode loop
+//! around them that needs a real terminal.
 
 use std::io::{self, Write};
 
@@ -17,11 +27,17 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use crossterm::{cursor, queue, terminal};
 use owo_colors::{OwoColorize, Style};
 
-const POINTER: &str = "❯";
-const AVAILABLE_HEADER: &str = "Available on this machine?";
-/// Cells before the availability column: `❯ [✔] `.
-const MARK_COLUMN: usize = 6;
-const HELP: &str = "[↑↓ move, space toggles, → all, ← none, enter confirms]";
+const HINT: &str = "    Select or deselect with a space bar.";
+/// Header over the availability column, its `┃`s above the ✔ and the mark.
+const COLUMN_HEADER: [&str; 3] = [
+    "      ┃   Method supported by this hardware?",
+    "      ┃   ┃    (If this machine lacks a method other machines may support)",
+    "  ━━━━┻━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+];
+/// Terminal cells before an option's text: `     [✔]  ✅   `, or without the
+/// availability column `     [✔]  `.
+const TEXT_COLUMN: usize = 15;
+const TEXT_COLUMN_NO_MARK: usize = 10;
 
 /// A key press, as far as the checklist cares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,63 +122,51 @@ impl Checklist {
         Outcome::Continue
     }
 
-    /// The header over the availability column, if there is one.
-    pub(crate) fn header(&self, color: bool, width: usize) -> Option<String> {
-        if self.available.is_empty() {
-            return None;
+    /// Everything printed: prompt, hint, column header (with an availability
+    /// column) and one row per option, each cut to `width` cells (0 = no limit).
+    pub(crate) fn lines(&self, prompt: &str, color: bool, width: usize) -> Vec<String> {
+        let mut lines = vec![format!("  {prompt}"), HINT.to_string()];
+        if !self.available.is_empty() {
+            lines.extend(COLUMN_HEADER.iter().map(|l| l.to_string()));
         }
-        let text = if width == 0 {
-            AVAILABLE_HEADER.to_string()
-        } else {
-            truncate(AVAILABLE_HEADER, width.saturating_sub(MARK_COLUMN).max(1))
-        };
-        let text = if color { text.bold().to_string() } else { text };
-        Some(format!("{}{text}", " ".repeat(MARK_COLUMN)))
+        let mut lines: Vec<String> = lines.iter().map(|l| truncate(l, width)).collect();
+        lines.extend(self.rows(color, width));
+        lines
     }
 
-    /// The rows as printed, each cut to `width` characters.
-    pub(crate) fn rows(&self, color: bool, width: usize) -> Vec<String> {
+    fn rows(&self, color: bool, width: usize) -> Vec<String> {
+        let text_column = if self.available.is_empty() {
+            TEXT_COLUMN_NO_MARK
+        } else {
+            TEXT_COLUMN
+        };
         self.options
             .iter()
             .enumerate()
             .map(|(i, option)| {
                 let here = !self.done && i == self.cursor;
                 let checked = self.checked[i];
-                let head = format!(
-                    "{} [{}] ",
-                    if here { POINTER } else { " " },
-                    if checked { "✔" } else { " " }
-                );
-                // Both marks are four terminal cells wide, so the text lines up.
-                let mark = self.available.get(i).copied();
-                let used = MARK_COLUMN + mark.map_or(0, |_| 5);
+                let head = format!("     [{}]  ", if checked { "✔" } else { " " });
+                let mark = match self.available.get(i) {
+                    None => "",
+                    Some(true) => "✅   ",
+                    Some(false) => "🟥   ",
+                };
                 let text = if width == 0 {
                     option.clone()
                 } else {
-                    truncate(option, width.saturating_sub(used).max(1))
+                    truncate(option, width.saturating_sub(text_column).max(1))
                 };
                 let style = match (here, checked) {
-                    (true, _) => Style::new().bold().yellow(),
-                    (false, true) => Style::new().bold().green(),
-                    (false, false) => Style::new().bold().black(),
+                    (true, _) => Some(Style::new().bold().yellow()),
+                    (false, true) => Some(Style::new().green()),
+                    (false, false) => None,
                 };
-                let paint = |part: &str| {
-                    if color {
-                        part.style(style).to_string()
-                    } else {
-                        part.to_string()
-                    }
-                };
-                let mark = match (mark, color) {
-                    (None, _) => String::new(),
-                    (Some(true), false) => "✅   ".into(),
-                    (Some(false), false) => "[ｘ] ".into(),
-                    (Some(true), true) => format!("{}   ", "✅".style(Style::new().bright_green())),
-                    (Some(false), true) => {
-                        format!("{} ", "[ｘ]".style(Style::new().white().on_red()))
-                    }
-                };
-                format!("{}{mark}{}", paint(&head), paint(&text))
+                match style.filter(|_| color) {
+                    // The emoji carry their own colour; style around them.
+                    Some(style) => format!("{}{mark}{}", head.style(style), text.style(style)),
+                    None => format!("{head}{mark}{text}"),
+                }
             })
             .collect()
     }
@@ -219,7 +223,7 @@ pub(crate) fn run(
     let _raw = RawMode::enter()?;
     let mut drawn = 0u16;
     loop {
-        redraw(&mut out, &mut drawn, &frame(&list, prompt, color, true))?;
+        redraw(&mut out, &mut drawn, &frame(&list, prompt, color))?;
 
         let Event::Key(key) = event::read()? else {
             continue;
@@ -231,27 +235,20 @@ pub(crate) fn run(
             Outcome::Continue => {}
             Outcome::Submit => {
                 // Leave the checklist on screen as it was confirmed.
-                redraw(&mut out, &mut drawn, &frame(&list, prompt, color, false))?;
+                redraw(&mut out, &mut drawn, &frame(&list, prompt, color))?;
                 return Ok(Some(list.selected()));
             }
             Outcome::Cancel => {
-                redraw(&mut out, &mut drawn, &[format!("? {prompt} <canceled>")])?;
+                redraw(&mut out, &mut drawn, &[format!("  {prompt} <canceled>")])?;
                 return Ok(None);
             }
         }
     }
 }
 
-/// The prompt on its own line, the rows, and (while active) the key help.
-fn frame(list: &Checklist, prompt: &str, color: bool, help: bool) -> Vec<String> {
+fn frame(list: &Checklist, prompt: &str, color: bool) -> Vec<String> {
     let width = terminal::size().map_or(0, |(w, _)| w as usize);
-    let mut lines = vec![truncate(&format!("? {prompt}"), width)];
-    lines.extend(list.header(color, width));
-    lines.extend(list.rows(color, width));
-    if help {
-        lines.push(truncate(HELP, width));
-    }
-    lines
+    list.lines(prompt, color, width)
 }
 
 /// Replace the `drawn` lines printed last time with `lines`.
@@ -302,31 +299,33 @@ mod tests {
     }
 
     #[test]
-    fn confirmed_rows_keep_their_marks_but_lose_the_cursor() {
+    fn confirmed_rows_keep_their_marks_but_lose_the_highlight() {
         let mut l = list();
         l.apply(Key::Submit);
-        assert_eq!(
-            l.rows(false, 0),
-            ["  [ ] enclave", "  [✔] yubikey", "  [ ] file"]
-        );
+        let rows = l.rows(true, 0);
+        assert!(!rows[0].contains('\x1b'), "{:?}", rows[0]);
+        assert!(rows[1].starts_with("\x1b[32m"), "{:?}", rows[1]);
     }
 
     #[test]
-    fn availability_column_has_a_header_and_lines_up() {
+    fn availability_layout_matches_the_design() {
         let l = Checklist::new(
-            vec!["enclave".into(), "file".into()],
-            &[],
+            vec!["enclave".into(), "yubikey".into()],
+            &[0, 1],
             vec![false, true],
         );
         assert_eq!(
-            l.header(false, 0).as_deref(),
-            Some("      Available on this machine?")
+            l.lines("Which key stores?", false, 0),
+            [
+                "  Which key stores?",
+                "    Select or deselect with a space bar.",
+                "      ┃   Method supported by this hardware?",
+                "      ┃   ┃    (If this machine lacks a method other machines may support)",
+                "  ━━━━┻━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                "     [✔]  🟥   enclave",
+                "     [✔]  ✅   yubikey",
+            ]
         );
-        assert_eq!(l.rows(false, 0), ["❯ [ ] [ｘ] enclave", "  [ ] ✅   file"]);
-        let rows = l.rows(true, 0);
-        assert!(rows[0].contains("\x1b[37;41m[ｘ]"), "{:?}", rows[0]);
-        assert!(rows[1].contains("\x1b[92m✅"), "{:?}", rows[1]);
-        assert!(list().header(false, 0).is_none());
     }
 
     #[test]
@@ -339,25 +338,24 @@ mod tests {
     }
 
     #[test]
-    fn rows_mark_the_cursor_and_checked_options() {
+    fn rows_without_the_availability_column() {
         assert_eq!(
             list().rows(false, 0),
-            ["❯ [ ] enclave", "  [✔] yubikey", "  [ ] file"]
+            ["     [ ]  enclave", "     [✔]  yubikey", "     [ ]  file"]
         );
     }
 
     #[test]
-    fn rows_are_yellow_under_the_cursor_green_when_checked_else_black() {
+    fn rows_are_bold_yellow_under_the_cursor_green_when_checked_else_plain() {
         let rows = list().rows(true, 0);
-        let bold = |code: &str| format!("\x1b[{code};1m");
-        assert!(rows[0].starts_with(&bold("33")), "{:?}", rows[0]);
-        assert!(rows[1].starts_with(&bold("32")), "{:?}", rows[1]);
-        assert!(rows[2].starts_with(&bold("30")), "{:?}", rows[2]);
+        assert!(rows[0].starts_with("\x1b[33;1m"), "{:?}", rows[0]);
+        assert!(rows[1].starts_with("\x1b[32m"), "{:?}", rows[1]);
+        assert!(!rows[2].contains('\x1b'), "{:?}", rows[2]);
     }
 
     #[test]
     fn long_rows_are_cut_to_the_terminal_width() {
-        assert_eq!(truncate("❯ [ ] enclave", 8), "❯ [ ] e…");
+        assert_eq!(truncate("[ ] enclave", 6), "[ ] e…");
         assert_eq!(truncate("short", 80), "short");
     }
 

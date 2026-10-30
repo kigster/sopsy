@@ -288,13 +288,12 @@ fn resolve_required(ui: &Ui, args: &InitArgs) -> Result<Vec<String>> {
     let options: Vec<(String, bool)> = Store::ALL
         .iter()
         .map(|s| {
-            let (ready, why) = match s.probe() {
-                Availability::Ready => (true, String::new()),
-                Availability::MissingTool { install } => (false, format!("; needs `{install}`")),
-                Availability::Unavailable { reason } => (false, format!("; {reason}")),
+            let needs = match s {
+                Store::Enclave => "MacOS, Silicon CPU",
+                _ => s.kind().as_str(),
             };
-            let label = format!("{s} — {} ({}{why})", s.display_name(), s.kind().as_str());
-            (label, ready)
+            let label = format!("{s} — {} ({needs})", s.display_name());
+            (label, s.probe() == Availability::Ready)
         })
         .collect();
     let picked = ui.multi_select_all_marked(
