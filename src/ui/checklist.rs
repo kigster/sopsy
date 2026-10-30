@@ -157,7 +157,13 @@ impl Checklist {
     /// column) and one row per option, each cut to `width` cells (0 = no limit).
     pub(crate) fn lines(&self, prompt: &str, color: bool, width: usize) -> Vec<String> {
         let hint = if self.single { SINGLE_HINT } else { HINT };
-        let mut lines = vec![format!("  {prompt}"), hint.to_string()];
+        let question = format!("  {prompt}");
+        let question = if color {
+            question.green().to_string()
+        } else {
+            question
+        };
+        let mut lines = vec![question, hint.to_string()];
         if !self.available.is_empty() {
             lines.extend(COLUMN_HEADER.iter().map(|l| l.to_string()));
         }
@@ -399,6 +405,11 @@ mod tests {
         let rows = l.rows(true, 0);
         assert!(!rows[0].contains('\x1b'), "{:?}", rows[0]);
         assert!(rows[1].starts_with("\x1b[32m"), "{:?}", rows[1]);
+    }
+
+    #[test]
+    fn the_question_is_green() {
+        assert_eq!(list().lines("Pick?", true, 0)[0], "\x1b[32m  Pick?\x1b[39m");
     }
 
     #[test]

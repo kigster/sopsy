@@ -22,6 +22,7 @@ use std::io::{IsTerminal, Write};
 use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressStyle};
+use inquire::ui::{Color, RenderConfig, StyleSheet};
 use inquire::{Confirm, Text};
 use owo_colors::{OwoColorize, Style};
 
@@ -356,10 +357,11 @@ impl Ui {
             });
         }
         println!();
-        print!("{} ", self.paint(prompt, Style::new().bold().cyan()));
+        print!("{} ", self.paint(prompt, Style::new().green()));
         let _ = std::io::stdout().flush();
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
+        println!();
         Ok(())
     }
 
@@ -433,12 +435,32 @@ impl Ui {
         list: checklist::Checklist,
     ) -> Result<Vec<String>> {
         self.ensure_interactive(prompt, flag)?;
-        checklist::run(prompt, list, self.color)?.ok_or_else(|| {
-            into_other(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "prompt canceled",
-            ))
+        self.spaced(|| {
+            checklist::run(prompt, list, self.color)?.ok_or_else(|| {
+                into_other(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "prompt canceled",
+                ))
+            })
         })
+    }
+
+    /// Run a prompt with a blank line before the question and after the answer.
+    fn spaced<T>(&self, prompt: impl FnOnce() -> Result<T>) -> Result<T> {
+        eprintln!();
+        let answer = prompt()?;
+        eprintln!();
+        Ok(answer)
+    }
+
+    /// `inquire` styling: the question in green, like the checklist's.
+    fn render_config(&self) -> RenderConfig<'static> {
+        if !self.color {
+            return RenderConfig::empty();
+        }
+        let mut config = RenderConfig::default_colored();
+        config.prompt = StyleSheet::new().with_fg(Color::DarkGreen);
+        config
     }
 
     /// Ask the user a yes/no question with a default.
@@ -446,10 +468,13 @@ impl Ui {
     /// Returns [`Error::NonInteractive`] when prompting is disabled.
     pub fn confirm(&self, prompt: &str, flag: &str, default: bool) -> Result<bool> {
         self.ensure_interactive(prompt, flag)?;
-        Confirm::new(prompt)
-            .with_default(default)
-            .prompt()
-            .map_err(into_other)
+        self.spaced(|| {
+            Confirm::new(prompt)
+                .with_default(default)
+                .with_render_config(self.render_config())
+                .prompt()
+                .map_err(into_other)
+        })
     }
 
     /// Ask the user for a free-form text value.
@@ -457,7 +482,12 @@ impl Ui {
     /// Returns [`Error::NonInteractive`] when prompting is disabled.
     pub fn text(&self, prompt: &str, flag: &str) -> Result<String> {
         self.ensure_interactive(prompt, flag)?;
-        Text::new(prompt).prompt().map_err(into_other)
+        self.spaced(|| {
+            Text::new(prompt)
+                .with_render_config(self.render_config())
+                .prompt()
+                .map_err(into_other)
+        })
     }
 
     /// Ask the user for a free-form text value, offering `default` when they
@@ -466,10 +496,13 @@ impl Ui {
     /// Returns [`Error::NonInteractive`] when prompting is disabled.
     pub fn text_with_default(&self, prompt: &str, flag: &str, default: &str) -> Result<String> {
         self.ensure_interactive(prompt, flag)?;
-        Text::new(prompt)
-            .with_default(default)
-            .prompt()
-            .map_err(into_other)
+        self.spaced(|| {
+            Text::new(prompt)
+                .with_default(default)
+                .with_render_config(self.render_config())
+                .prompt()
+                .map_err(into_other)
+        })
     }
 
     /// Guard that converts a disallowed prompt into a clear error.
