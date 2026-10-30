@@ -10,6 +10,16 @@ use crate::hardware::{
 use crate::ui::Ui;
 use clap::ValueEnum;
 
+/// Printed before `age-plugin-yubikey` takes the terminal: its own prompts
+/// ask for a PUK without saying what one is.
+const YUBIKEY_PROMPTS: [&str; 5] = [
+    "Talking to your YubiKey: enter its PIN, and touch it when it blinks.",
+    "On a YubiKey still at factory settings, the plugin also asks you to choose a new PIN",
+    "  and for the PUK (PIN Unblock Key), which resets a PIN locked by 3 wrong tries.",
+    "  The factory PUK is 12345678; if your organization set up the key, ask them.",
+    "  3 wrong PUKs lock it for good (only a PIV reset, erasing its keys, recovers).",
+];
+
 /// Choose a store, generate a key in it and, with `persist`, save the local
 /// identity. `label` names the key (recipient name).
 pub(crate) fn generate(
@@ -61,7 +71,9 @@ pub(crate) fn generate(
         // The YubiKey plugin prompts for the PIN and a touch on the terminal,
         // so it must not run under a spinner.
         Store::YubiKey => {
-            ui.info("Talking to your YubiKey: enter its PIN and touch it when it blinks.");
+            for line in YUBIKEY_PROMPTS {
+                ui.info(line);
+            }
             hardware::generate(store, &options, extra_args)?
         }
         _ => {
