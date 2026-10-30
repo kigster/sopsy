@@ -387,6 +387,21 @@ impl Ui {
             .map_err(into_other)
     }
 
+    /// Like [`Ui::multi_select`], with every option selected to start with.
+    pub fn multi_select_all(
+        &self,
+        prompt: &str,
+        flag: &str,
+        options: Vec<String>,
+    ) -> Result<Vec<String>> {
+        self.ensure_interactive(prompt, flag)?;
+        let all: Vec<usize> = (0..options.len()).collect();
+        MultiSelect::new(prompt, options)
+            .with_default(&all)
+            .prompt()
+            .map_err(into_other)
+    }
+
     /// Ask the user a yes/no question with a default.
     ///
     /// Returns [`Error::NonInteractive`] when prompting is disabled.

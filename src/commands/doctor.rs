@@ -25,7 +25,7 @@ use crate::git;
 use crate::ui::Ui;
 
 /// External tools sopsy depends on, in the order they are probed.
-const REQUIRED_TOOLS: &[&str] = &["sops", "age-plugin-se", "git"];
+const REQUIRED_TOOLS: &[&str] = &["sops", "age", "git"];
 
 /// Run the doctor checks.
 ///
@@ -36,6 +36,7 @@ pub fn run(ui: &Ui) -> Result<()> {
 
     system_checks(ui);
     tool_checks(ui);
+    store_checks(ui);
     repo_checks(ui);
 
     Ok(())
@@ -187,6 +188,51 @@ fn tool_checks(ui: &Ui) {
             Ok(path) => ui.success(format!("{tool} found at {}", path.display())),
             Err(_) => ui.failure(format!("{tool} not found on PATH")),
         }
+    }
+}
+
+// ----- Key stores ---------------------------------------------------------
+
+/// Probe every private-key store and show the `auto` order, so a member can
+/// see where `sopsy join` would put their key and why.
+fn store_checks(ui: &Ui) {
+    use crate::hardware::{self, Availability, PRIORITY_ENV, Store, StoreKind};
+
+    ui.header("Key stores");
+    for store in Store::ALL {
+        let label = format!(
+            "{store} ({}, {})",
+            store.display_name(),
+            store.kind().as_str()
+        );
+        match store.probe() {
+            Availability::Ready if store.kind() == StoreKind::Plaintext => {
+                ui.warn(format!("{label}: available (last resort)"))
+            }
+            Availability::Ready => ui.success(format!("{label}: available")),
+            Availability::MissingTool { install } => {
+                ui.failure(format!("{label}: hardware present, run `{install}`"))
+            }
+            Availability::Unavailable { reason } => ui.info(format!("{label}: {reason}")),
+        }
+    }
+    match hardware::priority() {
+        Ok(order) => {
+            let source = if std::env::var_os(PRIORITY_ENV).is_some() {
+                PRIORITY_ENV
+            } else {
+                "default"
+            };
+            ui.info(format!(
+                "auto order ({source}): {}",
+                hardware::names(&order)
+            ));
+            match hardware::candidates(None, None, &order, Store::probe) {
+                Ok(ready) => ui.success(format!("auto would use: {}", ready[0])),
+                Err(err) => ui.failure(format!("auto: {err}")),
+            }
+        }
+        Err(err) => ui.failure(err.to_string()),
     }
 }
 

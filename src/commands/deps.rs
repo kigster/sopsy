@@ -1,6 +1,7 @@
 //! `sopsy deps` — install sopsy's external tool dependencies via Homebrew.
 //!
-//! sopsy orchestrates three external tools: `sops`, `age`, and `age-plugin-se`.
+//! sopsy orchestrates external tools: `sops`, `age`, `age-plugin-se` (Secure
+//! Enclave) and `age-plugin-yubikey` (YubiKey).
 //! This command probes for each, then `brew install`s the ones that are missing
 //! — the remedy that pairs with [`crate::commands::doctor`]'s diagnosis.
 //!
@@ -18,8 +19,22 @@ use crate::cli::DepsArgs;
 use crate::error::{Error, Result};
 use crate::ui::Ui;
 
-/// External tools sopsy installs via Homebrew, in probe order.
-const DEPENDENCIES: &[&str] = &["sops", "age", "age-plugin-se"];
+/// External tools sopsy installs via Homebrew on this platform, in probe order.
+///
+/// `age-plugin-se` is installed on Apple Silicon only: Homebrew has no Intel
+/// build, and Linux has no Secure Enclave.
+pub fn dependencies() -> Vec<&'static str> {
+    dependencies_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn dependencies_for(os: &str, arch: &str) -> Vec<&'static str> {
+    let mut tools = vec!["sops", "age"];
+    if (os, arch) == ("macos", "aarch64") {
+        tools.push("age-plugin-se");
+    }
+    tools.push("age-plugin-yubikey");
+    tools
+}
 
 /// The default Homebrew binary name.
 pub const BREW_BIN: &str = "brew";
@@ -82,12 +97,12 @@ pub fn run(ui: &Ui, args: &DepsArgs) -> Result<()> {
 /// Probe each dependency, print a ✔/⚠ line, and return the ones not on `PATH`.
 fn report_and_collect_missing(ui: &Ui) -> Vec<&'static str> {
     let mut missing = Vec::new();
-    for tool in DEPENDENCIES {
+    for tool in dependencies() {
         match which::which(tool) {
             Ok(path) => ui.success(format!("{tool} found at {}", path.display())),
             Err(_) => {
                 ui.warn(format!("{tool} is not installed"));
-                missing.push(*tool);
+                missing.push(tool);
             }
         }
     }
@@ -120,4 +135,19 @@ fn install(tools: &[&str]) -> Result<()> {
         code: status.code().unwrap_or(-1),
         message: format!("`brew install {}` failed", tools.join(" ")),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn secure_enclave_plugin_only_on_apple_silicon() {
+        assert!(dependencies_for("macos", "aarch64").contains(&"age-plugin-se"));
+        assert!(!dependencies_for("macos", "x86_64").contains(&"age-plugin-se"));
+        assert_eq!(
+            dependencies_for("linux", "x86_64"),
+            ["sops", "age", "age-plugin-yubikey"]
+        );
+    }
 }
