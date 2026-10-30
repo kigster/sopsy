@@ -285,18 +285,19 @@ fn resolve_required(ui: &Ui, args: &InitArgs) -> Result<Vec<String>> {
     if !ui.is_interactive() {
         return Ok(Vec::new());
     }
-    let options: Vec<String> = Store::ALL
+    let options: Vec<(String, bool)> = Store::ALL
         .iter()
         .map(|s| {
-            let here = match s.probe() {
-                Availability::Ready => "available here".to_string(),
-                Availability::MissingTool { install } => format!("needs `{install}`"),
-                Availability::Unavailable { reason } => format!("not here: {reason}"),
+            let (ready, why) = match s.probe() {
+                Availability::Ready => (true, String::new()),
+                Availability::MissingTool { install } => (false, format!("; needs `{install}`")),
+                Availability::Unavailable { reason } => (false, format!("; {reason}")),
             };
-            format!("{s} — {} ({}; {here})", s.display_name(), s.kind().as_str())
+            let label = format!("{s} — {} ({}{why})", s.display_name(), s.kind().as_str());
+            (label, ready)
         })
         .collect();
-    let picked = ui.multi_select_all(
+    let picked = ui.multi_select_all_marked(
         "Which key stores may members of this repository use?",
         "--require",
         options,

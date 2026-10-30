@@ -3,7 +3,9 @@
 //! `inquire`'s multi-select styles every unchecked row alike, so it cannot
 //! colour a row by whether it is checked. Here the row under the cursor is
 //! bold yellow behind a `❯`, checked rows are bold green with `[✔]`, and
-//! unchecked rows are bold black with `[ ]`.
+//! unchecked rows are bold black with `[ ]`. An optional column after the
+//! checkbox, headed [`AVAILABLE_HEADER`], marks each option available (✅) or
+//! not (`[ｘ]`, white on red).
 //!
 //! The state machine ([`Checklist::apply`]) and row rendering
 //! ([`Checklist::rows`]) are plain functions and unit-tested; [`run`] is the
@@ -16,6 +18,9 @@ use crossterm::{cursor, queue, terminal};
 use owo_colors::{OwoColorize, Style};
 
 const POINTER: &str = "❯";
+const AVAILABLE_HEADER: &str = "Available on this machine?";
+/// Cells before the availability column: `❯ [✔] `.
+const MARK_COLUMN: usize = 6;
 const HELP: &str = "[↑↓ move, space toggles, → all, ← none, enter confirms]";
 
 /// A key press, as far as the checklist cares.
@@ -61,13 +66,15 @@ pub(crate) enum Outcome {
 pub(crate) struct Checklist {
     options: Vec<String>,
     checked: Vec<bool>,
+    /// Per-option availability column; empty for no column.
+    available: Vec<bool>,
     cursor: usize,
     /// Confirmed: drop the cursor so the rows show only what was picked.
     done: bool,
 }
 
 impl Checklist {
-    pub(crate) fn new(options: Vec<String>, checked: &[usize]) -> Self {
+    pub(crate) fn new(options: Vec<String>, checked: &[usize], available: Vec<bool>) -> Self {
         let mut flags = vec![false; options.len()];
         for &i in checked.iter().filter(|&&i| i < options.len()) {
             flags[i] = true;
@@ -75,6 +82,7 @@ impl Checklist {
         Self {
             options,
             checked: flags,
+            available,
             cursor: 0,
             done: false,
         }
@@ -98,6 +106,20 @@ impl Checklist {
         Outcome::Continue
     }
 
+    /// The header over the availability column, if there is one.
+    pub(crate) fn header(&self, color: bool, width: usize) -> Option<String> {
+        if self.available.is_empty() {
+            return None;
+        }
+        let text = if width == 0 {
+            AVAILABLE_HEADER.to_string()
+        } else {
+            truncate(AVAILABLE_HEADER, width.saturating_sub(MARK_COLUMN).max(1))
+        };
+        let text = if color { text.bold().to_string() } else { text };
+        Some(format!("{}{text}", " ".repeat(MARK_COLUMN)))
+    }
+
     /// The rows as printed, each cut to `width` characters.
     pub(crate) fn rows(&self, color: bool, width: usize) -> Vec<String> {
         self.options
@@ -106,21 +128,41 @@ impl Checklist {
             .map(|(i, option)| {
                 let here = !self.done && i == self.cursor;
                 let checked = self.checked[i];
-                let row = format!(
-                    "{} [{}] {option}",
+                let head = format!(
+                    "{} [{}] ",
                     if here { POINTER } else { " " },
                     if checked { "✔" } else { " " }
                 );
-                let row = truncate(&row, width);
-                if !color {
-                    return row;
-                }
+                // Both marks are four terminal cells wide, so the text lines up.
+                let mark = self.available.get(i).copied();
+                let used = MARK_COLUMN + mark.map_or(0, |_| 5);
+                let text = if width == 0 {
+                    option.clone()
+                } else {
+                    truncate(option, width.saturating_sub(used).max(1))
+                };
                 let style = match (here, checked) {
                     (true, _) => Style::new().bold().yellow(),
                     (false, true) => Style::new().bold().green(),
                     (false, false) => Style::new().bold().black(),
                 };
-                row.style(style).to_string()
+                let paint = |part: &str| {
+                    if color {
+                        part.style(style).to_string()
+                    } else {
+                        part.to_string()
+                    }
+                };
+                let mark = match (mark, color) {
+                    (None, _) => String::new(),
+                    (Some(true), false) => "✅   ".into(),
+                    (Some(false), false) => "[ｘ] ".into(),
+                    (Some(true), true) => format!("{}   ", "✅".style(Style::new().bright_green())),
+                    (Some(false), true) => {
+                        format!("{} ", "[ｘ]".style(Style::new().white().on_red()))
+                    }
+                };
+                format!("{}{mark}{}", paint(&head), paint(&text))
             })
             .collect()
     }
@@ -169,9 +211,10 @@ pub(crate) fn run(
     prompt: &str,
     options: Vec<String>,
     checked: &[usize],
+    available: Vec<bool>,
     color: bool,
 ) -> io::Result<Option<Vec<String>>> {
-    let mut list = Checklist::new(options, checked);
+    let mut list = Checklist::new(options, checked, available);
     let mut out = io::stderr();
     let _raw = RawMode::enter()?;
     let mut drawn = 0u16;
@@ -203,6 +246,7 @@ pub(crate) fn run(
 fn frame(list: &Checklist, prompt: &str, color: bool, help: bool) -> Vec<String> {
     let width = terminal::size().map_or(0, |(w, _)| w as usize);
     let mut lines = vec![truncate(&format!("? {prompt}"), width)];
+    lines.extend(list.header(color, width));
     lines.extend(list.rows(color, width));
     if help {
         lines.push(truncate(HELP, width));
@@ -236,6 +280,7 @@ mod tests {
         Checklist::new(
             vec!["enclave".into(), "yubikey".into(), "file".into()],
             &[1],
+            Vec::new(),
         )
     }
 
@@ -264,6 +309,24 @@ mod tests {
             l.rows(false, 0),
             ["  [ ] enclave", "  [✔] yubikey", "  [ ] file"]
         );
+    }
+
+    #[test]
+    fn availability_column_has_a_header_and_lines_up() {
+        let l = Checklist::new(
+            vec!["enclave".into(), "file".into()],
+            &[],
+            vec![false, true],
+        );
+        assert_eq!(
+            l.header(false, 0).as_deref(),
+            Some("      Available on this machine?")
+        );
+        assert_eq!(l.rows(false, 0), ["❯ [ ] [ｘ] enclave", "  [ ] ✅   file"]);
+        let rows = l.rows(true, 0);
+        assert!(rows[0].contains("\x1b[37;41m[ｘ]"), "{:?}", rows[0]);
+        assert!(rows[1].contains("\x1b[92m✅"), "{:?}", rows[1]);
+        assert!(list().header(false, 0).is_none());
     }
 
     #[test]
