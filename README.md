@@ -162,16 +162,26 @@ brew install sops age age-plugin-se
 >
 > If you installed sopsy via `brew install kigster/tap/sopsy`, these are pulled in automatically — you can skip this section.
 
-| Tool            | Purpose                                                    |
-| --------------- | ---------------------------------------------------------- |
-| `sops`          | The encryption engine sopsy drives for every crypto op.    |
-| `age`           | The modern encryption library SOPS uses under the hood.    |
-| `age-plugin-se` | Generates Secure Enclave-backed `age` identities on macOS. |
-| `git`           | sopsy is repository-aware (already present on most Macs).  |
+| Tool                 | Purpose                                                          |
+| -------------------- | ---------------------------------------------------------------- |
+| `sops`               | The encryption engine sopsy drives for every crypto op.          |
+| `age`                | The modern encryption library SOPS uses under the hood.          |
+| `age-plugin-se`      | Secure Enclave-backed `age` identities (Apple Silicon).          |
+| `age-plugin-yubikey` | YubiKey-backed `age` identities (PIV slot, PIN + touch).         |
+| `git`                | sopsy is repository-aware (already present on most Macs).        |
 
 > [!IMPORTANT]
 >
-> Secure Enclave identity generation requires **Apple Silicon** (M-series) with a Secure Enclave. On other hardware you can still use sopsy by supplying an existing `age` public key (`--public-key`), but you lose hardware protection.
+> Your private key lives in a **key store**. `--store auto` (the default) picks the most secure one your machine has:
+>
+> | Store      | Kind      | Where the private key lives                                   |
+> | ---------- | --------- | ------------------------------------------------------------- |
+> | `enclave`  | hardware  | Apple Secure Enclave (Apple Silicon); never leaves the chip   |
+> | `yubikey`  | hardware  | A YubiKey PIV slot; never leaves the key                      |
+> | `keychain` | software  | macOS Keychain / Linux Secret Service, encrypted at rest      |
+> | `file`     | plaintext | `keys.txt` (mode `0600`); last resort, with a loud warning    |
+>
+> `sopsy init --require yubikey,keychain` limits which stores members may use (groups `onchip`, `exthardware`, `software` work too). `SOPSY_PRIVATE_KEY_STORE_PRIORITY` reorders or restricts `auto` for you personally. `sopsy doctor` shows what is available here.
 
 > [!TIP]
 >
