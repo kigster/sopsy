@@ -12,12 +12,14 @@ use clap::ValueEnum;
 
 /// Printed before `age-plugin-yubikey` takes the terminal: its own prompts
 /// ask for a PUK without saying what one is.
-const YUBIKEY_PROMPTS: [&str; 5] = [
+const YUBIKEY_PROMPTS: [&str; 7] = [
     "Talking to your YubiKey: enter its PIN, and touch it when it blinks.",
-    "On a YubiKey still at factory settings, the plugin also asks you to choose a new PIN",
-    "  and for the PUK (PIN Unblock Key), which resets a PIN locked by 3 wrong tries.",
-    "  The factory PUK is 12345678; if your organization set up the key, ask them.",
-    "  3 wrong PUKs lock it for good (only a PIV reset, erasing its keys, recovers).",
+    "Nothing is shown while you type a PIN or PUK; the plugin prints [hidden] afterwards.",
+    "On a YubiKey still at factory settings (PIN 123456), the plugin makes you choose a",
+    "  new PIN: 6 to 8 characters (letters, digits or symbols). It also asks for the PUK",
+    "  (PIN Unblock Key), which resets a PIN locked by 3 wrong tries. The factory PUK is",
+    "  12345678; if your organization set up the key, ask them. The plugin then sets the",
+    "  PUK to your new PIN. 3 wrong PUKs lock it for good (only a PIV reset recovers).",
 ];
 
 /// Choose a store, generate a key in it and, with `persist`, save the local
