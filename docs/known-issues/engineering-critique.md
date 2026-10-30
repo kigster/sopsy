@@ -15,7 +15,7 @@ sopsy remains a security-conscious wrapper: it drives `sops`/`age`/`age-plugin-s
 | 5   | `check`'s hand-rolled regex mis-evaluates common `path_regex` syntax       | Medium                       | Confirmed                      |
 | 6   | `mutate_sops_yaml` destroys `.sops.yaml` comments/formatting               | Medium                       | Confirmed                      |
 | 7   | `secret-scan` push trigger targets `master`; repo is `main`                | Medium                       | Confirmed                      |
-| 8   | `just warnings` runs `-D warnings` (typo) — dead release gate              | Medium                       | Confirmed                      |
+| 8   | `just warnings` denied a misspelled lint — dead release gate               | Medium                       | Partially mitigated            |
 | 9   | `.sopsy.sha` sidecar: friction-heavy, weak evidence, guards the wrong file | Medium (UX) / Low (security) | Confirmed                      |
 | 10  | Portable break-glass/CI key lifecycle on disk                              | Medium                       | Partially mitigated            |
 | 11  | `Config::save` is a non-atomic two-file write                              | Low–Medium                   | Confirmed                      |
@@ -122,13 +122,13 @@ The `ConfigSnapshot` is only restored when `run_updatekeys` fails. Earlier falli
 
 **Fix:** `branches: [main]`, update the comments, and mark `secret-scan` required in branch protection for `main` (a repo setting the code can't enforce — verify in the GitHub UI). Grep for other `master` remnants while there.
 
-### 8. `just warnings` runs `-D warnings` — the release gate is a no-op
+### 8. `just warnings` denied a misspelled lint — the release gate was a no-op
 
 *Was: Staff #10. Medium.*
 
-`justfile:32` is `cargo clippy -- -D warnings` — denying a lint that doesn't exist. rustc emits "unknown lint" *as a warning* and exits 0, so `build` and the whole `publish` chain (`justfile:22,46`) never actually deny warnings. Secondary: `publish` depends on `fmt`, which *mutates* the tree (`cargo fmt`, not `--check`) right before `cargo publish`, so the published crate can differ from the committed code. CLAUDE.md documents the typo instead of fixing it.
+`justfile:32` was `cargo clippy -- -D` followed by a misspelling of `warnings` — denying a lint that doesn't exist. rustc emits "unknown lint" *as a warning* and exits 0, so `build` and the whole `publish` chain (`justfile:22,46`) never actually deny warnings. Secondary: `publish` depends on `fmt`, which *mutates* the tree (`cargo fmt`, not `--check`) right before `cargo publish`, so the published crate can differ from the committed code. CLAUDE.md documents the typo instead of fixing it.
 
-**Verified:** typo still present; `publish: fmt warnings test …`.
+**Verified:** typo fixed (2026-10-29, now `-D warnings`); `publish: fmt warnings test …` still runs the mutating `fmt`.
 
 **Fix:** `warnings: cargo clippy --all-targets --all-features -- -D warnings` (matching CI), change the `publish`/`build` dependency to a non-mutating `fmt-check: cargo fmt --all -- --check`, and remove the CLAUDE.md sentence that enshrines the typo.
 
