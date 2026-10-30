@@ -113,7 +113,7 @@ impl Sandbox {
 fn file_store_round_trips_and_warns() {
     let sb = Sandbox::new();
     sb.sopsy()
-        .args(["init", "--store", "file", "--no-break-glass"])
+        .args(["init", "--store", "file", "--no-emergency-keys"])
         .assert()
         .success()
         .stdout(predicate::str::contains("PLAINTEXT"));
@@ -128,7 +128,7 @@ fn file_store_round_trips_and_warns() {
 fn keychain_store_keeps_the_secret_off_disk_and_out_of_argv() {
     let sb = Sandbox::new();
     sb.sopsy()
-        .args(["init", "--store", "keychain", "--no-break-glass"])
+        .args(["init", "--store", "keychain", "--no-emergency-keys"])
         .assert()
         .success();
 
@@ -148,7 +148,7 @@ fn auto_falls_back_through_the_priority_list() {
     // No enclave and no YubiKey here; keychain is next.
     sb.sopsy()
         .env("SOPSY_PRIVATE_KEY_STORE_PRIORITY", "exthardware,software")
-        .args(["init", "--no-break-glass"])
+        .args(["init", "--no-emergency-keys"])
         .assert()
         .success();
     assert!(sb.read(".sopsy.yml").contains("store: keychain"));
@@ -156,7 +156,7 @@ fn auto_falls_back_through_the_priority_list() {
     let sb = Sandbox::new();
     sb.sopsy()
         .env("SOPSY_PRIVATE_KEY_STORE_PRIORITY", "exthardware")
-        .args(["init", "--no-break-glass"])
+        .args(["init", "--no-emergency-keys"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("no usable key store"));
@@ -196,9 +196,9 @@ fn yubikey_store_records_stub_and_recipient() {
             "init",
             "--require",
             "exthardware",
-            "--pin-policy",
+            "--yubikey-pin-policy",
             "always",
-            "--no-break-glass",
+            "--no-emergency-keys",
         ])
         .assert()
         .success();
@@ -217,6 +217,24 @@ fn yubikey_store_records_stub_and_recipient() {
         "checks for a reusable key: {calls}"
     );
     assert!(calls.contains("--generate") && calls.contains("--pin-policy=always"));
+}
+
+#[test]
+fn several_yubikeys_need_a_serial_when_not_interactive() {
+    let sb = Sandbox::new();
+    let p = sb.path();
+    write_script(
+        &p.join("usb"),
+        "echo 'YubiKey OTP+FIDO+CCID@1'\necho 'YubiKey OTP+FIDO+CCID@2'\n",
+    );
+    write_script(&p.join("age-plugin-yubikey"), "exit 0\n");
+    sb.sopsy()
+        .env("SOPSY_USB_LIST_BIN", p.join("usb"))
+        .env("SOPSY_AGE_PLUGIN_YUBIKEY_BIN", p.join("age-plugin-yubikey"))
+        .args(["init", "-s", "yubikey", "--no-emergency-keys"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("2 YubiKeys are plugged in"));
 }
 
 #[test]
@@ -240,7 +258,7 @@ fn init_rejects_stores_outside_the_allowed_set() {
 fn init_rejects_a_pasted_non_key() {
     let sb = Sandbox::new();
     sb.sopsy()
-        .args(["init", "--public-key", "n"])
+        .args(["init", "--age-public-key", "n"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("not an age public key"));
@@ -256,21 +274,21 @@ fn join_and_approve_honor_the_allowed_set() {
             "software",
             "--store",
             "file",
-            "--no-break-glass",
+            "--no-emergency-keys",
         ])
         .assert()
         .success();
 
     // A Secure Enclave key is outside `software`.
     sb.sopsy()
-        .args(["join", "annie", "--public-key", "age1se1qannie"])
+        .args(["join", "annie", "--age-public-key", "age1se1qannie"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("allows only: keychain, file"));
 
     // A plain key must declare its store.
     sb.sopsy()
-        .args(["join", "annie", "--public-key", "age1qannie"])
+        .args(["join", "annie", "--age-public-key", "age1qannie"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("pass --store"));
@@ -302,7 +320,7 @@ fn join_and_approve_honor_the_allowed_set() {
 fn without_touch_id_is_rejected_for_software_stores() {
     let sb = Sandbox::new();
     sb.sopsy()
-        .args(["init", "--store", "file", "--no-break-glass"])
+        .args(["init", "--store", "file", "--no-emergency-keys"])
         .assert()
         .success();
     sb.sopsy()

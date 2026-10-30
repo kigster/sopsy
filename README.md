@@ -300,7 +300,7 @@ ______________________________________________________________________
 
 > [!TIP]
 >
-> In **interactive** mode `init` offers to set up the break-glass key right then — the moment you're most likely to actually do it. It prints a yellow prompt to copy the generated `break-glass.private` / `.public` into 1Password, waits for you, then deletes the local copies. Use `--break-glass` / `--no-break-glass` to decide explicitly (e.g. in scripts).
+> In **interactive** mode `init` offers to set up the break-glass key right then — the moment you're most likely to actually do it. It prints a yellow prompt to copy the generated `break-glass.private` / `.public` into 1Password, waits for you, then deletes the local copies. Use `--generate-emergency-keys` / `--no-emergency-keys` to decide explicitly (e.g. in scripts).
 
 ______________________________________________________________________
 
@@ -448,26 +448,31 @@ These apply to **every** subcommand (they are global and may appear before or af
 
 Bootstrap an encrypted repository. Verifies the toolchain, acquires an `age` recipient (a generated Secure Enclave identity or a supplied public key), and writes `.sops.yaml`, `.env.example`, an encrypted `.env.encrypted`, `.gitignore` safety rules, and `.sopsy.yml`.
 
-| Flag                      | Description                                                                                                                                                    |
-| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--recipient-name <NAME>` | Name to record for the recipient created/registered during init (default: `admin`).                                                                            |
-| `--username <NAME>`       | Username of who generated the key, recorded in `.sopsy.yml`. When generating interactively, this is the default offered at the prompt (falls back to `$USER`). |
-| `--public-key <age1...>`  | Use an existing `age` public key instead of generating a new Secure Enclave identity.                                                                          |
-| `--no-generate`           | Skip Secure Enclave identity generation. Requires `--public-key`, else init errors.                                                                            |
-| `--break-glass`           | Run the break-glass ceremony as part of init (interactive mode prompts by default).                                                                            |
-| `--no-break-glass`        | Skip break-glass setup during init (you'll get a reminder to run it later).                                                                                    |
-| `--force`                 | Overwrite/recreate `.sops.yaml` and `.env.encrypted` even if they already exist, and proceed even if some doctor checks fail.                                  |
+| Flag                                    | Description                                                                                                                                                     |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-n`, `--recipient-name <NAME>`         | Name to record for the recipient created/registered during init (default: `admin`).                                                                             |
+| `-u`, `--username <NAME>`               | Username of who generated the key, recorded in `.sopsy.yml`. When generating interactively, this is the default offered at the prompt (falls back to `$USER`).  |
+| `-p`, `--age-public-key <age1...>`      | Use an existing `age` public key instead of generating a new identity.                                                                                          |
+| `--no-generate`                         | Skip identity generation. Requires `--age-public-key`, else init errors.                                                                                        |
+| `-r`, `--require <STORES>`              | Key stores members may use, comma-separated: `enclave`, `yubikey`, `keychain`, `file`, or the groups `onchip`, `exthardware`, `software`. Interactive runs ask. |
+| `-s`, `--store <STORE>`                 | Where your private key lives: `auto` (default), `enclave`, `yubikey`, `keychain`, `file`.                                                                       |
+| `-a`, `--always-new-slot`               | Generate a new YubiKey key even if a reusable one exists. Interactive runs list the existing keys (and the YubiKeys, when several are plugged in).              |
+| `-c`, `--yubikey-pin-policy <POLICY>`   | `always`, `cached` (once per session, default) or `never`.                                                                                                      |
+| `-b`, `--yubikey-touch-policy <POLICY>` | `always`, `cached` (15 seconds, fixed by the YubiKey; default) or `never`.                                                                                      |
+| `-e`, `--generate-emergency-keys`       | Generate the portable "break glass" emergency key as part of init (interactive mode prompts by default).                                                        |
+| `--no-emergency-keys`                   | Skip the emergency key during init (you'll get a reminder to run it later).                                                                                     |
+| `--force`                               | Overwrite/recreate `.sops.yaml` and `.env.encrypted` even if they already exist, and proceed even if some doctor checks fail.                                   |
 
 ```bash
 # Interactive: generate a Secure Enclave identity (Touch ID may prompt).
 sopsy init
 
 # Interactive but name the recipient:
-sopsy init --recipient-name alice
+sopsy init -n alice
 
 # Non-interactive / CI: bring your own age key, never touch the Enclave.
-sopsy init -y --recipient-name ci-bot \
-  --public-key age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p \
+sopsy init -y -n ci-bot \
+  --age-public-key age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p \
   --no-generate
 ```
 
@@ -517,22 +522,22 @@ sopsy edit config/db.encrypted.yaml -- --indent 4
 
 ### `sopsy join`
 
-Request membership in a repo someone else bootstrapped. Generates your Secure Enclave identity (or uses `--public-key`) and records a **pending** entry in `.sopsy.yml` with a timestamp. A pending entry is *not* added to `.sops.yaml`, so it grants no access — it is purely a request you then push as a pull request.
+Request membership in a repo someone else bootstrapped. Generates your Secure Enclave identity (or uses `--age-public-key`) and records a **pending** entry in `.sopsy.yml` with a timestamp. A pending entry is *not* added to `.sops.yaml`, so it grants no access — it is purely a request you then push as a pull request.
 
-| Argument / Flag            | Description                                                                           |
-| -------------------------- | ------------------------------------------------------------------------------------- |
-| `<name>`                   | Your name as recorded in `.sopsy.yml` — full name or first name (required).           |
-| `--username <NAME>`        | System username recorded alongside the name (defaults to `$USER`).                    |
-| `--public-key <age1...>`   | Use an existing public key instead of generating a new Secure Enclave identity.       |
-| `-t`, `--without-touch-id` | Mint the Enclave identity with no Touch ID / passcode gate (`--access-control none`). |
-| `--sopsy-file <FILE>`      | Path to the `.sopsy.yml` to update (defaults to the one in the repo root).            |
-| `-- <age flags>`           | Everything after `--` is forwarded to `age-plugin-se keygen`.                         |
+| Argument / Flag                    | Description                                                                           |
+| ---------------------------------- | ------------------------------------------------------------------------------------- |
+| `<name>`                           | Your name as recorded in `.sopsy.yml` — full name or first name (required).           |
+| `--username <NAME>`                | System username recorded alongside the name (defaults to `$USER`).                    |
+| `-p`, `--age-public-key <age1...>` | Use an existing public key instead of generating a new Secure Enclave identity.       |
+| `-t`, `--without-touch-id`         | Mint the Enclave identity with no Touch ID / passcode gate (`--access-control none`). |
+| `--sopsy-file <FILE>`              | Path to the `.sopsy.yml` to update (defaults to the one in the repo root).            |
+| `-- <age flags>`                   | Everything after `--` is forwarded to `age-plugin-se keygen`.                         |
 
 ```bash
 sopsy join alice                                   # generate a key, record a pending request
 sopsy join "Konstantin Gredeskoul" --username kig  # full name + explicit username
 sopsy join alice --without-touch-id                # no Touch ID prompt on decryption
-sopsy join alice --public-key age1se1…             # reuse an existing public key
+sopsy join alice --age-public-key age1se1…             # reuse an existing public key
 # then:
 git add .sopsy.yml .sopsy.sha && git commit -m "join: request access for alice" && git push
 ```
@@ -569,23 +574,23 @@ Manage the repository's recipients. `add`/`remove` keep `.sopsy.yml` and `.sops.
 
 #### `recipient add`
 
-| Argument / Flag          | Description                                                                 |
-| ------------------------ | --------------------------------------------------------------------------- |
-| `[name]`                 | Positional recipient name (equivalent to `--name`).                         |
-| `--name <NAME>`          | Recipient name (prompted if omitted in interactive mode).                   |
-| `--public-key <age1...>` | The recipient's `age` public key (prompted if omitted in interactive mode). |
-| `--break-glass`          | Mark this recipient as the offline emergency break-glass key.               |
-| `--no-updatekeys`        | Skip the `sops updatekeys` re-encryption step after editing `.sops.yaml`.   |
+| Argument / Flag                    | Description                                                                 |
+| ---------------------------------- | --------------------------------------------------------------------------- |
+| `[name]`                           | Positional recipient name (equivalent to `--name`).                         |
+| `--name <NAME>`                    | Recipient name (prompted if omitted in interactive mode).                   |
+| `-p`, `--age-public-key <age1...>` | The recipient's `age` public key (prompted if omitted in interactive mode). |
+| `--break-glass`                    | Mark this recipient as the offline emergency break-glass key.               |
+| `--no-updatekeys`                  | Skip the `sops updatekeys` re-encryption step after editing `.sops.yaml`.   |
 
 ```bash
 # Interactive: prompts for name + key.
 sopsy recipient add
 
 # Non-interactive: add a teammate by positional name.
-sopsy recipient add bob --public-key age1se1qg8vw…
+sopsy recipient add bob --age-public-key age1se1qg8vw…
 
 # Register the break-glass emergency key.
-sopsy recipient add break-glass --public-key age1q… --break-glass
+sopsy recipient add break-glass --age-public-key age1q… --break-glass
 ```
 
 > [!WARNING]

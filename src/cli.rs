@@ -57,7 +57,7 @@ pub struct GlobalArgs {
     /// After a command changes files, `git add` exactly those files and print
     /// ready-to-paste commit and pull-request instructions. A no-op for commands
     /// that don't modify committed files.
-    #[arg(long, global = true)]
+    #[arg(long, short = 'g', global = true)]
     pub git: bool,
 }
 
@@ -132,17 +132,22 @@ pub enum Command {
 #[derive(Debug, Args)]
 pub struct InitArgs {
     /// Name to record for the recipient created/registered during init.
-    #[arg(long)]
+    #[arg(long, short = 'n')]
     pub recipient_name: Option<String>,
 
     /// Username of who is generating the key (recorded in `.sopsy.yml`). When a
     /// new identity is generated interactively, this is the default offered at
     /// the prompt; falls back to the current system user.
-    #[arg(long)]
+    #[arg(long, short = 'u')]
     pub username: Option<String>,
 
     /// Use an existing age public key instead of generating a new identity.
-    #[arg(long)]
+    #[arg(
+        long = "age-public-key",
+        short = 'p',
+        alias = "public-key",
+        value_name = "AGE1…"
+    )]
     pub public_key: Option<String>,
 
     /// Skip identity generation (e.g. when supplying a key).
@@ -153,20 +158,25 @@ pub struct InitArgs {
     /// `key_policy.required` in `.sopsy.yml`. Comma-separated or repeated:
     /// `enclave`, `yubikey`, `keychain`, `file`, or the groups `onchip`,
     /// `exthardware`, `software`. Omit for no restriction (interactive runs ask).
-    #[arg(long, value_name = "STORES", value_delimiter = ',')]
+    #[arg(long, short = 'r', value_name = "STORES", value_delimiter = ',')]
     pub require: Vec<String>,
 
     /// Where to generate the admin's key.
     #[command(flatten)]
     pub key: StoreArgs,
 
-    /// Generate a break-glass emergency key as part of init (the default in
-    /// interactive mode is to prompt). Mutually exclusive with `--no-break-glass`.
-    #[arg(long, conflicts_with = "no_break_glass")]
+    /// Generate the portable "break glass" emergency key as part of init, for
+    /// offline storage (interactive runs ask). Conflicts with `--no-emergency-keys`.
+    #[arg(
+        long = "generate-emergency-keys",
+        short = 'e',
+        alias = "break-glass",
+        conflicts_with = "no_break_glass"
+    )]
     pub break_glass: bool,
 
-    /// Skip break-glass key generation during init.
-    #[arg(long)]
+    /// Skip generating the break-glass emergency key during init.
+    #[arg(long = "no-emergency-keys", alias = "no-break-glass")]
     pub no_break_glass: bool,
 
     /// Proceed even if some doctor checks fail.
@@ -197,7 +207,7 @@ pub struct JoinArgs {
     pub name: String,
 
     /// System username recorded alongside the name (defaults to `$USER`).
-    #[arg(long)]
+    #[arg(long, short = 'u')]
     pub username: Option<String>,
 
     /// Path to the `.sopsy.yml` to update (defaults to the one in the repo root).
@@ -205,13 +215,18 @@ pub struct JoinArgs {
     pub sopsy_file: Option<PathBuf>,
 
     /// Use this existing age public key instead of generating a new identity.
-    #[arg(long)]
+    #[arg(
+        long = "age-public-key",
+        short = 'p',
+        alias = "public-key",
+        value_name = "AGE1…"
+    )]
     pub public_key: Option<String>,
 
     /// Generate the key without a presence gate: for the Secure Enclave,
     /// `--access-control none` (no Touch ID / passcode); for a YubiKey, touch
     /// policy `never` (the PIN is kept). The private key still never leaves the
-    /// device. Rejected for software stores. Ignored with `--public-key`.
+    /// device. Rejected for software stores. Ignored with `--age-public-key`.
     #[arg(short = 't', long = "without-touch-id")]
     pub without_touch_id: bool,
 
@@ -259,27 +274,40 @@ pub struct StoreArgs {
     /// Where the private key lives. `auto` picks the most secure store this
     /// machine supports, in the order of `SOPSY_PRIVATE_KEY_STORE_PRIORITY`
     /// (default: enclave, yubikey, keychain, file).
-    #[arg(long, value_enum, default_value_t = StoreChoice::Auto)]
+    #[arg(long, short = 's', value_enum, default_value_t = StoreChoice::Auto)]
     pub store: StoreChoice,
 
-    /// YubiKey serial to use when several are plugged in.
-    #[arg(long, value_name = "SERIAL")]
+    /// YubiKey serial, for scripts; interactive runs list the plugged-in keys.
+    #[arg(long, value_name = "SERIAL", hide = true)]
     pub yubikey_serial: Option<u32>,
 
-    /// YubiKey retired PIV slot (1-20); an existing key there is reused.
-    #[arg(long, value_name = "SLOT", value_parser = clap::value_parser!(u8).range(1..=20))]
+    /// YubiKey PIV slot (1-20), for scripts; interactive runs offer the keys
+    /// already on the YubiKey.
+    #[arg(long, value_name = "SLOT", hide = true, value_parser = clap::value_parser!(u8).range(1..=20))]
     pub yubikey_slot: Option<u8>,
 
-    /// Always generate a new YubiKey key instead of reusing a matching one.
-    #[arg(long)]
+    /// Always generate a new YubiKey key instead of reusing an existing one.
+    #[arg(long = "always-new-slot", short = 'a', alias = "new-slot")]
     pub new_slot: bool,
 
-    /// YubiKey PIN policy for a new key [default: once].
-    #[arg(long, value_enum)]
+    /// When the YubiKey asks for its PIN: every decryption, once per session
+    /// (`cached`), or never [default: cached].
+    #[arg(
+        long = "yubikey-pin-policy",
+        short = 'c',
+        alias = "pin-policy",
+        value_enum
+    )]
     pub pin_policy: Option<PinPolicy>,
 
-    /// YubiKey touch policy for a new key [default: cached].
-    #[arg(long, value_enum)]
+    /// When the YubiKey asks for a touch: every decryption, once per 15
+    /// seconds (`cached`), or never [default: cached].
+    #[arg(
+        long = "yubikey-touch-policy",
+        short = 'b',
+        alias = "touch-policy",
+        value_enum
+    )]
     pub touch_policy: Option<TouchPolicy>,
 }
 
@@ -454,7 +482,12 @@ pub struct RecipientAddArgs {
     pub name: Option<String>,
 
     /// The recipient's age public key (`age1...`).
-    #[arg(long)]
+    #[arg(
+        long = "age-public-key",
+        short = 'p',
+        alias = "public-key",
+        value_name = "AGE1…"
+    )]
     pub public_key: Option<String>,
 
     /// Where this key's private half lives, recorded in `.sopsy.yml`. Needed
@@ -509,6 +542,67 @@ mod tests {
     fn cli_definition_is_valid() {
         // clap's debug assertions catch malformed derive definitions.
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn init_accepts_short_flags() {
+        let cli = Cli::try_parse_from([
+            "sopsy",
+            "init",
+            "-g",
+            "-n",
+            "admin",
+            "-u",
+            "sam",
+            "-p",
+            "age1sam",
+            "-r",
+            "yubikey,keychain",
+            "-s",
+            "yubikey",
+            "-a",
+            "-c",
+            "cached",
+            "-b",
+            "always",
+            "-e",
+        ])
+        .unwrap();
+        assert!(cli.global.git);
+        let Command::Init(args) = cli.command else {
+            panic!("expected init");
+        };
+        assert_eq!(args.recipient_name.as_deref(), Some("admin"));
+        assert_eq!(args.username.as_deref(), Some("sam"));
+        assert_eq!(args.public_key.as_deref(), Some("age1sam"));
+        assert_eq!(args.require, ["yubikey", "keychain"]);
+        assert_eq!(args.key.store, StoreChoice::Yubikey);
+        assert!(args.key.new_slot && args.break_glass);
+        assert_eq!(args.key.pin_policy, Some(PinPolicy::Once));
+        assert_eq!(args.key.touch_policy, Some(TouchPolicy::Always));
+    }
+
+    #[test]
+    fn init_keeps_the_old_long_flags_as_aliases() {
+        let cli = Cli::try_parse_from([
+            "sopsy",
+            "init",
+            "--public-key",
+            "age1sam",
+            "--no-break-glass",
+            "--new-slot",
+            "--pin-policy",
+            "once",
+            "--touch-policy",
+            "never",
+        ])
+        .unwrap();
+        let Command::Init(args) = cli.command else {
+            panic!("expected init");
+        };
+        assert!(args.no_break_glass && args.key.new_slot);
+        assert_eq!(args.key.pin_policy, Some(PinPolicy::Once));
+        assert_eq!(args.key.touch_policy, Some(TouchPolicy::Never));
     }
 
     #[test]
