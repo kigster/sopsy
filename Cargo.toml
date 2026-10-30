@@ -24,6 +24,9 @@ ctrlc = { version = "3.4", features = ["termination"] }
 humantime = "2.2"
 indicatif = "0.18.4"
 inquire = "0.9.4"
+# Raw-mode key input for the checklist prompt (`ui/checklist.rs`); the same
+# version inquire already pulls in.
+crossterm = "0.29"
 owo-colors = "4.3.0"
 # Terminal width detection for the full-width banner boxes in `ui.rs`.
 terminal_size = "0.4"
