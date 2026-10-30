@@ -908,17 +908,19 @@ ______________________________________________________________________
 
 ## Environment variables
 
-| Variable                  | Effect                                                                                                                                |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `EDITOR` / `VISUAL`       | Editor for `sopsy edit` (after `--editor`, before the `vi` default).                                                                  |
-| `NO_COLOR`                | Disables colored output (same as `--no-color`).                                                                                       |
-| `SOPSY_KEYS_FILE`         | Override where sopsy stores/reads the age identity (default: the per-user `sops` keys file).                                          |
-| `SOPS_AGE_KEY_FILE`       | Standard `sops` var for the age identity file; if you set it, sopsy honors it and stores there.                                       |
-| `SOPS_AGE_KEY`            | Standard `sops` var holding a literal age identity — how CI decrypts (see [`recipient ci`](#recipient-ci)). sopsy never overrides it. |
-| `SOPSY_SOPS_BIN`          | Override the `sops` binary path (primarily for testing).                                                                              |
-| `SOPSY_AGE_PLUGIN_SE_BIN` | Override the `age-plugin-se` binary path (primarily for testing).                                                                     |
-| `SOPSY_AGE_KEYGEN_BIN`    | Override the `age-keygen` binary path (used by break-glass; for testing).                                                             |
-| `SOPSY_ASSUME_YES`        | Assume interactive confirmations (break-glass press-ENTER, `approve` vouch). For automation/CI only.                                  |
+| Variable                           | Effect                                                                                                                                |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `EDITOR` / `VISUAL`                | Editor for `sopsy edit` (after `--editor`, before the `vi` default).                                                                  |
+| `NO_COLOR`                         | Disables colored output (same as `--no-color`).                                                                                       |
+| `SOPSY_POINTER`                    | One-cell glyph marking the current row in checklists (default `❯`), e.g. a Nerd Font arrow.                                           |
+| `SOPSY_PRIVATE_KEY_STORE_PRIORITY` | Your own key store order for `--store auto`, e.g. `exthardware,software`; stores left out are not used.                               |
+| `SOPSY_KEYS_FILE`                  | Override where sopsy stores/reads the age identity (default: the per-user `sops` keys file).                                          |
+| `SOPS_AGE_KEY_FILE`                | Standard `sops` var for the age identity file; if you set it, sopsy honors it and stores there.                                       |
+| `SOPS_AGE_KEY`                     | Standard `sops` var holding a literal age identity — how CI decrypts (see [`recipient ci`](#recipient-ci)). sopsy never overrides it. |
+| `SOPSY_SOPS_BIN`                   | Override the `sops` binary path (primarily for testing).                                                                              |
+| `SOPSY_AGE_PLUGIN_SE_BIN`          | Override the `age-plugin-se` binary path (primarily for testing).                                                                     |
+| `SOPSY_AGE_KEYGEN_BIN`             | Override the `age-keygen` binary path (used by break-glass; for testing).                                                             |
+| `SOPSY_ASSUME_YES`                 | Assume interactive confirmations (break-glass press-ENTER, `approve` vouch). For automation/CI only.                                  |
 
 ______________________________________________________________________
 

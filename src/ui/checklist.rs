@@ -2,7 +2,8 @@
 //!
 //! `inquire`'s multi-select styles every unchecked row alike, so it cannot
 //! colour a row by whether it is checked. Here the row under the cursor is
-//! bold yellow, checked rows are green with `[✔]`, and unchecked rows are
+//! bold yellow behind a `❯` ([`POINTER_ENV`] picks another one-cell glyph,
+//! such as a Nerd Font arrow), checked rows are green with `[✔]`, and unchecked rows are
 //! plain with `[ ]`. An optional column after the checkbox marks each option
 //! supported by this machine (✅) or not (🟥), under a header that points at
 //! both columns:
@@ -13,7 +14,7 @@
 //!       ┃   Method supported by this hardware?
 //!       ┃   ┃    (If this machine lacks a method other machines may support)
 //!   ━━━━┻━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//!      [✔]  🟥   enclave — Secure Enclave (MacOS, Silicon CPU)
+//!    ❯ [✔]  🟥   enclave — Secure Enclave (MacOS, Silicon CPU)
 //!      [✔]  ✅   yubikey — YubiKey (hardware)
 //! ```
 //!
@@ -27,6 +28,11 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use crossterm::{cursor, queue, terminal};
 use owo_colors::{OwoColorize, Style};
 
+/// Marks the row under the cursor, in the indent before its checkbox.
+const POINTER: char = '❯';
+/// Environment variable naming another pointer glyph. Whether the font can
+/// draw it is up to the user: a terminal can't report a missing glyph.
+pub(crate) const POINTER_ENV: &str = "SOPSY_POINTER";
 const HINT: &str = "    Select or deselect with a space bar.";
 /// Header over the availability column, its `┃`s above the ✔ and the mark.
 const COLUMN_HEADER: [&str; 3] = [
@@ -85,6 +91,7 @@ pub(crate) struct Checklist {
     /// Per-option availability column; empty for no column.
     available: Vec<bool>,
     cursor: usize,
+    pointer: char,
     /// Confirmed: drop the cursor so the rows show only what was picked.
     done: bool,
 }
@@ -100,6 +107,7 @@ impl Checklist {
             checked: flags,
             available,
             cursor: 0,
+            pointer: POINTER,
             done: false,
         }
     }
@@ -146,7 +154,11 @@ impl Checklist {
             .map(|(i, option)| {
                 let here = !self.done && i == self.cursor;
                 let checked = self.checked[i];
-                let head = format!("     [{}]  ", if checked { "✔" } else { " " });
+                let head = format!(
+                    "   {} [{}]  ",
+                    if here { self.pointer } else { ' ' },
+                    if checked { '✔' } else { ' ' }
+                );
                 let mark = match self.available.get(i) {
                     None => "",
                     Some(true) => "✅   ",
@@ -219,6 +231,12 @@ pub(crate) fn run(
     color: bool,
 ) -> io::Result<Option<Vec<String>>> {
     let mut list = Checklist::new(options, checked, available);
+    if let Some(glyph) = std::env::var(POINTER_ENV)
+        .ok()
+        .and_then(|v| v.trim().chars().next())
+    {
+        list.pointer = glyph;
+    }
     let mut out = io::stderr();
     let _raw = RawMode::enter()?;
     let mut drawn = 0u16;
@@ -302,6 +320,7 @@ mod tests {
     fn confirmed_rows_keep_their_marks_but_lose_the_highlight() {
         let mut l = list();
         l.apply(Key::Submit);
+        assert_eq!(l.rows(false, 0)[0], "     [ ]  enclave");
         let rows = l.rows(true, 0);
         assert!(!rows[0].contains('\x1b'), "{:?}", rows[0]);
         assert!(rows[1].starts_with("\x1b[32m"), "{:?}", rows[1]);
@@ -322,10 +341,17 @@ mod tests {
                 "      ┃   Method supported by this hardware?",
                 "      ┃   ┃    (If this machine lacks a method other machines may support)",
                 "  ━━━━┻━━━┻━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-                "     [✔]  🟥   enclave",
+                "   ❯ [✔]  🟥   enclave",
                 "     [✔]  ✅   yubikey",
             ]
         );
+    }
+
+    #[test]
+    fn pointer_glyph_can_be_swapped() {
+        let mut l = list();
+        l.pointer = '\u{e0b0}';
+        assert_eq!(l.rows(false, 0)[0], "   \u{e0b0} [ ]  enclave");
     }
 
     #[test]
@@ -341,7 +367,7 @@ mod tests {
     fn rows_without_the_availability_column() {
         assert_eq!(
             list().rows(false, 0),
-            ["     [ ]  enclave", "     [✔]  yubikey", "     [ ]  file"]
+            ["   ❯ [ ]  enclave", "     [✔]  yubikey", "     [ ]  file"]
         );
     }
 
