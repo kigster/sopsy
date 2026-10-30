@@ -10,9 +10,10 @@
 //! - Section headers and an [`Ui::animated_line`] helper that cycles colors for
 //!   a touch of delight (non-blocking and test-friendly).
 //! - A spinner/progress helper backed by `indicatif`.
-//! - Thin wrappers over `inquire` ([`Ui::select`], [`Ui::multi_select`],
-//!   [`Ui::confirm`], [`Ui::text`]) that return a clear [`Error::NonInteractive`]
-//!   when called in `--non-interactive` mode instead of blocking forever.
+//! - Prompts that return a clear [`Error::NonInteractive`] when called in
+//!   `--non-interactive` mode instead of blocking forever: [`Ui::select`] and
+//!   [`Ui::multi_select`] (drawn by the `checklist` module), and
+//!   [`Ui::confirm`] and [`Ui::text`] (thin wrappers over `inquire`).
 //!
 //! Color is suppressed when `--no-color` is passed, when the `NO_COLOR`
 //! environment variable is set, or when stdout is not a TTY.
@@ -21,7 +22,7 @@ use std::io::{IsTerminal, Write};
 use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressStyle};
-use inquire::{Confirm, Select, Text};
+use inquire::{Confirm, Text};
 use owo_colors::{OwoColorize, Style};
 
 use crate::error::{Error, Result};
@@ -368,10 +369,11 @@ impl Ui {
     ///
     /// Returns [`Error::NonInteractive`] when prompting is disabled.
     pub fn select(&self, prompt: &str, flag: &str, options: Vec<String>) -> Result<String> {
-        self.ensure_interactive(prompt, flag)?;
-        // Irreducible interactive tail: requires a real TTY, so it stays thin and
-        // untested while all guarding logic above is unit-tested.
-        Select::new(prompt, options).prompt().map_err(into_other)
+        let picked = self.checklist(prompt, flag, checklist::Checklist::single(options))?;
+        picked
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::Validation("nothing to choose from".into()))
     }
 
     /// Ask the user to pick zero or more options from `options`.
@@ -383,7 +385,11 @@ impl Ui {
         flag: &str,
         options: Vec<String>,
     ) -> Result<Vec<String>> {
-        self.checklist(prompt, flag, options, &[], Vec::new())
+        self.checklist(
+            prompt,
+            flag,
+            checklist::Checklist::new(options, &[], Vec::new()),
+        )
     }
 
     /// Like [`Ui::multi_select`], with every option selected to start with.
@@ -394,7 +400,11 @@ impl Ui {
         options: Vec<String>,
     ) -> Result<Vec<String>> {
         let all: Vec<usize> = (0..options.len()).collect();
-        self.checklist(prompt, flag, options, &all, Vec::new())
+        self.checklist(
+            prompt,
+            flag,
+            checklist::Checklist::new(options, &all, Vec::new()),
+        )
     }
 
     /// Like [`Ui::multi_select_all`], with a column marking each option
@@ -407,7 +417,11 @@ impl Ui {
     ) -> Result<Vec<String>> {
         let all: Vec<usize> = (0..options.len()).collect();
         let (options, available) = options.into_iter().unzip();
-        self.checklist(prompt, flag, options, &all, available)
+        self.checklist(
+            prompt,
+            flag,
+            checklist::Checklist::new(options, &all, available),
+        )
     }
 
     // Irreducible interactive tail: the key handling and rendering are
@@ -416,12 +430,10 @@ impl Ui {
         &self,
         prompt: &str,
         flag: &str,
-        options: Vec<String>,
-        checked: &[usize],
-        available: Vec<bool>,
+        list: checklist::Checklist,
     ) -> Result<Vec<String>> {
         self.ensure_interactive(prompt, flag)?;
-        checklist::run(prompt, options, checked, available, self.color)?.ok_or_else(|| {
+        checklist::run(prompt, list, self.color)?.ok_or_else(|| {
             into_other(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "prompt canceled",
