@@ -18,6 +18,9 @@
 //!      [✔]  ✅   yubikey — YubiKey (hardware)
 //! ```
 //!
+//! [`Checklist::single`] is the pick-one variant: the same pointer and
+//! colours, no checkboxes, and Enter (or Space) chooses the row.
+//!
 //! The state machine ([`Checklist::apply`]) and rendering ([`Checklist::lines`])
 //! are plain functions and unit-tested; [`run`] is the thin raw-mode loop
 //! around them that needs a real terminal.
@@ -34,6 +37,7 @@ const POINTER: char = '❯';
 /// draw it is up to the user: a terminal can't report a missing glyph.
 pub(crate) const POINTER_ENV: &str = "SOPSY_POINTER";
 const HINT: &str = "    Select or deselect with a space bar.";
+const SINGLE_HINT: &str = "    Move with ↑↓ and press Enter to choose.";
 /// Header over the availability column, its `┃`s above the ✔ and the mark.
 const COLUMN_HEADER: [&str; 3] = [
     "      ┃   Method supported by this hardware?",
@@ -44,6 +48,8 @@ const COLUMN_HEADER: [&str; 3] = [
 /// availability column `     [✔]  `.
 const TEXT_COLUMN: usize = 15;
 const TEXT_COLUMN_NO_MARK: usize = 10;
+/// Terminal cells before an option's text in a pick-one list: `   ❯ `.
+const TEXT_COLUMN_SINGLE: usize = 5;
 
 /// A key press, as far as the checklist cares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +98,8 @@ pub(crate) struct Checklist {
     available: Vec<bool>,
     cursor: usize,
     pointer: char,
+    /// Pick exactly one: no checkboxes, Enter chooses the cursor row.
+    single: bool,
     /// Confirmed: drop the cursor so the rows show only what was picked.
     done: bool,
 }
@@ -108,18 +116,33 @@ impl Checklist {
             available,
             cursor: 0,
             pointer: POINTER,
+            single: false,
             done: false,
+        }
+    }
+
+    /// A pick-one list.
+    pub(crate) fn single(options: Vec<String>) -> Self {
+        Self {
+            single: true,
+            ..Self::new(options, &[], Vec::new())
         }
     }
 
     pub(crate) fn apply(&mut self, key: Key) -> Outcome {
         let len = self.options.len();
+        if self.single && matches!(key, Key::Toggle | Key::Submit) && len > 0 {
+            self.checked.fill(false);
+            self.checked[self.cursor] = true;
+            self.done = true;
+            return Outcome::Submit;
+        }
         match key {
             Key::Up if len > 0 => self.cursor = (self.cursor + len - 1) % len,
             Key::Down if len > 0 => self.cursor = (self.cursor + 1) % len,
             Key::Toggle if len > 0 => self.checked[self.cursor] ^= true,
-            Key::All => self.checked.fill(true),
-            Key::None => self.checked.fill(false),
+            Key::All if !self.single => self.checked.fill(true),
+            Key::None if !self.single => self.checked.fill(false),
             Key::Submit => {
                 self.done = true;
                 return Outcome::Submit;
@@ -133,7 +156,8 @@ impl Checklist {
     /// Everything printed: prompt, hint, column header (with an availability
     /// column) and one row per option, each cut to `width` cells (0 = no limit).
     pub(crate) fn lines(&self, prompt: &str, color: bool, width: usize) -> Vec<String> {
-        let mut lines = vec![format!("  {prompt}"), HINT.to_string()];
+        let hint = if self.single { SINGLE_HINT } else { HINT };
+        let mut lines = vec![format!("  {prompt}"), hint.to_string()];
         if !self.available.is_empty() {
             lines.extend(COLUMN_HEADER.iter().map(|l| l.to_string()));
         }
@@ -143,7 +167,9 @@ impl Checklist {
     }
 
     fn rows(&self, color: bool, width: usize) -> Vec<String> {
-        let text_column = if self.available.is_empty() {
+        let text_column = if self.single {
+            TEXT_COLUMN_SINGLE
+        } else if self.available.is_empty() {
             TEXT_COLUMN_NO_MARK
         } else {
             TEXT_COLUMN
@@ -154,11 +180,12 @@ impl Checklist {
             .map(|(i, option)| {
                 let here = !self.done && i == self.cursor;
                 let checked = self.checked[i];
-                let head = format!(
-                    "   {} [{}]  ",
-                    if here { self.pointer } else { ' ' },
-                    if checked { '✔' } else { ' ' }
-                );
+                let pointer = if here { self.pointer } else { ' ' };
+                let head = if self.single {
+                    format!("   {pointer} ")
+                } else {
+                    format!("   {pointer} [{}]  ", if checked { '✔' } else { ' ' })
+                };
                 let mark = match self.available.get(i) {
                     None => "",
                     Some(true) => "✅   ",
@@ -225,12 +252,9 @@ impl Drop for RawMode {
 /// or cancels (`None`).
 pub(crate) fn run(
     prompt: &str,
-    options: Vec<String>,
-    checked: &[usize],
-    available: Vec<bool>,
+    mut list: Checklist,
     color: bool,
 ) -> io::Result<Option<Vec<String>>> {
-    let mut list = Checklist::new(options, checked, available);
     if let Some(glyph) = std::env::var(POINTER_ENV)
         .ok()
         .and_then(|v| v.trim().chars().next())
@@ -352,6 +376,29 @@ mod tests {
         let mut l = list();
         l.pointer = '\u{e0b0}';
         assert_eq!(l.rows(false, 0)[0], "   \u{e0b0} [ ]  enclave");
+    }
+
+    #[test]
+    fn single_choice_has_no_checkboxes_and_enter_picks_the_row() {
+        let mut l = Checklist::single(vec!["auto".into(), "file".into()]);
+        assert_eq!(
+            l.lines("Where?", false, 0),
+            [
+                "  Where?",
+                "    Move with ↑↓ and press Enter to choose.",
+                "   ❯ auto",
+                "     file",
+            ]
+        );
+        l.apply(Key::All);
+        assert!(l.selected().is_empty());
+        l.apply(Key::Down);
+        assert_eq!(l.apply(Key::Submit), Outcome::Submit);
+        assert_eq!(l.selected(), ["file"]);
+        // Confirmed: the pick stays green, the cursor goes.
+        let rows = l.rows(true, 0);
+        assert!(!rows[0].contains('\x1b'), "{:?}", rows[0]);
+        assert!(rows[1].starts_with("\x1b[32m"), "{:?}", rows[1]);
     }
 
     #[test]
