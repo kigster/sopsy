@@ -383,7 +383,7 @@ impl Ui {
         flag: &str,
         options: Vec<String>,
     ) -> Result<Vec<String>> {
-        self.checklist(prompt, flag, options, &[])
+        self.checklist(prompt, flag, options, &[], Vec::new())
     }
 
     /// Like [`Ui::multi_select`], with every option selected to start with.
@@ -394,7 +394,20 @@ impl Ui {
         options: Vec<String>,
     ) -> Result<Vec<String>> {
         let all: Vec<usize> = (0..options.len()).collect();
-        self.checklist(prompt, flag, options, &all)
+        self.checklist(prompt, flag, options, &all, Vec::new())
+    }
+
+    /// Like [`Ui::multi_select_all`], with a column marking each option
+    /// available on this machine (✅) or not (`[ｘ]`).
+    pub fn multi_select_all_marked(
+        &self,
+        prompt: &str,
+        flag: &str,
+        options: Vec<(String, bool)>,
+    ) -> Result<Vec<String>> {
+        let all: Vec<usize> = (0..options.len()).collect();
+        let (options, available) = options.into_iter().unzip();
+        self.checklist(prompt, flag, options, &all, available)
     }
 
     // Irreducible interactive tail: the key handling and rendering are
@@ -405,9 +418,10 @@ impl Ui {
         flag: &str,
         options: Vec<String>,
         checked: &[usize],
+        available: Vec<bool>,
     ) -> Result<Vec<String>> {
         self.ensure_interactive(prompt, flag)?;
-        checklist::run(prompt, options, checked, self.color)?.ok_or_else(|| {
+        checklist::run(prompt, options, checked, available, self.color)?.ok_or_else(|| {
             into_other(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "prompt canceled",
