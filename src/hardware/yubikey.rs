@@ -793,4 +793,43 @@ age1tag1qsecond
         );
         assert_eq!(TouchPolicy::parse(""), None);
     }
+
+    #[test]
+    #[serial_test::serial]
+    fn probe_reports_a_missing_plugin_and_absent_keys() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let usb = dir.path().join("usb");
+        std::fs::write(&usb, "#!/bin/sh\necho '  +-o YubiKey OTP+FIDO+CCID'\n").unwrap();
+        std::fs::set_permissions(&usb, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let saved: Vec<_> = [USB_LIST_BIN_ENV, PLUGIN_BIN_ENV, YKMAN_BIN_ENV]
+            .iter()
+            .map(|k| (*k, std::env::var_os(k)))
+            .collect();
+        // SAFETY: serialized.
+        unsafe {
+            std::env::set_var(USB_LIST_BIN_ENV, &usb);
+            std::env::set_var(PLUGIN_BIN_ENV, dir.path().join("no-plugin"));
+            std::env::set_var(YKMAN_BIN_ENV, dir.path().join("no-ykman"));
+        }
+        let present = probe();
+        let ykman = ykman_available();
+        let serials = known_serials();
+        unsafe { std::env::set_var(USB_LIST_BIN_ENV, dir.path().join("no-usb")) };
+        let absent = probe();
+        for (k, v) in saved {
+            unsafe {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+        assert!(
+            matches!(present, Availability::MissingTool { install } if install.contains("age-plugin-yubikey"))
+        );
+        assert!(!ykman);
+        assert!(serials.is_empty());
+        assert!(matches!(absent, Availability::Unavailable { .. }));
+    }
 }

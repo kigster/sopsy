@@ -446,3 +446,43 @@ fn doctor_lists_key_stores() {
                 .and(predicate::str::contains("auto would use: keychain")),
         );
 }
+
+#[test]
+fn recipient_add_honors_the_allowed_set() {
+    let sb = Sandbox::new();
+    sb.sopsy()
+        .args([
+            "init",
+            "--require",
+            "software",
+            "--store",
+            "file",
+            "--no-emergency-keys",
+        ])
+        .assert()
+        .success();
+    sb.sopsy()
+        .args([
+            "recipient",
+            "add",
+            "annie",
+            "--age-public-key",
+            "age1se1qannie",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("allows only: keychain, file"));
+    // Break-glass keys are portable by design and exempt from the policy.
+    sb.sopsy()
+        .args([
+            "recipient",
+            "add",
+            "vault",
+            "--age-public-key",
+            "age1qvault",
+            "--break-glass",
+        ])
+        .env("SOPSY_ASSUME_YES", "1")
+        .assert()
+        .stderr(predicate::str::contains("allows only").not());
+}

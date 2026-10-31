@@ -1418,4 +1418,15 @@ mod tests {
             "all ENC artifacts matching the globs; plain/.sops.yaml/decoy excluded"
         );
     }
+
+    #[test]
+    fn sops_yaml_age_keys_reports_parse_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".sops.yaml");
+        std::fs::write(&path, "creation_rules: [unclosed").unwrap();
+        assert!(matches!(
+            sops_yaml_age_keys(&path),
+            Err(Error::Parse { .. })
+        ));
+    }
 }
