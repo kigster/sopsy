@@ -14,7 +14,9 @@
 //!    `keys.txt` that `sops` auto-discovers.
 //! 2. [`configure_sops_env`] points every `sops` invocation at that file via
 //!    `SOPS_AGE_KEY_FILE` (unless the user already set their own), so discovery
-//!    is deterministic across `sops`/`age` versions and platforms.
+//!    is deterministic across `sops`/`age` versions and platforms. Secrets
+//!    listed in the [`keychain_index`] are read from the OS keyring and
+//!    passed via `SOPS_AGE_KEY`.
 //!
 //! Break-glass *portable* keys (`AGE-SECRET-KEY-1…`) are real secret material
 //! and are deliberately **not** stored here — they live offline only.
@@ -98,30 +100,44 @@ pub fn store_identity(label: &str, public_key: &str, identity: &str) -> Result<P
     Ok(path)
 }
 
-/// Comment marker recording that a recipient's secret lives in the OS keyring.
-const KEYCHAIN_MARKER: &str = "# sopsy-keychain: ";
-
-/// Record in the [`keys_file`] that `public_key`'s secret lives in the OS
-/// keyring, so [`configure_sops_env`] knows to fetch it. Only a comment is
-/// written; `sops` ignores it. Idempotent.
-pub fn register_keychain_key(label: &str, public_key: &str) -> Result<PathBuf> {
-    let path = keys_file();
-    if keychain_keys_in(&std::fs::read_to_string(&path).unwrap_or_default())
-        .iter()
-        .any(|k| k == public_key)
-    {
-        return Ok(path);
-    }
-    store_identity(label, public_key, &format!("{KEYCHAIN_MARKER}{public_key}"))
+/// The index of public keys whose secrets live in the OS keyring, kept beside
+/// the [`keys_file`].
+///
+/// It is a separate file because `sops` before 3.11 refuses any key file with
+/// no identity in it, and a keychain-only setup would leave exactly that.
+pub fn keychain_index() -> PathBuf {
+    keys_file().with_file_name("sopsy-keychain.txt")
 }
 
-/// Public keys whose secrets the keys file says are in the OS keyring.
+/// Record in the [`keychain_index`] that `public_key`'s secret lives in the OS
+/// keyring, so [`configure_sops_env`] knows to fetch it. Only the public key
+/// is written. Idempotent.
+pub fn register_keychain_key(label: &str, public_key: &str) -> Result<PathBuf> {
+    let path = keychain_index();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        restrict(parent, 0o700);
+    }
+    let mut contents = std::fs::read_to_string(&path).unwrap_or_default();
+    if keychain_keys_in(&contents).iter().any(|k| k == public_key) {
+        return Ok(path);
+    }
+    if !contents.is_empty() && !contents.ends_with('\n') {
+        contents.push('\n');
+    }
+    contents.push_str(&format!("# sopsy: {label}\n{public_key}\n"));
+    std::fs::write(&path, contents)?;
+    restrict(&path, 0o600);
+    Ok(path)
+}
+
+/// Public keys listed in a [`keychain_index`], skipping comments and blanks.
 fn keychain_keys_in(contents: &str) -> Vec<String> {
     contents
         .lines()
-        .filter_map(|l| l.trim().strip_prefix(KEYCHAIN_MARKER))
-        .map(|k| k.trim().to_string())
-        .filter(|k| !k.is_empty())
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(String::from)
         .collect()
 }
 
@@ -141,14 +157,11 @@ pub fn configure_sops_env(cmd: &mut Command) {
         return;
     }
     let path = keys_file();
-    if !path.exists() {
-        return;
-    }
-    if std::env::var_os(SOPS_AGE_KEY_FILE_ENV).is_none() {
+    if path.exists() && std::env::var_os(SOPS_AGE_KEY_FILE_ENV).is_none() {
         cmd.env(SOPS_AGE_KEY_FILE_ENV, &path);
     }
     let secrets: Vec<String> =
-        keychain_keys_in(&std::fs::read_to_string(&path).unwrap_or_default())
+        keychain_keys_in(&std::fs::read_to_string(keychain_index()).unwrap_or_default())
             .iter()
             .filter_map(|pk| crate::hardware::keychain::read(pk).ok().flatten())
             .collect();
@@ -194,10 +207,9 @@ mod tests {
     }
 
     #[test]
-    fn keychain_markers_are_parsed_from_comments() {
-        let contents =
-            "# sopsy: kig\n# sopsy-keychain: age1abc\nAGE-PLUGIN-SE-1X\n#sopsy-keychain: nope\n";
-        assert_eq!(keychain_keys_in(contents), ["age1abc"]);
+    fn keychain_index_skips_comments_and_blanks() {
+        let contents = "# sopsy: kig\nage1abc\n\n  age1def  \n# age1nope\n";
+        assert_eq!(keychain_keys_in(contents), ["age1abc", "age1def"]);
     }
 
     /// `store_identity` writes the handle and is idempotent.

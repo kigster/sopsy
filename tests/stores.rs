@@ -132,9 +132,12 @@ fn keychain_store_keeps_the_secret_off_disk_and_out_of_argv() {
         .assert()
         .success();
 
-    let keys = sb.read("age-keys.txt");
-    assert!(keys.contains("# sopsy-keychain: age1"), "{keys}");
-    assert!(!keys.contains("AGE-SECRET-KEY"), "secret leaked to disk");
+    // sops < 3.11 rejects a key file with no identity, so the keychain index
+    // is a sidecar and no keys file is written at all.
+    assert!(!sb.keys_file().exists(), "keychain store wrote a keys file");
+    let index = sb.read("sopsy-keychain.txt");
+    assert!(index.contains("\nage1"), "{index}");
+    assert!(!index.contains("AGE-SECRET-KEY"), "secret leaked to disk");
     assert!(sb.read("keyring.secret").starts_with("AGE-SECRET-KEY-1"));
     assert!(!sb.read("keyring.log").contains("AGE-SECRET-KEY"));
     assert!(sb.read(".sopsy.yml").contains("store: keychain"));
