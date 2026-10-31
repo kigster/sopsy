@@ -73,7 +73,7 @@ The killer property: the secret values live in Git in *encrypted* form, while th
 - **`doctor` health checks** — macOS / Apple Silicon / Secure Enclave / Touch ID, the external tools, repo health, and a break-glass reminder.
 - **`edit`** — open an encrypted file in your editor through SOPS, with nicer errors and automatic file-type detection (including `dotenv`).
 - **Self-service onboarding** — newcomers `sopsy join` to generate a key and request access via a pull request; any active member `sopsy approve`s them.
-- **A built-in audit trail** — every member carries their full name, `username`, when they requested access (`requested_at`), and who granted it and when (`approved_by` as `"Konstantin Gredeskoul (kig)"`, `approved_at`). `sopsy recipient list` shows it all in one table.
+- **A built-in audit trail** — every member carries their full name, `username`, when they requested access (`requested_at`), and who granted it and when (`approved_by` as `"Grace Hopper (grace)"`, `approved_at`). `sopsy recipient list` shows it all in one table.
 - **Recipient management** — add, remove, and list the people (and machines) who can decrypt.
 - **`encrypt`/`decrypt`** — one-shot encrypt/decrypt of `.env`/YAML/JSON/INI files to stdout (or `-o`), ideal for `direnv` and process wrappers.
 - **Break-glass ceremony** — `sopsy recipient break-glass` generates a portable emergency key, hands it off for offline storage, then deletes the local copy.
@@ -144,7 +144,22 @@ git push
 # merges the PR to the main branch. Now they can decrypt the file.
 ```
 
-To illustrate this process, here is the sequence diagram with not one but two people using the same branch to add themselves for approval (NOTE: to encrypt `.env` you would run `sopsy encrypt .env -o .env.encrypted`).
+The same flow in short:
+
+```mermaid
+sequenceDiagram
+    actor New as Alan (newcomer)
+    actor Member as Any active member
+    participant Repo as Git branch / PR
+    New->>New: sopsy join "Alan Turing"<br/>(key generated in the Secure Enclave)
+    New->>Repo: push .sopsy.yml with a pending entry
+    Member->>Repo: check out the branch
+    Member->>Member: sopsy approve "Alan Turing"<br/>(Touch ID, sops updatekeys)
+    Member->>Repo: push .sops.yaml + re-wrapped secrets
+    Repo-->>New: PR merged — Alan can decrypt
+```
+
+Here is the full sequence diagram with not one but two people using the same branch to add themselves for approval (NOTE: to encrypt `.env` you would run `sopsy encrypt .env -o .env.encrypted`).
 
 ![sopsy-workflow](docs/sopsy-workflow.png)
 
@@ -276,19 +291,35 @@ ______________________________________________________________________
 
 `sopsy` is a thin, well-factored Rust crate: a `clap` CLI dispatches to one module per command, and the commands lean on small helper modules that wrap the external tools. All terminal output and prompting funnels through a single `ui` layer.
 
-![architecture](docs/architecture.png)
+```mermaid
+flowchart TD
+    main["main.rs<br/>exit-code mapping"] --> cli["cli.rs<br/>clap commands + flags"]
+    cli --> commands["commands/<br/>init · doctor · edit · join · approve<br/>recipient · encrypt/decrypt · check · deps · completion"]
+    commands --> ui["ui.rs + help.rs<br/>output, prompts, colored help"]
+    commands --> config["config.rs<br/>.sopsy.yml + .sopsy.sha"]
+    commands --> sops["sops/"] --> sopsbin([sops])
+    commands --> hardware["hardware/<br/>enclave.rs · yubikey.rs · keychain.rs"]
+    hardware --> sebin([age-plugin-se])
+    hardware -.-> ykbin([age-plugin-yubikey])
+    commands --> age["age.rs"] --> agebin([age-keygen])
+    commands --> keystore["keystore.rs<br/>keys.txt + SOPS_AGE_KEY_FILE"]
+    commands --> git["git/"] --> gitbin([git])
+    sops --> keystore
+```
 
-| Module      | Responsibility                                                         |
-| ----------- | ---------------------------------------------------------------------- |
-| `cli.rs`    | Authoritative `clap` definition of every command and flag.             |
-| `ui.rs`     | All output and `inquire`-backed prompts; color/TTY/`NO_COLOR` logic.   |
-| `config.rs` | The serde model for `.sopsy.yml` (members, states, globs, TTL, …).     |
-| `commands/` | One module per subcommand (`init`, `join`, `approve`, `recipient`, …). |
-| `sops/`     | Wraps `sops` (`encrypt`, `decrypt`, `edit`, `updatekeys`).             |
-| `enclave/`  | Wraps `age-plugin-se keygen` (Secure Enclave identities).              |
-| `age.rs`    | Wraps `age-keygen` for portable keys (used by break-glass).            |
-| `git/`      | Repo root, tracked files, ignore status, `.gitignore` editing.         |
-| `error.rs`  | `Error`/`Result`; the binary maps any `Err` to a non-zero exit.        |
+| Module        | Responsibility                                                                                                   |
+| ------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `cli.rs`      | Authoritative `clap` definition of every command and flag.                                                       |
+| `ui.rs`, `ui/checklist.rs` | All output and prompts; the crossterm checklist/select widget; color/TTY/`NO_COLOR` logic. |
+| `help.rs`     | Colors clap's plain help text (commands and options in different colors).                                        |
+| `config.rs`   | The serde model for `.sopsy.yml` (members, states, globs, TTL, …) and the `.sopsy.sha` checksum.                 |
+| `commands/`   | One module per subcommand (`init`, `join`, `approve`, `recipient`, `secrets`, `check`, `deps`, …).               |
+| `sops/`       | Wraps `sops` (`encrypt`, `decrypt`, `edit`, `updatekeys`).                                                       |
+| `hardware/`   | Private-key stores: `enclave.rs` wraps `age-plugin-se`, `yubikey.rs` wraps `age-plugin-yubikey` (and `ykman`), `keychain.rs` wraps `security` / `secret-tool`. |
+| `keystore.rs` | The per-user `keys.txt` that holds identity handles, and the `SOPS_AGE_KEY_FILE` it points `sops` at.            |
+| `age.rs`      | Wraps `age-keygen` for portable keys (break-glass and CI).                                                       |
+| `git/`        | Repo root, tracked files, ignore status, `.gitignore` editing.                                                   |
+| `error.rs`    | `Error`/`Result`; the binary maps any `Err` to a non-zero exit.                                                  |
 
 ### The `init` bootstrap flow
 
@@ -309,6 +340,27 @@ ______________________________________________________________________
 `sopsy` never touches ciphertext itself — it shells out to `sops`, which uses `age` recipients drawn from `.sops.yaml`'s `creation_rules`. The primary path is the dotenv format: a plaintext `.env` becomes an encrypted `.env.encrypted`.
 
 ![sopsy-process](docs/sopsy-process.png)
+
+Decrypting with a Secure Enclave key, step by step:
+
+```mermaid
+sequenceDiagram
+    actor You
+    participant Sopsy as sopsy
+    participant Sops as sops
+    participant Plugin as age-plugin-se
+    participant SE as Secure Enclave
+    You->>Sopsy: sopsy decrypt .env.encrypted
+    Sopsy->>Sops: sops --decrypt (SOPS_AGE_KEY_FILE = keys.txt)
+    Sops->>Plugin: unwrap the file's data key for age1se1…
+    Plugin->>SE: decrypt request
+    SE->>You: Touch ID prompt
+    You-->>SE: fingerprint
+    SE-->>Plugin: data key
+    Plugin-->>Sops: data key
+    Sops-->>Sopsy: plaintext KEY=value lines
+    Sopsy-->>You: stdout (or -o file)
+```
 
 - **Encrypt** — `sops --encrypt --input-type dotenv --output-type dotenv --in-place .env.encrypted`. The recipients come from `.sops.yaml`.
 - **Decrypt / edit** — `sopsy edit` runs `EDITOR=<editor> sops <file>`, which decrypts into a temp file, opens your editor, then re-encrypts on save. This requires a private key one of the recipients holds.
@@ -535,9 +587,9 @@ Request membership in a repo someone else bootstrapped. Generates your Secure En
 
 ```bash
 sopsy join alice                                   # generate a key, record a pending request
-sopsy join "Konstantin Gredeskoul" --username kig  # full name + explicit username
+sopsy join "Ada Lovelace" --username ada            # full name + explicit username
 sopsy join alice --without-touch-id                # no Touch ID prompt on decryption
-sopsy join alice --age-public-key age1se1…             # reuse an existing public key
+sopsy join alice --age-public-key age1se1…         # reuse an existing public key
 # then:
 git add .sopsy.yml .sopsy.sha && git commit -m "join: request access for alice" && git push
 ```
@@ -616,7 +668,7 @@ sopsy recipient remove --name alice   # equivalent
 
 #### `recipient list`
 
-Print all configured recipients as a colorful aligned table: name (capped at 21 chars), username (capped at 12), truncated public key, break-glass marker, and approval provenance (`Konstantin Gredeskoul (kig) on 2026-07-01`; pending members show `(pending)`). Takes no flags.
+Print all configured recipients as a colorful aligned table: name (capped at 21 chars), username (capped at 12), truncated public key, break-glass marker, and approval provenance (`Grace Hopper (grace) on 2026-07-01`; pending members show `(pending)`). Takes no flags.
 
 ```bash
 sopsy recipient list
@@ -919,14 +971,19 @@ ______________________________________________________________________
 | `SOPS_AGE_KEY`                     | Standard `sops` var holding a literal age identity — how CI decrypts (see [`recipient ci`](#recipient-ci)). sopsy never overrides it. |
 | `SOPSY_SOPS_BIN`                   | Override the `sops` binary path (primarily for testing).                                                                              |
 | `SOPSY_AGE_PLUGIN_SE_BIN`          | Override the `age-plugin-se` binary path (primarily for testing).                                                                     |
+| `SOPSY_AGE_PLUGIN_YUBIKEY_BIN`     | Override the `age-plugin-yubikey` binary path (for testing).                                                                          |
+| `SOPSY_YKMAN_BIN`                  | Override the `ykman` binary that sets a separate YubiKey PUK (for testing).                                                           |
+| `SOPSY_USB_LIST_BIN`               | Override the USB device listing used to count plugged-in YubiKeys (for testing).                                                      |
+| `SOPSY_KEYCHAIN_BIN`               | Override the Keychain / Secret Service tool (`security` / `secret-tool`) used by the keychain store (for testing).                    |
 | `SOPSY_AGE_KEYGEN_BIN`             | Override the `age-keygen` binary path (used by break-glass; for testing).                                                             |
+| `SOPSY_BREW_BIN`                   | Override the `brew` binary that `sopsy deps` runs (for testing).                                                                      |
 | `SOPSY_ASSUME_YES`                 | Assume interactive confirmations (break-glass press-ENTER, `approve` vouch). For automation/CI only.                                  |
 
 ______________________________________________________________________
 
 ## Scope and roadmap
 
-`sopsy` is **macOS-first** for v1 — the fastest path to a polished experience (though `sopsy check` and CI decryption via `recipient ci` already work on Linux runners). Deliberately **out of scope** until requested: Linux key generation, TPM, YubiKey, KMS, 1Password/Vault integration, a native-Rust SOPS, and a Ratatui TUI.
+`sopsy` is **macOS-first** for v1 — the fastest path to a polished experience (though `sopsy check` and CI decryption via `recipient ci` already work on Linux runners). Members can keep their key in the Secure Enclave, a YubiKey, the OS keychain (macOS Keychain or Linux Secret Service), or a plaintext file, and a repository can restrict which of those it accepts (`key_policy.required`). Deliberately **out of scope** until requested: TPM, KMS, 1Password/Vault integration, a native-Rust SOPS, and a Ratatui TUI.
 
 ## Further reading
 

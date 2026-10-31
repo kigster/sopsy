@@ -1,0 +1,14 @@
+{
+  "$schema": "https://github.com/kigster/openlanes/blob/main/schemas/plan-state.schema.json",
+  "version": 1,
+  "plan": {
+    "ordinal": "003.00",
+    "slug": "sopsy-caching-agent"
+  },
+  "state": "new",
+  "updated_at": "2026-10-30T20:42:52-07:00",
+  "stages": [],
+  "signatures": [],
+  "messages": [],
+  "moves": 1
+}

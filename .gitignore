@@ -32,3 +32,8 @@ rustc-ice-*.txt
 !*.encrypted
 *.private
 *.public
+/log
+/.cursor
+/.claude
+/.codex
+/.vscode
