@@ -29,3 +29,6 @@ rustc-ice-*.txt
 !.env.encrypted
 *.key
 *.pem
+!*.encrypted
+*.private
+*.public
