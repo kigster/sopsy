@@ -1,0 +1,6 @@
+# Managed by sopsy. Maps encrypted files to their age recipients.
+creation_rules:
+  - path_regex: '\.env\.encrypted$'
+    age: 'n'
+  - path_regex: '\.encrypted$'
+    age: 'n'
