@@ -15,10 +15,12 @@ use std::process::Command;
 use std::time::Duration;
 
 use crate::cli::{InitArgs, RecipientBreakGlassArgs, RecipientCommand};
-use crate::commands::recipient::system_username;
+use crate::commands::keys;
+use crate::commands::recipient::{self, system_username};
+use crate::config::KeyPolicy;
 use crate::config::{CONFIG_FILE_NAME, Config, Recipient};
 use crate::error::{Error, Result};
-use crate::hardware::enclave;
+use crate::hardware::{self, Availability, Store};
 use crate::sops::{self, FileType};
 use crate::ui::Ui;
 use crate::{git, keystore};
@@ -51,12 +53,24 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
     guard_repo_root(ui, &cwd, &root, args)?;
     ui.success(format!("Git repository: {}", root.display()));
 
-    // 2. Preflight the tools we depend on.
+    // 2. Preflight the tools we depend on, and an existing `.sops.yaml` (so a
+    //    broken one fails before a key is generated for it).
     sops::ensure_available()?;
     ui.success("Found `sops`.");
+    let sops_yaml = root.join(".sops.yaml");
+    if sops_yaml.exists() && !args.force {
+        check_existing_sops_yaml(&sops_yaml)?;
+    }
 
-    // 3. Acquire the recipient (existing key or generated Secure Enclave one).
-    let recipient = acquire_recipient(ui, args)?;
+    // 3. Decide which key stores members may use, then acquire the admin's
+    //    recipient (an existing key, or one generated in an allowed store).
+    let required = resolve_required(ui, args)?;
+    let allowed = if required.is_empty() {
+        None
+    } else {
+        Some(hardware::expand_selectors(&required)?)
+    };
+    let recipient = acquire_recipient(ui, args, allowed.as_deref())?;
 
     // 4. Print the public recipient prominently.
     ui.header("Your repository recipient");
@@ -66,10 +80,14 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
     }
     ui.animated_line(&recipient.public_key);
 
-    // 5. `.sops.yaml` creation rules.
-    let sops_yaml = root.join(".sops.yaml");
+    // 5. `.sops.yaml` creation rules. An existing one keeps its rules and
+    //    recipients, and gains the admin's key so the admin can decrypt.
     if sops_yaml.exists() && !args.force {
-        ui.warn(".sops.yaml already exists; leaving it untouched (pass --force to overwrite).");
+        if recipient::add_key_to_sops_yaml(&sops_yaml, &recipient.public_key)? > 0 {
+            ui.success("Added your key to the existing .sops.yaml (pass --force to replace it).");
+        } else {
+            ui.info(".sops.yaml already lists your key; keeping it.");
+        }
     } else {
         std::fs::write(&sops_yaml, render_sops_yaml(&recipient.public_key))?;
         ui.success("Wrote .sops.yaml creation rules.");
@@ -140,6 +158,7 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
     let config = Config {
         recipients: vec![recipient.clone()],
         sops_version: detect_sops_version(),
+        key_policy: (!required.is_empty()).then_some(KeyPolicy { required }),
         ..Config::default()
     };
     let config_path = config.save_to_dir(&root)?;
@@ -149,10 +168,10 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
     //     is the moment the owner is most likely to actually do it. Run with
     //     staging suppressed so init emits a single --git summary at the end
     //     rather than the ceremony advising separately (step 12).
-    maybe_setup_break_glass(&ui.without_git(), &root, args)?;
+    let has_break_glass = maybe_setup_break_glass(&ui.without_git(), &root, args)?;
 
     // 11. Final, colorful health summary.
-    print_summary(ui, &recipient);
+    print_summary(ui, &recipient, has_break_glass);
 
     // 12. With --git, stage exactly the files init creates and print commit/PR
     //     steps. This is the whole set (the break-glass ceremony above ran with
@@ -178,7 +197,7 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
 /// prompt in interactive mode and skip (with guidance) when non-interactive.
 /// Delegates to `sopsy recipient break-glass` so the ceremony (write → copy to
 /// 1Password → delete → register + re-key) is identical to the standalone path.
-fn maybe_setup_break_glass(ui: &Ui, root: &Path, args: &InitArgs) -> Result<()> {
+fn maybe_setup_break_glass(ui: &Ui, root: &Path, args: &InitArgs) -> Result<bool> {
     let want = if args.no_break_glass {
         false
     } else if args.break_glass {
@@ -186,7 +205,7 @@ fn maybe_setup_break_glass(ui: &Ui, root: &Path, args: &InitArgs) -> Result<()> 
     } else if ui.is_interactive() {
         ui.confirm(
             "Set up a break-glass emergency key now? (strongly recommended)",
-            "--break-glass",
+            "--generate-emergency-keys",
             true,
         )?
     } else {
@@ -196,7 +215,7 @@ fn maybe_setup_break_glass(ui: &Ui, root: &Path, args: &InitArgs) -> Result<()> 
     if !want {
         ui.warn("No break-glass key yet. Create one ASAP with:");
         ui.warn("    sopsy recipient break-glass -o break-glass");
-        return Ok(());
+        return Ok(false);
     }
 
     let break_glass_args = RecipientBreakGlassArgs {
@@ -205,7 +224,8 @@ fn maybe_setup_break_glass(ui: &Ui, root: &Path, args: &InitArgs) -> Result<()> 
         force: false,
         no_updatekeys: false,
     };
-    crate::commands::recipient::run(ui, &RecipientCommand::BreakGlass(break_glass_args))
+    crate::commands::recipient::run(ui, &RecipientCommand::BreakGlass(break_glass_args))?;
+    Ok(true)
 }
 
 /// Determine the age recipient for this repository.
@@ -221,6 +241,26 @@ fn maybe_setup_break_glass(ui: &Ui, root: &Path, args: &InitArgs) -> Result<()> 
 /// sopsy would then write `.sops.yaml`/`.sopsy.yml` there and try to scan it.
 /// When the resolved root is not the current directory, warn (loudly if it is
 /// `$HOME`) and require confirmation (or `--force`).
+/// Refuse an existing `.sops.yaml` that lists anything but age public keys:
+/// `sops` would reject it only after a key had been generated for it.
+fn check_existing_sops_yaml(path: &Path) -> Result<()> {
+    let keys = recipient::sops_yaml_age_keys(path)?;
+    let bad: Vec<String> = keys
+        .iter()
+        .filter(|k| keys::validate_public_key(k).is_err())
+        .map(|k| format!("`{k}`"))
+        .collect();
+    if bad.is_empty() {
+        return Ok(());
+    }
+    Err(Error::Validation(format!(
+        "{} lists {}, which {} not an age public key; fix the file, or pass --force to replace it",
+        path.display(),
+        bad.join(", "),
+        if bad.len() == 1 { "is" } else { "are" }
+    )))
+}
+
 fn guard_repo_root(ui: &Ui, cwd: &Path, root: &Path, args: &InitArgs) -> Result<()> {
     let same = std::fs::canonicalize(cwd).ok() == std::fs::canonicalize(root).ok();
     if same {
@@ -259,25 +299,75 @@ fn guard_repo_root(ui: &Ui, cwd: &Path, root: &Path, args: &InitArgs) -> Result<
     Ok(())
 }
 
-fn acquire_recipient(ui: &Ui, args: &InitArgs) -> Result<Recipient> {
+/// The repository's allowed key stores: `--require`, else (interactively) a
+/// multi-select over every store. Empty means unrestricted.
+fn resolve_required(ui: &Ui, args: &InitArgs) -> Result<Vec<String>> {
+    if !args.require.is_empty() {
+        // Validate now so a typo fails before anything is written.
+        hardware::expand_selectors(&args.require)?;
+        return Ok(args
+            .require
+            .iter()
+            .map(|r| r.trim().to_ascii_lowercase())
+            .filter(|r| !r.is_empty())
+            .collect());
+    }
+    if !ui.is_interactive() {
+        return Ok(Vec::new());
+    }
+    let options: Vec<(String, bool)> = Store::ALL
+        .iter()
+        .map(|s| {
+            let needs = match s {
+                Store::Enclave => "MacOS, Silicon CPU",
+                _ => s.kind().as_str(),
+            };
+            let label = format!("{s} — {} ({needs})", s.display_name());
+            (label, s.probe() == Availability::Ready)
+        })
+        .collect();
+    let picked = ui.multi_select_all_marked(
+        "Which key stores may members of this repository use?",
+        "--require",
+        options,
+    )?;
+    let picked: Vec<String> = picked
+        .iter()
+        .filter_map(|p| p.split_whitespace().next().map(str::to_string))
+        .collect();
+    if picked.is_empty() {
+        return Err(Error::Validation(
+            "select at least one key store (or pass --require)".into(),
+        ));
+    }
+    // Everything selected is the same as no restriction; don't record it.
+    Ok(if picked.len() == Store::ALL.len() {
+        Vec::new()
+    } else {
+        picked
+    })
+}
+
+fn acquire_recipient(ui: &Ui, args: &InitArgs, allowed: Option<&[Store]>) -> Result<Recipient> {
     let name = args
         .recipient_name
         .clone()
         .unwrap_or_else(|| DEFAULT_RECIPIENT_NAME.to_string());
 
     if let Some(public_key) = args.public_key.as_deref() {
+        let public_key = keys::validate_public_key(public_key)?;
+        let store = keys::check_allowed(allowed, &public_key, args.key.store.store())?;
         ui.success(format!("Using supplied age public key for `{name}`."));
-        return Ok(recipient_with_optional_username(
-            name,
-            public_key,
-            args.username.clone(),
-        ));
+        return Ok(
+            recipient_with_optional_username(name, public_key, args.username.clone())
+                .with_store(store),
+        );
     }
 
     if args.no_generate {
         return Err(Error::Validation(
             "no recipient key available: pass --public-key <age1...>, \
-             or drop --no-generate to create a Secure Enclave identity"
+             or drop --no-generate to create an identity"
                 .to_string(),
         ));
     }
@@ -285,46 +375,36 @@ fn acquire_recipient(ui: &Ui, args: &InitArgs) -> Result<Recipient> {
     // Interactive escape hatch: let the user paste an existing key.
     if ui.is_interactive() {
         let generate = ui.confirm(
-            "Generate a new Secure Enclave-backed identity? (No = paste an existing public key)",
+            "Generate a new identity for this repository? (No = paste an existing public key)",
             "--public-key",
             true,
         )?;
         if !generate {
-            let public_key = ui.text("Paste your age public key (age1...):", "--public-key")?;
-            return Ok(recipient_with_optional_username(
-                name,
-                public_key,
-                args.username.clone(),
-            ));
+            let public_key = keys::validate_public_key(
+                &ui.text("Paste your age public key (age1...):", "--public-key")?,
+            )?;
+            let store = keys::check_allowed(allowed, &public_key, args.key.store.store())?;
+            return Ok(
+                recipient_with_optional_username(name, public_key, args.username.clone())
+                    .with_store(store),
+            );
         }
     }
 
-    // Generate a Secure Enclave-backed identity.
-    enclave::ensure_available()?;
-    let spinner = ui.spinner("Generating Secure Enclave identity (Touch ID may prompt)…");
-    let identity = enclave::generate_identity(None);
-    spinner.finish_and_clear();
-    let identity = identity?;
-    ui.success("Created a Secure Enclave-backed identity.");
-    ui.info("The private key stays in the Secure Enclave and never leaves this device.");
-
-    // Persist the identity handle so `sops` can find it to decrypt/re-key. The
-    // handle is not secret (it only works on this device, behind Touch ID), but
-    // without it `sops updatekeys` fails with "identity did not match any of the
-    // recipients" — which is exactly what breaks the break-glass step below.
-    let keys_path = keystore::store_identity(&name, &identity.public_key, &identity.identity)?;
-    ui.success(format!("Stored your identity in {}.", keys_path.display()));
-    ui.info("It is safe on disk: it only works on this device, behind Touch ID.");
+    // Generate the identity and persist its local half so `sops` can find it
+    // to decrypt/re-key; without it `sops updatekeys` fails with "identity did
+    // not match any of the recipients", which breaks the break-glass step below.
+    let identity = keys::generate(ui, &args.key, &name, allowed, false, &[], true)?;
 
     // Make it obvious a key was generated: show the public key, then pause so
     // the user can take it in before the bootstrap output scrolls on.
-    ui.header("Your newly generated public key");
+    ui.header("Your public key");
     ui.animated_line(&identity.public_key);
     ui.pause(Duration::from_secs(2));
 
     // Record who generated this key (default to the system user at the prompt).
     let username = resolve_username(ui, args)?;
-    Ok(make_recipient(name, identity.public_key, username))
+    Ok(make_recipient(name, identity.public_key, username).with_store(Some(identity.store)))
 }
 
 /// Build a [`Recipient`], attaching `username` only when it is `Some`.
@@ -417,7 +497,7 @@ fn detect_sops_version() -> Option<String> {
 }
 
 /// Print the closing health summary and the break-glass reminder.
-fn print_summary(ui: &Ui, recipient: &Recipient) {
+fn print_summary(ui: &Ui, recipient: &Recipient, has_break_glass: bool) {
     ui.banner_success("All set — your repository is ready");
     ui.success("sops configured (.sops.yaml)");
     ui.success("plaintext .env ignored by git");
@@ -426,12 +506,16 @@ fn print_summary(ui: &Ui, recipient: &Recipient) {
         "recipient `{}` recorded in .sopsy.yml",
         recipient.name
     ));
-    ui.banner_warn(
-        "IMPORTANT — Break-glass: create a separate emergency age key pair and store it \
-         offline (e.g. in 1Password), shared with only a few admins, then register it via \
-         `sopsy recipient add break-glass --break-glass`. Without it, losing your Secure \
-         Enclave device means losing access to every secret.",
-    );
+    if has_break_glass {
+        ui.blank();
+    } else {
+        ui.banner_warn(
+            "IMPORTANT — Break-glass: create a separate emergency age key and store it offline \
+             (e.g. in 1Password), shared with only a few admins: `sopsy recipient break-glass \
+             -o break-glass`. Without it, losing the device or keychain that holds your key \
+             means losing access to every secret.",
+        );
+    }
     ui.animated_line("Happy encrypting!");
 }
 
@@ -527,5 +611,108 @@ mod tests {
         unsafe {
             std::env::remove_var(sops::SOPS_BIN_ENV);
         }
+    }
+
+    // ----- Interactive branches, driven by a scripted Ui -------------------
+
+    use crate::ui::{Answer, Key};
+
+    fn init_args(extra: &[&str]) -> InitArgs {
+        let argv = ["sopsy", "init"].iter().chain(extra).copied();
+        use clap::Parser;
+        match crate::cli::Cli::try_parse_from(argv).unwrap().command {
+            crate::cli::Command::Init(args) => args,
+            other => panic!("parsed {other:?}"),
+        }
+    }
+
+    fn keys(keys: &[Key]) -> Answer {
+        Answer::Keys(keys.to_vec())
+    }
+
+    #[test]
+    fn required_stores_come_from_the_checklist() {
+        let args = init_args(&[]);
+        // Everything stays selected: no restriction is recorded.
+        let ui = Ui::scripted(vec![keys(&[Key::Submit])]);
+        assert!(resolve_required(&ui, &args).unwrap().is_empty());
+        // Deselect the first two (enclave, yubikey).
+        let ui = Ui::scripted(vec![keys(&[
+            Key::Toggle,
+            Key::Down,
+            Key::Toggle,
+            Key::Submit,
+        ])]);
+        assert_eq!(resolve_required(&ui, &args).unwrap(), ["keychain", "file"]);
+        // Clearing everything is refused.
+        let ui = Ui::scripted(vec![keys(&[Key::None, Key::Submit])]);
+        let err = resolve_required(&ui, &args).unwrap_err();
+        assert!(err.to_string().contains("select at least one key store"));
+        // Esc cancels the prompt.
+        let ui = Ui::scripted(vec![keys(&[Key::Cancel])]);
+        assert!(resolve_required(&ui, &args).is_err());
+        // Non-interactive with no --require: unrestricted.
+        assert!(
+            resolve_required(&Ui::new(false, false, false), &args)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_pasted_key_replaces_generation() {
+        let args = init_args(&[]);
+        let ui = Ui::scripted(vec![Answer::Yes(false), Answer::Text("age1qpasted".into())]);
+        let recipient = acquire_recipient(&ui, &args, None).unwrap();
+        assert_eq!(recipient.public_key, "age1qpasted");
+
+        let ui = Ui::scripted(vec![Answer::Yes(false), Answer::Text("n".into())]);
+        assert!(acquire_recipient(&ui, &args, None).is_err());
+    }
+
+    #[test]
+    fn the_owner_name_defaults_and_can_be_typed() {
+        let args = init_args(&["--username", "alex"]);
+        let ui = Ui::scripted(vec![Answer::Text(String::new())]);
+        assert_eq!(
+            resolve_username(&ui, &args).unwrap().as_deref(),
+            Some("alex")
+        );
+        let ui = Ui::scripted(vec![Answer::Text("Alex Example".into())]);
+        assert_eq!(
+            resolve_username(&ui, &args).unwrap().as_deref(),
+            Some("Alex Example")
+        );
+    }
+
+    #[test]
+    fn a_subdirectory_init_needs_confirmation() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let sub = dir.path().join("examples");
+        std::fs::create_dir(&sub).unwrap();
+        let args = init_args(&[]);
+
+        let ui = Ui::scripted(vec![Answer::Yes(true)]);
+        guard_repo_root(&ui, &sub, dir.path(), &args).unwrap();
+
+        let ui = Ui::scripted(vec![Answer::Yes(false)]);
+        let err = guard_repo_root(&ui, &sub, dir.path(), &args).unwrap_err();
+        assert!(err.to_string().contains("run `git init` here first"));
+
+        guard_repo_root(
+            &Ui::new(false, false, false),
+            &sub,
+            dir.path(),
+            &init_args(&["--force"]),
+        )
+        .unwrap();
+        assert!(guard_repo_root(&Ui::new(false, false, false), &sub, dir.path(), &args).is_err());
+    }
+
+    #[test]
+    fn declining_the_emergency_key_prompt_skips_it() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let ui = Ui::scripted(vec![Answer::Yes(false)]);
+        assert!(!maybe_setup_break_glass(&ui, dir.path(), &init_args(&[])).unwrap());
     }
 }

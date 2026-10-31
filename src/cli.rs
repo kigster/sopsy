@@ -12,6 +12,8 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
+use crate::hardware::Store;
+use crate::hardware::yubikey::{PinPolicy, TouchPolicy};
 use crate::sops::FileType;
 
 /// Top-level CLI parser.
@@ -55,7 +57,7 @@ pub struct GlobalArgs {
     /// After a command changes files, `git add` exactly those files and print
     /// ready-to-paste commit and pull-request instructions. A no-op for commands
     /// that don't modify committed files.
-    #[arg(long, global = true)]
+    #[arg(long, short = 'g', global = true)]
     pub git: bool,
 }
 
@@ -130,30 +132,51 @@ pub enum Command {
 #[derive(Debug, Args)]
 pub struct InitArgs {
     /// Name to record for the recipient created/registered during init.
-    #[arg(long)]
+    #[arg(long, short = 'n')]
     pub recipient_name: Option<String>,
 
     /// Username of who is generating the key (recorded in `.sopsy.yml`). When a
     /// new identity is generated interactively, this is the default offered at
     /// the prompt; falls back to the current system user.
-    #[arg(long)]
+    #[arg(long, short = 'u')]
     pub username: Option<String>,
 
     /// Use an existing age public key instead of generating a new identity.
-    #[arg(long)]
+    #[arg(
+        long = "age-public-key",
+        short = 'p',
+        alias = "public-key",
+        value_name = "AGE1…"
+    )]
     pub public_key: Option<String>,
 
-    /// Skip Secure Enclave identity generation (e.g. when supplying a key).
+    /// Skip identity generation (e.g. when supplying a key).
     #[arg(long)]
     pub no_generate: bool,
 
-    /// Generate a break-glass emergency key as part of init (the default in
-    /// interactive mode is to prompt). Mutually exclusive with `--no-break-glass`.
-    #[arg(long, conflicts_with = "no_break_glass")]
+    /// Key stores (or groups) members of this repository may use, recorded as
+    /// `key_policy.required` in `.sopsy.yml`. Comma-separated or repeated:
+    /// `enclave`, `yubikey`, `keychain`, `file`, or the groups `onchip`,
+    /// `exthardware`, `software`. Omit for no restriction (interactive runs ask).
+    #[arg(long, short = 'r', value_name = "STORES", value_delimiter = ',')]
+    pub require: Vec<String>,
+
+    /// Where to generate the admin's key.
+    #[command(flatten)]
+    pub key: StoreArgs,
+
+    /// Generate the portable "break glass" emergency key as part of init, for
+    /// offline storage (interactive runs ask). Conflicts with `--no-emergency-keys`.
+    #[arg(
+        long = "generate-emergency-keys",
+        short = 'e',
+        alias = "break-glass",
+        conflicts_with = "no_break_glass"
+    )]
     pub break_glass: bool,
 
-    /// Skip break-glass key generation during init.
-    #[arg(long)]
+    /// Skip generating the break-glass emergency key during init.
+    #[arg(long = "no-emergency-keys", alias = "no-break-glass")]
     pub no_break_glass: bool,
 
     /// Proceed even if some doctor checks fail.
@@ -184,7 +207,7 @@ pub struct JoinArgs {
     pub name: String,
 
     /// System username recorded alongside the name (defaults to `$USER`).
-    #[arg(long)]
+    #[arg(long, short = 'u')]
     pub username: Option<String>,
 
     /// Path to the `.sopsy.yml` to update (defaults to the one in the repo root).
@@ -192,20 +215,100 @@ pub struct JoinArgs {
     pub sopsy_file: Option<PathBuf>,
 
     /// Use this existing age public key instead of generating a new identity.
-    #[arg(long)]
+    #[arg(
+        long = "age-public-key",
+        short = 'p',
+        alias = "public-key",
+        value_name = "AGE1…"
+    )]
     pub public_key: Option<String>,
 
-    /// Generate the Secure Enclave identity without a Touch ID / passcode gate,
-    /// by passing `--access-control none` to `age-plugin-se keygen`. The private
-    /// key still never leaves the Enclave (and is device-bound), but unlocking it
-    /// no longer prompts for a fingerprint or passcode — handy for scripted or
-    /// headless setups. Ignored when `--public-key` is supplied.
+    /// Generate the key without a presence gate: for the Secure Enclave,
+    /// `--access-control none` (no Touch ID / passcode); for a YubiKey, touch
+    /// policy `never` (the PIN is kept). The private key still never leaves the
+    /// device. Rejected for software stores. Ignored with `--age-public-key`.
     #[arg(short = 't', long = "without-touch-id")]
     pub without_touch_id: bool,
 
-    /// Extra arguments forwarded verbatim to `age-plugin-se keygen` after `--`.
+    /// Where to generate your key.
+    #[command(flatten)]
+    pub key: StoreArgs,
+
+    /// Extra arguments forwarded verbatim to the store's plugin after `--`.
     #[arg(last = true)]
     pub age_args: Vec<String>,
+}
+
+/// `--store` values: a store, or `auto` to pick the most secure one available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum StoreChoice {
+    /// The most secure store this machine supports (and the repo allows).
+    #[default]
+    Auto,
+    /// Apple Secure Enclave (`age-plugin-se`).
+    Enclave,
+    /// YubiKey PIV slot (`age-plugin-yubikey`).
+    Yubikey,
+    /// macOS Keychain / Linux Secret Service (software, encrypted at rest).
+    Keychain,
+    /// Plaintext key in the local `keys.txt` (last resort).
+    File,
+}
+
+impl StoreChoice {
+    /// The explicit store, or `None` for `auto`.
+    pub fn store(self) -> Option<Store> {
+        match self {
+            StoreChoice::Auto => None,
+            StoreChoice::Enclave => Some(Store::Enclave),
+            StoreChoice::Yubikey => Some(Store::YubiKey),
+            StoreChoice::Keychain => Some(Store::Keychain),
+            StoreChoice::File => Some(Store::File),
+        }
+    }
+}
+
+/// Key-store selection shared by `init`, `join` and `recipient keygen`.
+#[derive(Debug, Clone, Default, Args)]
+pub struct StoreArgs {
+    /// Where the private key lives. `auto` picks the most secure store this
+    /// machine supports, in the order of `SOPSY_PRIVATE_KEY_STORE_PRIORITY`
+    /// (default: enclave, yubikey, keychain, file).
+    #[arg(long, short = 's', value_enum, default_value_t = StoreChoice::Auto)]
+    pub store: StoreChoice,
+
+    /// YubiKey serial, for scripts; interactive runs list the plugged-in keys.
+    #[arg(long, value_name = "SERIAL", hide = true)]
+    pub yubikey_serial: Option<u32>,
+
+    /// YubiKey PIV slot (1-20), for scripts; interactive runs offer the keys
+    /// already on the YubiKey.
+    #[arg(long, value_name = "SLOT", hide = true, value_parser = clap::value_parser!(u8).range(1..=20))]
+    pub yubikey_slot: Option<u8>,
+
+    /// Always generate a new YubiKey key instead of reusing an existing one.
+    #[arg(long = "always-new-slot", short = 'a', alias = "new-slot")]
+    pub new_slot: bool,
+
+    /// When the YubiKey asks for its PIN: every decryption, once per session
+    /// (`cached`), or never [default: cached].
+    #[arg(
+        long = "yubikey-pin-policy",
+        short = 'c',
+        alias = "pin-policy",
+        value_enum
+    )]
+    pub pin_policy: Option<PinPolicy>,
+
+    /// When the YubiKey asks for a touch: every decryption, once per 15
+    /// seconds (`cached`), or never [default: cached].
+    #[arg(
+        long = "yubikey-touch-policy",
+        short = 'b',
+        alias = "touch-policy",
+        value_enum
+    )]
+    pub touch_policy: Option<TouchPolicy>,
 }
 
 /// Arguments for `sopsy approve`.
@@ -300,7 +403,8 @@ pub enum RecipientCommand {
     /// List configured recipients.
     List,
 
-    /// Generate a new Secure Enclave identity and print its public key.
+    /// Generate a new identity (Secure Enclave, YubiKey, keychain or file) and
+    /// print its public key.
     Keygen(RecipientKeygenArgs),
 
     /// Generate a portable break-glass emergency key for offline storage.
@@ -314,8 +418,12 @@ pub enum RecipientCommand {
 /// Arguments for `sopsy recipient keygen`.
 #[derive(Debug, Args)]
 pub struct RecipientKeygenArgs {
-    /// Extra arguments forwarded verbatim to `age-plugin-se keygen` after `--`
-    /// (e.g. `--access-control=any-biometry-or-passcode`).
+    /// Where to generate the key.
+    #[command(flatten)]
+    pub key: StoreArgs,
+
+    /// Extra arguments forwarded verbatim to the store's plugin after `--`
+    /// (e.g. `--access-control=any-biometry-or-passcode` for `age-plugin-se`).
     #[arg(last = true)]
     pub age_args: Vec<String>,
 }
@@ -374,8 +482,18 @@ pub struct RecipientAddArgs {
     pub name: Option<String>,
 
     /// The recipient's age public key (`age1...`).
-    #[arg(long)]
+    #[arg(
+        long = "age-public-key",
+        short = 'p',
+        alias = "public-key",
+        value_name = "AGE1…"
+    )]
     pub public_key: Option<String>,
+
+    /// Where this key's private half lives, recorded in `.sopsy.yml`. Needed
+    /// for plain `age1…` keys when the repo restricts key stores.
+    #[arg(long, value_enum)]
+    pub store: Option<StoreChoice>,
 
     /// Mark this recipient as the break-glass emergency key.
     #[arg(long)]
@@ -424,6 +542,67 @@ mod tests {
     fn cli_definition_is_valid() {
         // clap's debug assertions catch malformed derive definitions.
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn init_accepts_short_flags() {
+        let cli = Cli::try_parse_from([
+            "sopsy",
+            "init",
+            "-g",
+            "-n",
+            "admin",
+            "-u",
+            "sam",
+            "-p",
+            "age1sam",
+            "-r",
+            "yubikey,keychain",
+            "-s",
+            "yubikey",
+            "-a",
+            "-c",
+            "cached",
+            "-b",
+            "always",
+            "-e",
+        ])
+        .unwrap();
+        assert!(cli.global.git);
+        let Command::Init(args) = cli.command else {
+            panic!("expected init");
+        };
+        assert_eq!(args.recipient_name.as_deref(), Some("admin"));
+        assert_eq!(args.username.as_deref(), Some("sam"));
+        assert_eq!(args.public_key.as_deref(), Some("age1sam"));
+        assert_eq!(args.require, ["yubikey", "keychain"]);
+        assert_eq!(args.key.store, StoreChoice::Yubikey);
+        assert!(args.key.new_slot && args.break_glass);
+        assert_eq!(args.key.pin_policy, Some(PinPolicy::Once));
+        assert_eq!(args.key.touch_policy, Some(TouchPolicy::Always));
+    }
+
+    #[test]
+    fn init_keeps_the_old_long_flags_as_aliases() {
+        let cli = Cli::try_parse_from([
+            "sopsy",
+            "init",
+            "--public-key",
+            "age1sam",
+            "--no-break-glass",
+            "--new-slot",
+            "--pin-policy",
+            "once",
+            "--touch-policy",
+            "never",
+        ])
+        .unwrap();
+        let Command::Init(args) = cli.command else {
+            panic!("expected init");
+        };
+        assert!(args.no_break_glass && args.key.new_slot);
+        assert_eq!(args.key.pin_policy, Some(PinPolicy::Once));
+        assert_eq!(args.key.touch_policy, Some(TouchPolicy::Never));
     }
 
     #[test]

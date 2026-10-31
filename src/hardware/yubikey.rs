@@ -22,7 +22,7 @@
 use std::ffi::OsString;
 use std::process::{Command, Output, Stdio};
 
-use super::{GeneratedIdentity, Store};
+use super::{Availability, GeneratedIdentity, Store};
 use crate::error::{Error, Result};
 
 /// The default name of the external binary this module drives.
@@ -49,18 +49,19 @@ pub fn is_recipient(public_key: &str) -> bool {
 }
 
 /// When the YubiKey asks for its PIN. Fixed at generation time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum PinPolicy {
     /// Every decryption.
     Always,
-    /// Once per session (until the key is unplugged).
+    /// Once per session (until the key is unplugged). Called `once` by the plugin.
+    #[value(name = "cached", alias = "once")]
     Once,
     /// Never.
     Never,
 }
 
 /// When the YubiKey requires a physical touch. Fixed at generation time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum TouchPolicy {
     /// Every decryption.
     Always,
@@ -205,6 +206,161 @@ pub fn ensure_available() -> Result<()> {
         "{} (install it with `brew install age-plugin-yubikey`; on Linux also run `pcscd`)",
         bin.to_string_lossy()
     )))
+}
+
+/// Environment variable naming a command whose stdout lists USB devices,
+/// replacing the platform probe (`ioreg` on macOS, sysfs on Linux). For tests.
+pub const USB_LIST_BIN_ENV: &str = "SOPSY_USB_LIST_BIN";
+
+/// Whether the YubiKey store can be used: a PIV-capable YubiKey is plugged in
+/// and `age-plugin-yubikey` is installed.
+pub fn probe() -> Availability {
+    match (device_present(), which::which(plugin_bin()).is_ok()) {
+        (true, true) => Availability::Ready,
+        (true, false) => Availability::MissingTool {
+            install: "brew install age-plugin-yubikey".into(),
+        },
+        (false, _) => Availability::Unavailable {
+            reason: "no YubiKey with PIV (CCID) is plugged in".into(),
+        },
+    }
+}
+
+/// Whether a PIV-capable YubiKey is connected.
+pub fn device_present() -> bool {
+    device_count() > 0
+}
+
+/// How many PIV-capable YubiKeys are connected.
+pub fn device_count() -> usize {
+    usb_listing().map_or(0, |listing| count_piv_yubikeys(&listing))
+}
+
+/// Environment variable that overrides the `ykman` binary. For tests.
+pub const YKMAN_BIN_ENV: &str = "SOPSY_YKMAN_BIN";
+
+fn ykman_bin() -> OsString {
+    std::env::var_os(YKMAN_BIN_ENV).unwrap_or_else(|| OsString::from("ykman"))
+}
+
+/// Whether `ykman` (YubiKey Manager) is installed.
+pub fn ykman_available() -> bool {
+    which::which(ykman_bin()).is_ok()
+}
+
+/// What [`ykman_change`] can change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Credential {
+    Pin,
+    Puk,
+}
+
+fn ykman_change_args(serial: Option<u32>, credential: Credential) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(serial) = serial {
+        args.extend(["--device".to_string(), serial.to_string()]);
+    }
+    args.extend(["piv", "access"].map(String::from));
+    args.push(
+        match credential {
+            Credential::Pin => "change-pin",
+            Credential::Puk => "change-puk",
+        }
+        .to_string(),
+    );
+    args
+}
+
+/// Change the PIN or PUK with `ykman`, which prompts on the terminal for the
+/// current value and the new one.
+pub fn ykman_change(serial: Option<u32>, credential: Credential) -> Result<()> {
+    let status = Command::new(ykman_bin())
+        .args(ykman_change_args(serial, credential))
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(Error::ProcessFailed {
+            tool: "ykman".to_string(),
+            code: status.code().unwrap_or(-1),
+            message: "see ykman's output above".to_string(),
+        })
+    }
+}
+
+/// Serials of the connected YubiKeys that can be learned without a PIN.
+///
+/// YubiKeys hide their serial from USB by default, so this asks `ykman list
+/// --serials` when it is installed, and adds the serials of keys that already
+/// hold an age identity. It may return fewer serials than [`device_count`].
+pub fn known_serials() -> Vec<u32> {
+    let mut command = Command::new(ykman_bin());
+    command.args(["list", "--serials"]);
+    let mut serials: Vec<u32> = capture(command)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect();
+    serials.extend(list(true).unwrap_or_default().iter().map(|id| id.serial));
+    serials.sort_unstable();
+    serials.dedup();
+    serials
+}
+
+fn usb_listing() -> Option<String> {
+    if let Some(bin) = std::env::var_os(USB_LIST_BIN_ENV) {
+        return capture(Command::new(bin));
+    }
+    if cfg!(target_os = "macos") {
+        let mut ioreg = Command::new("ioreg");
+        ioreg.args(["-p", "IOUSB", "-w0"]);
+        return capture(ioreg);
+    }
+    let entries = std::fs::read_dir("/sys/bus/usb/devices").ok()?;
+    Some(
+        entries
+            .flatten()
+            .filter_map(|e| std::fs::read_to_string(e.path().join("product")).ok())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+fn capture(mut command: Command) -> Option<String> {
+    let output = command.stderr(Stdio::null()).output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// A YubiKey exposes PIV through its CCID interface, so the product name must
+/// mention both (`YubiKey OTP+FIDO+CCID`). FIDO-only Security Keys can't hold
+/// an age key.
+fn count_piv_yubikeys(listing: &str) -> usize {
+    listing
+        .lines()
+        .filter(|line| {
+            let line = line.to_ascii_lowercase();
+            line.contains("yubikey") && line.contains("ccid")
+        })
+        .count()
+}
+
+/// Pick an existing identity to reuse instead of consuming a new slot: the
+/// requested slot if there is one, else the first key whose PIN and touch
+/// policies match. Restricted to the requested serial when given.
+pub fn find_reusable<'a>(
+    identities: &'a [SlotIdentity],
+    options: &GenerateOptions,
+) -> Option<&'a SlotIdentity> {
+    identities
+        .iter()
+        .filter(|id| options.serial.is_none_or(|s| s == id.serial))
+        .find(|id| match options.slot {
+            Some(slot) => id.slot == slot,
+            None => id.matches_policies(options.pin_policy, options.touch_policy),
+        })
 }
 
 /// List the age identities on every connected YubiKey (`--list`).
@@ -583,6 +739,51 @@ age1tag1qsecond
     }
 
     #[test]
+    fn counts_piv_capable_yubikeys_only() {
+        let ioreg = "+-o Root\n  +-o YubiKey OTP+FIDO+CCID@20130000  <class IOUSBHostDevice>\n";
+        assert_eq!(count_piv_yubikeys(ioreg), 1);
+        assert_eq!(count_piv_yubikeys("YubiKey CCID\nYubiKey FIDO+CCID\n"), 2);
+        assert_eq!(
+            count_piv_yubikeys("Security Key by Yubico\nYubiKey OTP+FIDO\n"),
+            0
+        );
+        assert_eq!(count_piv_yubikeys(""), 0);
+    }
+
+    #[test]
+    fn ykman_changes_the_puk_or_pin_on_the_chosen_device() {
+        assert_eq!(
+            ykman_change_args(None, Credential::Puk),
+            ["piv", "access", "change-puk"]
+        );
+        assert_eq!(
+            ykman_change_args(Some(19108090), Credential::Pin),
+            ["--device", "19108090", "piv", "access", "change-pin"]
+        );
+    }
+
+    #[test]
+    fn reuses_requested_slot_or_matching_policies() {
+        let ids = parse_blocks(LIST_TWO);
+        let mut opts = GenerateOptions::new("x");
+        opts.pin_policy = PinPolicy::Always;
+        opts.touch_policy = TouchPolicy::Always;
+        assert_eq!(find_reusable(&ids, &opts).map(|i| i.slot), Some(1));
+
+        opts.serial = Some(87654321);
+        assert_eq!(
+            find_reusable(&ids, &opts),
+            None,
+            "policies differ on that key"
+        );
+
+        opts.slot = Some(2);
+        assert_eq!(find_reusable(&ids, &opts).map(|i| i.serial), Some(87654321));
+
+        assert_eq!(find_reusable(&ids, &GenerateOptions::new("x")), None);
+    }
+
+    #[test]
     fn policy_names_match_plugin_flags() {
         assert_eq!(PinPolicy::Never.as_str(), "never");
         assert_eq!(TouchPolicy::Always.as_str(), "always");
@@ -591,5 +792,44 @@ age1tag1qsecond
             Some(PinPolicy::Never)
         );
         assert_eq!(TouchPolicy::parse(""), None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn probe_reports_a_missing_plugin_and_absent_keys() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let usb = dir.path().join("usb");
+        std::fs::write(&usb, "#!/bin/sh\necho '  +-o YubiKey OTP+FIDO+CCID'\n").unwrap();
+        std::fs::set_permissions(&usb, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let saved: Vec<_> = [USB_LIST_BIN_ENV, PLUGIN_BIN_ENV, YKMAN_BIN_ENV]
+            .iter()
+            .map(|k| (*k, std::env::var_os(k)))
+            .collect();
+        // SAFETY: serialized.
+        unsafe {
+            std::env::set_var(USB_LIST_BIN_ENV, &usb);
+            std::env::set_var(PLUGIN_BIN_ENV, dir.path().join("no-plugin"));
+            std::env::set_var(YKMAN_BIN_ENV, dir.path().join("no-ykman"));
+        }
+        let present = probe();
+        let ykman = ykman_available();
+        let serials = known_serials();
+        unsafe { std::env::set_var(USB_LIST_BIN_ENV, dir.path().join("no-usb")) };
+        let absent = probe();
+        for (k, v) in saved {
+            unsafe {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+        assert!(
+            matches!(present, Availability::MissingTool { install } if install.contains("age-plugin-yubikey"))
+        );
+        assert!(!ykman);
+        assert!(serials.is_empty());
+        assert!(matches!(absent, Availability::Unavailable { .. }));
     }
 }

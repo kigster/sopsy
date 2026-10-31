@@ -50,6 +50,17 @@ pub fn run(ui: &Ui, args: &ApproveArgs) -> Result<()> {
         ));
     }
 
+    // The allowed key-store set is re-checked here: `.sopsy.yml` arrives
+    // through a pull request, so a join may predate (or dodge) the policy.
+    let allowed = config.allowed_stores()?;
+    for member in &candidates {
+        crate::commands::keys::check_allowed(allowed.as_deref(), &member.public_key, member.store)
+            .map_err(|err| match err {
+                Error::Validation(msg) => Error::Validation(format!("`{}`: {msg}", member.name)),
+                other => other,
+            })?;
+    }
+
     // Freshness + vouch, per member. Vouching is a human trust decision that no
     // crypto replaces, so it is never batched away.
     let mut approved: Vec<Recipient> = Vec::new();

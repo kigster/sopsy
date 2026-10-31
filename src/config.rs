@@ -17,6 +17,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::hardware::{self, Store};
 
 /// Default file name for sopsy's internal configuration.
 pub const CONFIG_FILE_NAME: &str = ".sopsy.yml";
@@ -80,6 +81,11 @@ pub struct Recipient {
     /// offline (e.g. in 1Password) rather than on a developer's machine.
     #[serde(default)]
     pub break_glass: bool,
+    /// Where this member's private key lives (`enclave`, `yubikey`, `keychain`,
+    /// `file`). Informational and omitted when unknown (legacy entries, keys
+    /// registered by public key alone). Break-glass and CI keys have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<Store>,
 }
 
 impl Recipient {
@@ -94,6 +100,7 @@ impl Recipient {
             approved_at: None,
             approved_by: None,
             break_glass: false,
+            store: None,
         }
     }
 
@@ -122,10 +129,33 @@ impl Recipient {
         }
     }
 
+    /// This recipient with its key store recorded.
+    pub fn with_store(self, store: Option<Store>) -> Self {
+        Self { store, ..self }
+    }
+
+    /// The store implied by the key's prefix, else the recorded one when the
+    /// key could have come from it (a recorded store is self-reported).
+    pub fn effective_store(&self) -> Option<Store> {
+        Store::from_recipient(&self.public_key)
+            .or(self.store.filter(|s| Store::admits(&self.public_key, *s)))
+    }
+
     /// Whether this member is awaiting approval.
     pub fn is_pending(&self) -> bool {
         matches!(self.state, MemberState::Pending)
     }
+}
+
+/// The repository's rules for member keys, set by `sopsy init`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyPolicy {
+    /// The allowed set: member keys must live in one of these stores or groups
+    /// (`onchip`, `exthardware`, `software`, or a store name). Empty means no
+    /// restriction. Break-glass and CI keys are exempt. A soft guardrail like
+    /// the rest of `.sopsy.yml`: crypto cannot enforce it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required: Vec<String>,
 }
 
 /// The full deserialized contents of `.sopsy.yml`.
@@ -154,6 +184,10 @@ pub struct Config {
         skip_serializing_if = "Option::is_none"
     )]
     pub join_request_ttl: Option<String>,
+
+    /// Which key stores members may use. Omitted when unrestricted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_policy: Option<KeyPolicy>,
 }
 
 impl Default for Config {
@@ -163,6 +197,7 @@ impl Default for Config {
             encrypted_globs: default_encrypted_globs(),
             sops_version: None,
             join_request_ttl: default_request_ttl(),
+            key_policy: None,
         }
     }
 }
@@ -185,6 +220,20 @@ impl Config {
     /// Return the break-glass recipient, if one is configured.
     pub fn break_glass_recipient(&self) -> Option<&Recipient> {
         self.recipients.iter().find(|r| r.break_glass)
+    }
+
+    /// The stores members may use, or `None` when the repo sets no restriction.
+    pub fn allowed_stores(&self) -> Result<Option<Vec<Store>>> {
+        match &self.key_policy {
+            Some(policy) if !policy.required.is_empty() => {
+                hardware::expand_selectors(&policy.required)
+                    .map(Some)
+                    .map_err(|err| {
+                        Error::Validation(format!("{CONFIG_FILE_NAME} key_policy: {err}"))
+                    })
+            }
+            _ => Ok(None),
+        }
     }
 
     /// Look up a recipient by name.

@@ -14,11 +14,11 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 use crate::cli::JoinArgs;
+use crate::commands::keys;
 use crate::commands::recipient;
 use crate::config::{CHECKSUM_FILE_NAME, CONFIG_FILE_NAME, Config, MemberState, Recipient};
 use crate::error::{Error, Result};
-use crate::hardware::enclave;
-use crate::keystore;
+use crate::hardware::Store;
 use crate::ui::Ui;
 
 /// Run `sopsy join`.
@@ -42,8 +42,10 @@ pub fn run(ui: &Ui, args: &JoinArgs) -> Result<()> {
         }));
     }
 
-    // Acquire the public key: an explicit one, or a freshly generated identity.
-    let public_key = acquire_public_key(ui, args)?;
+    // Acquire the public key: an explicit one, or a freshly generated identity
+    // in a store the repository allows.
+    let allowed = config.allowed_stores()?;
+    let (public_key, store) = acquire_public_key(ui, args, allowed.as_deref())?;
 
     // Reject the same key registered under another name.
     if let Some(other) = config
@@ -70,7 +72,7 @@ pub fn run(ui: &Ui, args: &JoinArgs) -> Result<()> {
     let now = humantime::format_rfc3339_seconds(SystemTime::now()).to_string();
     config.recipients.push(Recipient {
         username,
-        ..Recipient::pending(&name, &public_key, &now)
+        ..Recipient::pending(&name, &public_key, &now).with_store(store)
     });
     config.save(&config_path)?;
     ui.banner_success(format!(
@@ -118,51 +120,38 @@ fn load_target(args: &JoinArgs) -> Result<(PathBuf, Config)> {
     }
 }
 
-/// Obtain the member's public key: use `--public-key`, else generate a Secure
-/// Enclave identity and show it.
-fn acquire_public_key(ui: &Ui, args: &JoinArgs) -> Result<String> {
+/// Obtain the member's public key and its store: use `--public-key`, else
+/// generate an identity (in an allowed store) and show it.
+fn acquire_public_key(
+    ui: &Ui,
+    args: &JoinArgs,
+    allowed: Option<&[Store]>,
+) -> Result<(String, Option<Store>)> {
     if let Some(key) = args.public_key.as_deref() {
-        let key = key.trim().to_string();
-        if key.is_empty() {
+        if key.trim().is_empty() {
             return Err(Error::Validation("--public-key must not be empty".into()));
         }
+        let key = keys::validate_public_key(key)?;
+        let store = keys::check_allowed(allowed, &key, args.key.store.store())?;
         ui.success("Using supplied age public key.");
-        return Ok(key);
+        return Ok((key, store));
     }
 
-    enclave::ensure_available()?;
-
-    // `--without-touch-id` maps to age-plugin-se's `--access-control none`, so the
-    // Enclave key needs no biometric/passcode to unlock. It is prepended to any
-    // trailing `-- <age flags>`, letting an explicit `--access-control=...` there
-    // still win (age-plugin-se takes the last value).
-    let mut keygen_args: Vec<String> = Vec::new();
-    if args.without_touch_id {
-        keygen_args.push("--access-control=none".to_string());
-    }
-    keygen_args.extend(args.age_args.iter().cloned());
-
-    let spinner = ui.spinner(if args.without_touch_id {
-        "Generating Secure Enclave identity (no Touch ID)…"
-    } else {
-        "Generating Secure Enclave identity (Touch ID may prompt)…"
-    });
-    let identity = enclave::generate_identity_with_args(&keygen_args);
-    spinner.finish_and_clear();
-    let identity = identity?;
-    ui.success("Created a Secure Enclave-backed identity.");
-    ui.info("The private key stays in the Secure Enclave and never leaves this device.");
-
-    // Persist the identity handle now so that, once an approver grants access,
-    // `sopsy edit`/`secrets decrypt` can find it (behind Touch ID) to unlock the
-    // repo. The handle is not secret key material.
-    let keys_path =
-        keystore::store_identity(args.name.trim(), &identity.public_key, &identity.identity)?;
-    ui.success(format!("Stored your identity in {}.", keys_path.display()));
+    // Persist the identity now so that, once an approver grants access,
+    // `sopsy edit`/`secrets decrypt` can find it to unlock the repo.
+    let identity = keys::generate(
+        ui,
+        &args.key,
+        args.name.trim(),
+        allowed,
+        args.without_touch_id,
+        &args.age_args,
+        true,
+    )?;
 
     ui.header("Your public key");
     ui.animated_line(&identity.public_key);
-    Ok(identity.public_key)
+    Ok((identity.public_key, Some(identity.store)))
 }
 
 /// Print what the newcomer does next, and what an approver will do.
@@ -185,9 +174,7 @@ fn print_next_steps(ui: &Ui, name: &str, config: &Config, staged: bool) {
     ui.info("  3. Ask any current member to approve you.");
     ui.info("An approver (any active member) then runs, on your PR branch:");
     ui.info(format!("     sopsy approve {name}"));
-    ui.info(
-        "After they commit and merge, pull main and run `sopsy edit <file>` — Touch ID unlocks it.",
-    );
+    ui.info("After they commit and merge, pull main and run `sopsy edit <file>` to unlock it.");
     ui.warn(format!(
         "Approve promptly: this request expires after {} (set by join_request_ttl).",
         humantime::format_duration(config.resolved_request_ttl())

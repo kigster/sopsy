@@ -16,7 +16,7 @@
 use std::ffi::OsString;
 use std::process::Command;
 
-use super::{GeneratedIdentity, Store};
+use super::{Availability, GeneratedIdentity, Store};
 use crate::error::{Error, Result};
 
 /// The default name of the external binary this module drives.
@@ -44,6 +44,34 @@ pub fn ensure_available() -> Result<()> {
         "{} (install it with `brew install age-plugin-se`)",
         bin.to_string_lossy()
     )))
+}
+
+/// Whether the Secure Enclave store can be used on this machine.
+///
+/// A working `age-plugin-se` is taken as proof of an Enclave. Without it, Apple
+/// Silicon is "hardware present, tool missing" (install, never downgrade). Intel
+/// Macs report unavailable: their T2 Enclave would do, but `age-plugin-se` has
+/// no Intel build to install.
+pub fn probe() -> Availability {
+    if which::which(plugin_bin()).is_ok() {
+        return Availability::Ready;
+    }
+    probe_without_plugin(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn probe_without_plugin(os: &str, arch: &str) -> Availability {
+    match (os, arch) {
+        ("macos", "aarch64") => Availability::MissingTool {
+            install: "brew install age-plugin-se".into(),
+        },
+        ("macos", _) => Availability::Unavailable {
+            reason: "age-plugin-se has no Intel build (a T2 Enclave works once the plugin is built by hand)"
+                .into(),
+        },
+        _ => Availability::Unavailable {
+            reason: "no Secure Enclave on this platform".into(),
+        },
+    }
 }
 
 /// Generate a new Secure Enclave-backed identity, returning its public key and
@@ -135,6 +163,22 @@ fn extract_public_key(line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_without_plugin_depends_on_platform() {
+        assert!(matches!(
+            probe_without_plugin("macos", "aarch64"),
+            Availability::MissingTool { .. }
+        ));
+        assert!(matches!(
+            probe_without_plugin("macos", "x86_64"),
+            Availability::Unavailable { reason } if reason.contains("Intel")
+        ));
+        assert!(matches!(
+            probe_without_plugin("linux", "x86_64"),
+            Availability::Unavailable { .. }
+        ));
+    }
 
     #[test]
     fn enclave_identity_is_constructible() {
