@@ -265,10 +265,38 @@ impl Drop for RawMode {
 
 /// Show the checklist on stderr until the user confirms (`Some(selected)`)
 /// or cancels (`None`).
-pub(crate) fn run(
+pub(crate) fn run(prompt: &str, list: Checklist, color: bool) -> io::Result<Option<Vec<String>>> {
+    let _raw = RawMode::enter()?;
+    drive(
+        prompt,
+        list,
+        color,
+        &mut io::stderr(),
+        || terminal::size().map_or(0, |(w, _)| w as usize),
+        read_key,
+    )
+}
+
+/// The next key press from the terminal, skipping releases and non-key events.
+fn read_key() -> io::Result<Key> {
+    loop {
+        if let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            return Ok(Key::from(key));
+        }
+    }
+}
+
+/// Draw the checklist to `out` and apply keys from `next_key` until the user
+/// confirms or cancels. Terminal-free, so tests can script the keys.
+pub(crate) fn drive(
     prompt: &str,
     mut list: Checklist,
     color: bool,
+    out: &mut impl Write,
+    width: impl Fn() -> usize,
+    mut next_key: impl FnMut() -> io::Result<Key>,
 ) -> io::Result<Option<Vec<String>>> {
     if let Some(glyph) = std::env::var(POINTER_ENV)
         .ok()
@@ -276,36 +304,22 @@ pub(crate) fn run(
     {
         list.pointer = glyph;
     }
-    let mut out = io::stderr();
-    let _raw = RawMode::enter()?;
     let mut drawn = 0u16;
     loop {
-        redraw(&mut out, &mut drawn, &frame(&list, prompt, color))?;
-
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        match list.apply(Key::from(key)) {
+        redraw(out, &mut drawn, &list.lines(prompt, color, width()))?;
+        match list.apply(next_key()?) {
             Outcome::Continue => {}
             Outcome::Submit => {
                 // Leave the checklist on screen as it was confirmed.
-                redraw(&mut out, &mut drawn, &frame(&list, prompt, color))?;
+                redraw(out, &mut drawn, &list.lines(prompt, color, width()))?;
                 return Ok(Some(list.selected()));
             }
             Outcome::Cancel => {
-                redraw(&mut out, &mut drawn, &[format!("  {prompt} <canceled>")])?;
+                redraw(out, &mut drawn, &[format!("  {prompt} <canceled>")])?;
                 return Ok(None);
             }
         }
     }
-}
-
-fn frame(list: &Checklist, prompt: &str, color: bool) -> Vec<String> {
-    let width = terminal::size().map_or(0, |(w, _)| w as usize);
-    list.lines(prompt, color, width)
 }
 
 /// Replace the `drawn` lines printed last time with `lines`.
@@ -468,5 +482,46 @@ mod tests {
             Key::from(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             Key::Cancel
         );
+    }
+
+    fn drive_keys(list: Checklist, keys: &[Key]) -> (Option<Vec<String>>, String) {
+        let mut out = Vec::new();
+        let mut keys = keys.iter().copied();
+        let picked = drive(
+            "Pick",
+            list,
+            false,
+            &mut out,
+            || 60,
+            || Ok(keys.next().unwrap_or(Key::Cancel)),
+        )
+        .unwrap();
+        (picked, String::from_utf8(out).unwrap())
+    }
+
+    #[test]
+    fn drive_redraws_and_returns_the_confirmed_selection() {
+        let list = Checklist::new(vec!["a".into(), "b".into()], &[0], Vec::new());
+        let (picked, out) = drive_keys(list, &[Key::Down, Key::Toggle, Key::Submit]);
+        assert_eq!(picked.unwrap(), ["a", "b"]);
+        // Three frames: the first draw, after Down/Toggle… and the final one.
+        assert!(out.matches("Pick").count() >= 3, "{out}");
+        assert!(
+            out.contains("\r\n"),
+            "raw mode needs explicit carriage returns"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn drive_cancels_and_honors_the_pointer_override() {
+        // SAFETY: serialized.
+        unsafe { std::env::set_var(POINTER_ENV, ">") };
+        let list = Checklist::single(vec!["a".into()]);
+        let (picked, out) = drive_keys(list, &[Key::Other, Key::Cancel]);
+        unsafe { std::env::remove_var(POINTER_ENV) };
+        assert!(picked.is_none());
+        assert!(out.contains("> "), "{out}");
+        assert!(out.contains("Pick <canceled>"));
     }
 }

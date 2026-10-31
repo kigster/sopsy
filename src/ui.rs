@@ -63,7 +63,28 @@ pub struct Ui {
     /// is a resolved global flag like the others; consumed by
     /// [`crate::git::stage_and_advise`].
     git: bool,
+    /// Canned prompt answers, replayed in order instead of reading the
+    /// terminal. Unit tests only; see [`Ui::scripted`].
+    #[cfg(test)]
+    script: Option<std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<Answer>>>>,
 }
+
+/// A canned answer for one prompt of a [`Ui::scripted`] handle.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) enum Answer {
+    /// Keys for a checklist or select, fed through the real widget logic.
+    Keys(Vec<checklist::Key>),
+    /// The answer to a yes/no question.
+    Yes(bool),
+    /// Typed text (an empty string takes the default, if there is one).
+    Text(String),
+    /// ENTER for [`Ui::press_enter`].
+    Enter,
+}
+
+#[cfg(test)]
+pub(crate) use checklist::Key;
 
 impl Ui {
     /// Total width, in columns, of the yellow band [`Ui::header`] paints.
@@ -99,6 +120,8 @@ impl Ui {
             // Enabled explicitly via `with_git`; off by default so every test and
             // nested call starts without staging behavior.
             git: false,
+            #[cfg(test)]
+            script: None,
         }
     }
 
@@ -118,6 +141,27 @@ impl Ui {
             git: false,
             ..self.clone()
         }
+    }
+
+    /// An interactive, colorless handle that answers prompts from `answers`
+    /// in order, for unit-testing interactive flows without a terminal.
+    #[cfg(test)]
+    pub(crate) fn scripted(answers: Vec<Answer>) -> Self {
+        Self {
+            color: false,
+            verbose: false,
+            interactive: true,
+            git: false,
+            script: Some(std::rc::Rc::new(std::cell::RefCell::new(answers.into()))),
+        }
+    }
+
+    /// The next canned answer, when this handle is scripted.
+    #[cfg(test)]
+    fn scripted_answer(&self, prompt: &str) -> Option<Answer> {
+        let script = self.script.as_ref()?;
+        let answer = script.borrow_mut().pop_front();
+        Some(answer.unwrap_or_else(|| panic!("no scripted answer left for `{prompt}`")))
     }
 
     /// Whether the user requested `git add` + commit/PR advice (`--git`).
@@ -385,6 +429,15 @@ impl Ui {
         }
         print!("{} ", self.paint(prompt, Style::new().green()));
         let _ = std::io::stdout().flush();
+        #[cfg(test)]
+        if let Some(answer) = self.scripted_answer(prompt) {
+            assert!(
+                matches!(answer, Answer::Enter),
+                "`{prompt}` expects Enter, got {answer:?}"
+            );
+            out!();
+            return Ok(());
+        }
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
         out!();
@@ -462,16 +515,28 @@ impl Ui {
     ) -> Result<Vec<String>> {
         self.ensure_interactive(prompt, flag)?;
         self.spaced(|| {
-            checklist::run(prompt, list, self.color)?.ok_or_else(|| {
-                into_other(std::io::Error::new(
-                    std::io::ErrorKind::Interrupted,
-                    "prompt canceled",
-                ))
-            })
+            #[cfg(test)]
+            if let Some(answer) = self.scripted_answer(prompt) {
+                let Answer::Keys(keys) = answer else {
+                    panic!("`{prompt}` expects keys, got {answer:?}");
+                };
+                let mut keys = keys.into_iter();
+                let picked = checklist::drive(
+                    prompt,
+                    list,
+                    self.color,
+                    &mut std::io::sink(),
+                    || 100,
+                    || Ok(keys.next().unwrap_or(checklist::Key::Cancel)),
+                )?;
+                return picked.ok_or_else(canceled);
+            }
+            checklist::run(prompt, list, self.color)?.ok_or_else(canceled)
         })
     }
 
     /// Run a prompt with a blank line before the question and after the answer.
+    /// (See [`canceled`] for the error a canceled checklist turns into.)
     /// Consecutive prompts share one blank line.
     fn spaced<T>(&self, prompt: impl FnOnce() -> Result<T>) -> Result<T> {
         if !AT_BLANK_LINE.load(Ordering::Relaxed) {
@@ -499,6 +564,13 @@ impl Ui {
     pub fn confirm(&self, prompt: &str, flag: &str, default: bool) -> Result<bool> {
         self.ensure_interactive(prompt, flag)?;
         self.spaced(|| {
+            #[cfg(test)]
+            if let Some(answer) = self.scripted_answer(prompt) {
+                let Answer::Yes(yes) = answer else {
+                    panic!("`{prompt}` expects yes/no, got {answer:?}");
+                };
+                return Ok(yes);
+            }
             Confirm::new(prompt)
                 .with_default(default)
                 .with_render_config(self.render_config())
@@ -513,6 +585,10 @@ impl Ui {
     pub fn text(&self, prompt: &str, flag: &str) -> Result<String> {
         self.ensure_interactive(prompt, flag)?;
         self.spaced(|| {
+            #[cfg(test)]
+            if let Some(answer) = self.scripted_answer(prompt) {
+                return Ok(scripted_text(prompt, answer, ""));
+            }
             Text::new(prompt)
                 .with_render_config(self.render_config())
                 .prompt()
@@ -527,6 +603,10 @@ impl Ui {
     pub fn text_with_default(&self, prompt: &str, flag: &str, default: &str) -> Result<String> {
         self.ensure_interactive(prompt, flag)?;
         self.spaced(|| {
+            #[cfg(test)]
+            if let Some(answer) = self.scripted_answer(prompt) {
+                return Ok(scripted_text(prompt, answer, default));
+            }
             Text::new(prompt)
                 .with_default(default)
                 .with_render_config(self.render_config())
@@ -603,6 +683,27 @@ where
     Error::Other(error.into())
 }
 
+/// The error a canceled checklist (Esc, Ctrl-C) turns into.
+fn canceled() -> Error {
+    into_other(std::io::Error::new(
+        std::io::ErrorKind::Interrupted,
+        "prompt canceled",
+    ))
+}
+
+/// A scripted text answer, with an empty one taking `default`.
+#[cfg(test)]
+fn scripted_text(prompt: &str, answer: Answer, default: &str) -> String {
+    let Answer::Text(text) = answer else {
+        panic!("`{prompt}` expects text, got {answer:?}");
+    };
+    if text.is_empty() {
+        default.to_string()
+    } else {
+        text
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -614,6 +715,7 @@ mod tests {
             verbose: false,
             interactive: false,
             git: false,
+            script: None,
         }
     }
 
@@ -628,6 +730,7 @@ mod tests {
             verbose: true,
             interactive: true,
             git: false,
+            script: None,
         }
     }
 
@@ -846,5 +949,67 @@ mod tests {
         let err = into_other(std::io::Error::other("boom"));
         assert!(matches!(err, Error::Other(_)));
         assert!(err.to_string().contains("boom"));
+    }
+
+    // ----- Scripted prompts ----------------------------------------------
+
+    fn pick(down: usize) -> Answer {
+        let mut keys = vec![Key::Down; down];
+        keys.push(Key::Submit);
+        Answer::Keys(keys)
+    }
+
+    #[test]
+    fn scripted_prompts_answer_through_the_real_widgets() {
+        let opts = || vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let ui = Ui::scripted(vec![
+            pick(1),
+            Answer::Keys(vec![
+                Key::Toggle,
+                Key::Down,
+                Key::Down,
+                Key::Toggle,
+                Key::Submit,
+            ]),
+            Answer::Keys(vec![Key::Down, Key::Toggle, Key::Submit]),
+            Answer::Keys(vec![Key::Toggle, Key::Submit]),
+            Answer::Yes(true),
+            Answer::Text("typed".into()),
+            Answer::Text(String::new()),
+            Answer::Enter,
+        ]);
+        assert_eq!(ui.select("pick one", "--x", opts()).unwrap(), "b");
+        assert_eq!(ui.multi_select("pick", "--x", opts()).unwrap(), ["a", "c"]);
+        assert_eq!(
+            ui.multi_select_all("drop one", "--x", opts()).unwrap(),
+            ["a", "c"]
+        );
+        let marked = vec![("a".to_string(), true), ("b".to_string(), false)];
+        assert_eq!(
+            ui.multi_select_all_marked("marked", "--x", marked).unwrap(),
+            ["b"]
+        );
+        assert!(ui.confirm("ok?", "--x", false).unwrap());
+        assert_eq!(ui.text("name?", "--x").unwrap(), "typed");
+        assert_eq!(
+            ui.text_with_default("name?", "--x", "dflt").unwrap(),
+            "dflt"
+        );
+        ui.press_enter("press ENTER").unwrap();
+        ui.pause(Duration::from_millis(1));
+    }
+
+    #[test]
+    fn a_canceled_or_empty_select_is_an_error() {
+        let ui = Ui::scripted(vec![Answer::Keys(vec![Key::Cancel]), pick(0)]);
+        let err = ui.select("pick", "--x", vec!["a".into()]).unwrap_err();
+        assert!(err.to_string().contains("prompt canceled"), "{err}");
+        assert!(ui.select("pick", "--x", Vec::new()).is_err());
+    }
+
+    #[test]
+    fn press_enter_needs_a_terminal() {
+        let err = noninteractive_ui().press_enter("press ENTER").unwrap_err();
+        assert!(matches!(err, Error::NonInteractive { .. }));
     }
 }
