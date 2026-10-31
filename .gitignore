@@ -29,3 +29,8 @@ rustc-ice-*.txt
 !.env.encrypted
 *.key
 *.pem
+/log
+/.cursor
+/.claude
+/.codex
+/.vscode
