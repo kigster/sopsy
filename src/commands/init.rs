@@ -612,4 +612,107 @@ mod tests {
             std::env::remove_var(sops::SOPS_BIN_ENV);
         }
     }
+
+    // ----- Interactive branches, driven by a scripted Ui -------------------
+
+    use crate::ui::{Answer, Key};
+
+    fn init_args(extra: &[&str]) -> InitArgs {
+        let argv = ["sopsy", "init"].iter().chain(extra).copied();
+        use clap::Parser;
+        match crate::cli::Cli::try_parse_from(argv).unwrap().command {
+            crate::cli::Command::Init(args) => args,
+            other => panic!("parsed {other:?}"),
+        }
+    }
+
+    fn keys(keys: &[Key]) -> Answer {
+        Answer::Keys(keys.to_vec())
+    }
+
+    #[test]
+    fn required_stores_come_from_the_checklist() {
+        let args = init_args(&[]);
+        // Everything stays selected: no restriction is recorded.
+        let ui = Ui::scripted(vec![keys(&[Key::Submit])]);
+        assert!(resolve_required(&ui, &args).unwrap().is_empty());
+        // Deselect the first two (enclave, yubikey).
+        let ui = Ui::scripted(vec![keys(&[
+            Key::Toggle,
+            Key::Down,
+            Key::Toggle,
+            Key::Submit,
+        ])]);
+        assert_eq!(resolve_required(&ui, &args).unwrap(), ["keychain", "file"]);
+        // Clearing everything is refused.
+        let ui = Ui::scripted(vec![keys(&[Key::None, Key::Submit])]);
+        let err = resolve_required(&ui, &args).unwrap_err();
+        assert!(err.to_string().contains("select at least one key store"));
+        // Esc cancels the prompt.
+        let ui = Ui::scripted(vec![keys(&[Key::Cancel])]);
+        assert!(resolve_required(&ui, &args).is_err());
+        // Non-interactive with no --require: unrestricted.
+        assert!(
+            resolve_required(&Ui::new(false, false, false), &args)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_pasted_key_replaces_generation() {
+        let args = init_args(&[]);
+        let ui = Ui::scripted(vec![Answer::Yes(false), Answer::Text("age1qpasted".into())]);
+        let recipient = acquire_recipient(&ui, &args, None).unwrap();
+        assert_eq!(recipient.public_key, "age1qpasted");
+
+        let ui = Ui::scripted(vec![Answer::Yes(false), Answer::Text("n".into())]);
+        assert!(acquire_recipient(&ui, &args, None).is_err());
+    }
+
+    #[test]
+    fn the_owner_name_defaults_and_can_be_typed() {
+        let args = init_args(&["--username", "alex"]);
+        let ui = Ui::scripted(vec![Answer::Text(String::new())]);
+        assert_eq!(
+            resolve_username(&ui, &args).unwrap().as_deref(),
+            Some("alex")
+        );
+        let ui = Ui::scripted(vec![Answer::Text("Alex Example".into())]);
+        assert_eq!(
+            resolve_username(&ui, &args).unwrap().as_deref(),
+            Some("Alex Example")
+        );
+    }
+
+    #[test]
+    fn a_subdirectory_init_needs_confirmation() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let sub = dir.path().join("examples");
+        std::fs::create_dir(&sub).unwrap();
+        let args = init_args(&[]);
+
+        let ui = Ui::scripted(vec![Answer::Yes(true)]);
+        guard_repo_root(&ui, &sub, dir.path(), &args).unwrap();
+
+        let ui = Ui::scripted(vec![Answer::Yes(false)]);
+        let err = guard_repo_root(&ui, &sub, dir.path(), &args).unwrap_err();
+        assert!(err.to_string().contains("run `git init` here first"));
+
+        guard_repo_root(
+            &Ui::new(false, false, false),
+            &sub,
+            dir.path(),
+            &init_args(&["--force"]),
+        )
+        .unwrap();
+        assert!(guard_repo_root(&Ui::new(false, false, false), &sub, dir.path(), &args).is_err());
+    }
+
+    #[test]
+    fn declining_the_emergency_key_prompt_skips_it() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let ui = Ui::scripted(vec![Answer::Yes(false)]);
+        assert!(!maybe_setup_break_glass(&ui, dir.path(), &init_args(&[])).unwrap());
+    }
 }

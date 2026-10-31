@@ -406,4 +406,235 @@ mod tests {
             assert!(validate_public_key(bad).is_err(), "{bad:?}");
         }
     }
+
+    // ----- Interactive YubiKey flows, driven by a scripted Ui -------------
+
+    use crate::ui::{Answer, Key};
+    use serial_test::serial;
+    use std::ffi::OsString;
+    use std::path::Path;
+
+    /// Sets environment variables for one test and restores them on drop.
+    struct Env(Vec<(&'static str, Option<OsString>)>);
+
+    impl Env {
+        fn set(vars: &[(&'static str, &str)]) -> Self {
+            let saved = vars
+                .iter()
+                .map(|(k, v)| {
+                    let old = std::env::var_os(k);
+                    // SAFETY: every test touching these is `#[serial]`.
+                    unsafe { std::env::set_var(k, v) };
+                    (*k, old)
+                })
+                .collect();
+            Env(saved)
+        }
+    }
+
+    impl Drop for Env {
+        fn drop(&mut self) {
+            for (k, old) in &self.0 {
+                // SAFETY: as above.
+                unsafe {
+                    match old {
+                        Some(v) => std::env::set_var(k, v),
+                        None => std::env::remove_var(k),
+                    }
+                }
+            }
+        }
+    }
+
+    fn script(dir: &Path, name: &str, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    const EXISTING: &str = "#       Serial: 19108090, Slot: 1
+#         Name: sopsy-admin
+#   PIN policy: Once   (x)
+# Touch policy: Cached (x)
+#    Recipient: age1tag1qexisting
+# Legacy recipient: age1yubikey1qexistinglegacy";
+
+    /// Fake YubiKey tooling in `dir`: `count` keys on USB, `serials` known to
+    /// ykman (`ykman` absent when `None`), and an existing age key in slot 1
+    /// when `existing`. ykman's PIN/PUK changes exit with `ykman_exit`.
+    fn fake_yubikeys(
+        dir: &Path,
+        count: usize,
+        serials: Option<&str>,
+        existing: bool,
+        ykman_exit: u8,
+    ) -> Env {
+        let usb = script(
+            dir,
+            "usb",
+            &"echo '  +-o YubiKey OTP+FIDO+CCID  <class IOUSBHostDevice>'\n".repeat(count),
+        );
+        let list = if existing { EXISTING } else { "" };
+        let plugin = script(
+            dir,
+            "age-plugin-yubikey",
+            &format!(
+                "case \"$*\" in
+  *--list*) cat <<'B'
+{list}
+B
+;;
+  *--identity*) printf '%s\\n' '{EXISTING}' 'AGE-PLUGIN-YUBIKEY-1QEXISTING';;
+  *--generate*) printf '%s\\n' '#       Serial: 19108090, Slot: 2' '#    Recipient: age1tag1qnew' \
+'# Legacy recipient: age1yubikey1qnewlegacy' 'AGE-PLUGIN-YUBIKEY-1QNEW';;
+esac"
+            ),
+        );
+        let ykman = match serials {
+            Some(serials) => script(
+                dir,
+                "ykman",
+                &format!(
+                    "case \"$*\" in
+  'list --serials') for s in {serials}; do echo $s; done;;
+  *change-pin*|*change-puk*) exit {ykman_exit};;
+esac"
+                ),
+            ),
+            None => dir.join("no-ykman").to_string_lossy().into_owned(),
+        };
+        Env::set(&[
+            (yubikey::USB_LIST_BIN_ENV, &usb),
+            ("SOPSY_AGE_PLUGIN_YUBIKEY_BIN", &plugin),
+            (yubikey::YKMAN_BIN_ENV, &ykman),
+        ])
+    }
+
+    fn yubikey_args() -> StoreArgs {
+        StoreArgs {
+            store: crate::cli::StoreChoice::Yubikey,
+            ..StoreArgs::default()
+        }
+    }
+
+    fn pick(down: usize) -> Answer {
+        let mut keys = vec![Key::Down; down];
+        keys.push(Key::Submit);
+        Answer::Keys(keys)
+    }
+
+    fn generate_with(ui: &Ui, args: &StoreArgs) -> Result<GeneratedIdentity> {
+        generate(ui, args, "admin", None, false, &[], false)
+    }
+
+    #[test]
+    #[serial]
+    fn two_yubikeys_pick_one_by_serial_and_reuse_its_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = fake_yubikeys(dir.path(), 2, Some("19108090 20202020"), true, 0);
+        // Pick the first serial, then reuse the key already in slot 1.
+        let ui = Ui::scripted(vec![pick(0), pick(0)]);
+        let id = generate_with(&ui, &yubikey_args()).unwrap();
+        assert_eq!(id.public_key, "age1yubikey1qexistinglegacy");
+    }
+
+    #[test]
+    #[serial]
+    fn unknown_serials_are_typed_and_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = fake_yubikeys(dir.path(), 2, Some("19108090"), false, 0);
+        // A typed serial, then "No" to a separate PUK.
+        let ui = Ui::scripted(vec![Answer::Text("20202020".into()), pick(1)]);
+        let id = generate_with(&ui, &yubikey_args()).unwrap();
+        assert_eq!(id.public_key, "age1yubikey1qnewlegacy");
+
+        let ui = Ui::scripted(vec![Answer::Text("not-a-serial".into())]);
+        let err = generate_with(&ui, &yubikey_args()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("`not-a-serial` is not a YubiKey serial number")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn several_yubikeys_need_a_terminal_or_a_serial() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = fake_yubikeys(dir.path(), 2, None, false, 0);
+        let err = generate_with(&Ui::new(false, false, false), &yubikey_args()).unwrap_err();
+        assert!(err.to_string().contains("2 YubiKeys are plugged in"));
+    }
+
+    #[test]
+    #[serial]
+    fn a_new_slot_can_get_a_separate_puk_through_ykman() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = fake_yubikeys(dir.path(), 1, Some("19108090"), true, 0);
+        // "Generate a new key" (after the existing slot), then "Yes, set PUK separately".
+        let ui = Ui::scripted(vec![pick(1), pick(0)]);
+        let id = generate_with(&ui, &yubikey_args()).unwrap();
+        assert_eq!(id.public_key, "age1yubikey1qnewlegacy");
+    }
+
+    #[test]
+    #[serial]
+    fn a_failed_ykman_change_stops_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = fake_yubikeys(dir.path(), 1, Some("19108090"), false, 3);
+        let ui = Ui::scripted(vec![pick(0)]);
+        let err = generate_with(&ui, &yubikey_args()).unwrap_err();
+        assert!(err.to_string().contains("ykman"), "{err}");
+    }
+
+    #[test]
+    #[serial]
+    fn a_separate_puk_without_ykman_asks_to_continue() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = fake_yubikeys(dir.path(), 1, None, false, 0);
+        // Continue with PUK = PIN.
+        let ui = Ui::scripted(vec![pick(0), Answer::Yes(true)]);
+        assert!(generate_with(&ui, &yubikey_args()).is_ok());
+        // Decline: install ykman first.
+        let ui = Ui::scripted(vec![pick(0), Answer::Yes(false)]);
+        let err = generate_with(&ui, &yubikey_args()).unwrap_err();
+        assert!(err.to_string().contains("install ykman"));
+    }
+
+    #[test]
+    #[serial]
+    fn always_new_slot_skips_the_reuse_question() {
+        let dir = tempfile::tempdir().unwrap();
+        let _env = fake_yubikeys(dir.path(), 1, Some("19108090"), true, 0);
+        let args = StoreArgs {
+            new_slot: true,
+            ..yubikey_args()
+        };
+        // Only the PUK question is asked.
+        let ui = Ui::scripted(vec![pick(1)]);
+        let id = generate_with(&ui, &args).unwrap();
+        assert_eq!(id.public_key, "age1yubikey1qnewlegacy");
+    }
+
+    #[test]
+    #[serial]
+    fn the_store_is_chosen_from_a_menu_when_several_are_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let keyring = script(dir.path(), "keyring", "exit 0");
+        let _env = Env::set(&[
+            (hardware::PRIORITY_ENV, "keychain,file"),
+            ("SOPSY_KEYCHAIN_BIN", &keyring),
+        ]);
+        let ui = Ui::scripted(vec![pick(1)]);
+        let store = choose_store(&ui, &StoreArgs::default(), None).unwrap();
+        assert_eq!(store, Store::File);
+    }
+
+    #[test]
+    fn policy_names_cover_known_and_unknown() {
+        assert_eq!(policy_name(Some(yubikey::PinPolicy::Once)), "cached");
+        assert_eq!(policy_name::<yubikey::PinPolicy>(None), "unknown");
+        assert_eq!(join(&[1, 2]), "1, 2");
+    }
 }
