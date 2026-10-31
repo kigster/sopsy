@@ -27,6 +27,9 @@ executors:
     resource_class: medium
     environment:
       CARGO_TERM_COLOR: always
+      # Docker executors set neither USER nor LOGNAME; GitHub runners do, and
+      # sopsy records `$USER` as a member's username and approver.
+      USER: circleci
       # Pinned tool versions for reproducible integration tests.
       SOPS_VERSION: v3.9.4
       AGE_VERSION: v1.2.1
