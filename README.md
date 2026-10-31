@@ -28,6 +28,12 @@ ______________________________________________________________________
 - [The Secure Enclave security model](#the-secure-enclave-security-model)
   - [Where your identity lives](#where-your-identity-lives)
   - [Console session, Touch ID, and one-laptop testing](#console-session-touch-id-and-one-laptop-testing)
+- [YubiKey keys](#yubikey-keys)
+  - [Set up a repository with a YubiKey](#set-up-a-repository-with-a-yubikey)
+  - [Join with a YubiKey](#join-with-a-yubikey)
+  - [PIN, PUK and touch](#pin-puk-and-touch)
+- [Keychain keys](#keychain-keys)
+- [Plaintext key file](#plaintext-key-file)
 - [Break-glass keys](#break-glass-keys)
 - [Files sopsy manages](#files-sopsy-manages)
 - [Command Reference](#command-reference)
@@ -57,7 +63,18 @@ ______________________________________________________________________
 
 `sopsy` combines **SOPS**, **age**, and **age-plugin-se** into a seamless, hardware-protected way to encrypt application secrets that can be safely committed to a repository. It is built for developer settings and API keys, but works equally well for staging and production secrets.
 
-The killer property: the secret values live in Git in *encrypted* form, while the private key that can decrypt them never leaves your Mac's Secure Enclave.
+The killer property: the secret values live in Git in *encrypted* form, while the private key that can decrypt them stays in hardware you hold.
+
+Each member's private key lives in one of four **key stores**, strongest first. `--store auto` picks the first one your machine has, and a repository can limit which ones its members may use (`sopsy init --require`):
+
+| Store      | Where the key lives                                    | Unlocked by                    | Details                                               |
+| ---------- | ------------------------------------------------------ | ------------------------------ | ----------------------------------------------------- |
+| `enclave`  | The Secure Enclave of an Apple Silicon Mac             | Touch ID (or none, if chosen)  | [Secure Enclave](#the-secure-enclave-security-model)  |
+| `yubikey`  | A PIV slot on a YubiKey (works on Intel Macs, Linux)   | PIN once per session, a touch  | [YubiKey keys](#yubikey-keys)                         |
+| `keychain` | The macOS Keychain or the Linux Secret Service         | Your login session             | [Keychain keys](#keychain-keys)                       |
+| `file`     | A plaintext `keys.txt` (mode `0600`)                   | Nothing: anyone who can read it | [Plaintext key file](#plaintext-key-file)             |
+
+The hardware stores never let the private key out. The two software stores are for machines with neither, and sopsy warns when it uses them.
 
 ## Philosophy
 
@@ -69,6 +86,8 @@ The killer property: the secret values live in Git in *encrypted* form, while th
 ## Features
 
 - **Secure Enclave-backed identities** — private key bound to the hardware, protected by Touch ID, and impossible to exfiltrate.
+- **YubiKey-backed identities** — the private key lives in a YubiKey PIV slot (via `age-plugin-yubikey`), works on Intel Macs and Linux, and needs your PIN and a touch to decrypt.
+- **Key stores and repo policy** — Secure Enclave, YubiKey, OS keychain or a plaintext file; `sopsy init --require` decides which ones members may use.
 - **Repository bootstrap** — one command writes `.sops.yaml`, `.env.example`, an encrypted `.env.encrypted`, `.gitignore` safety rules, and `.sopsy.yml`.
 - **`doctor` health checks** — macOS / Apple Silicon / Secure Enclave / Touch ID, the external tools, repo health, and a break-glass reminder.
 - **`edit`** — open an encrypted file in your editor through SOPS, with nicer errors and automatic file-type detection (including `dotenv`).
@@ -412,6 +431,146 @@ This matters when simulating a **team on a single Mac** — e.g. exercising the 
 > [!NOTE]
 >
 > Because Enclave identities only work interactively at the console, they are useless for CI, automation, and headless/SSH use — which is exactly what the portable **break-glass** key (next section) is for.
+
+## YubiKey keys
+
+A YubiKey keeps your private key in one of its PIV slots, so it never touches the disk. That suits machines without a Secure Enclave: Intel Macs and Linux. sopsy drives [`age-plugin-yubikey`](https://github.com/str4d/age-plugin-yubikey) to make the key, and `sops` calls the same plugin to decrypt with it. Only the public recipient (`age1yubikey1…`) is committed.
+
+```bash
+brew install age-plugin-yubikey ykman   # ykman is only needed to set a separate PUK
+sopsy doctor                            # check that the YubiKey is seen
+```
+
+```text
+# illustrative output on an Intel Mac
+Key stores
+  ℹ enclave (Secure Enclave, hardware): age-plugin-se has no Intel build (a T2 Enclave works once the plugin is built by hand)
+  ✔ yubikey (YubiKey, hardware): available
+  ✔ keychain (macOS Keychain, software): available
+  ⚠ file (plaintext key file, plaintext): available (last resort)
+  ℹ auto order (default): enclave, yubikey, keychain, file
+  ✔ auto would use: yubikey
+```
+
+```mermaid
+sequenceDiagram
+    participant U as You
+    participant S as sopsy
+    participant P as age-plugin-yubikey
+    participant Y as YubiKey
+    U->>S: sopsy init -s yubikey
+    S->>U: which YubiKey? reuse a slot or make a new one? separate PUK?
+    S->>P: generate (slot, PIN policy, touch policy)
+    P->>Y: create the key in a PIV slot (PIN, touch)
+    Y-->>P: public key
+    P-->>S: age1yubikey1… + identity handle
+    S->>S: handle → keys.txt, recipient → .sops.yaml
+    Note over U,Y: later: sopsy decrypt → sops → plugin → YubiKey (PIN once per session, touch)
+```
+
+### Set up a repository with a YubiKey
+
+The output below is illustrative; prompts are interactive menus (↑↓ moves, Space toggles, Enter confirms).
+
+```text
+$ sopsy init -r exthardware,software -s yubikey
+
+    If your YubiKey has a default factory PUK (the 'forgot PIN' special recovery PIN), would you like
+    to set it to something different than your YubiKey PIN?
+       Yes, set PUK separately.
+       No, it's ok to keep them the same, just not the factory value.
+
+  ℹ Talking to your YubiKey: enter its PIN, and touch it when it blinks.
+  ℹ Nothing is shown while you type a PIN or PUK; the plugin prints [hidden] afterwards.
+
+🔐 Enter PIN for YubiKey with serial 12345678 (default is 123456): [hidden]
+👆 Please touch the YubiKey
+✔ Created .sops.yaml, .sopsy.yml, .env.example and .env.encrypted
+
+$ sopsy recipient list
+NAME   USERNAME  PUBLIC KEY            STORE                BREAK-GLASS  APPROVED BY
+admin  alex      age1yubikey1qg8v…     yubikey (hardware)
+```
+
+Everything has a flag, so the same setup runs without prompts:
+
+```bash
+sopsy init -s yubikey --always-new-slot \
+  --yubikey-pin-policy cached --yubikey-touch-policy always \
+  --generate-emergency-keys
+```
+
+- With several YubiKeys plugged in, sopsy asks which one to use (by serial). Without a terminal it stops and asks you to unplug all but one.
+- When the YubiKey already holds age keys, sopsy offers to reuse one. `-a` / `--always-new-slot` skips the question and fills the next free slot.
+- `-r` / `--require` records the allowed stores in `.sopsy.yml` (`key_policy.required`). Members whose key comes from another store are refused by `join`, `recipient add` and `approve`.
+
+### Join with a YubiKey
+
+```bash
+git switch -c sopsy/add/alex
+sopsy join "Alex Example" -s yubikey      # PIN + touch, then a pending entry in .sopsy.yml
+git add .sopsy.yml .sopsy.sha && git commit -m "join: request access for Alex" && git push
+# any active member: sopsy approve "Alex Example"
+```
+
+After approval, decrypting asks for the PIN (once per session, with the default `cached` policy) and a touch:
+
+```text
+$ sopsy decrypt .env.encrypted
+🔐 Enter PIN for YubiKey with serial 12345678: [hidden]
+👆 Please touch the YubiKey
+DATABASE_URL=postgres://localhost:5432/myapp
+API_KEY=…
+```
+
+To have `auto` prefer the YubiKey on a machine that also has a Secure Enclave, set your own order: `export SOPSY_PRIVATE_KEY_STORE_PRIORITY=yubikey,enclave,keychain`.
+
+### PIN, PUK and touch
+
+| Term  | What it is                                                                                                   | Factory value |
+| ----- | ------------------------------------------------------------------------------------------------------------ | ------------- |
+| PIN   | Unlocks the key for use. 6–8 characters; 3 wrong tries lock it.                                              | `123456`      |
+| PUK   | PIN Unblock Key: resets a locked PIN. 3 wrong tries lock it for good; only a PIV reset (which wipes the keys) recovers. | `12345678`    |
+| Touch | Proof that a person is present. `cached` remembers a touch for 15 seconds; that window is fixed by the YubiKey. | —             |
+
+On a YubiKey still at factory settings, `age-plugin-yubikey` makes you choose a new PIN and then sets the PUK to that same PIN. If you answer **Yes, set PUK separately**, sopsy runs `ykman piv access change-puk` and `change-pin` first, so the PUK stays a separate recovery secret. Keep the PUK in your password manager.
+
+> [!WARNING]
+>
+> A YubiKey key is bound to that YubiKey: lose the key and you lose that identity, just like a laptop's Secure Enclave. Keep a break-glass key (next section) or a second recipient.
+
+## Keychain keys
+
+With no Secure Enclave and no YubiKey, the next choice is the OS keyring: the macOS login Keychain (through `security`) or the Linux Secret Service, i.e. GNOME Keyring or KWallet (through `secret-tool`). sopsy generates a regular age key with `age-keygen` and files it under the service `sopsy`, with the public key as the account name.
+
+- The secret goes in through stdin, so it never shows up in a process list, and it is never written to disk in plaintext. `keys.txt` holds only a marker line.
+- To decrypt, sopsy reads the key from the keyring and hands it to `sops` in the `SOPS_AGE_KEY` environment variable of that one child process.
+- No PIN or touch is asked: the keyring is unlocked with your login session.
+
+```text
+$ sopsy join "Alex Example" -s keychain        # illustrative output
+⚠ Using the macOS Keychain: a software key, weaker than a Secure Enclave or YubiKey.
+…
+```
+
+> [!WARNING]
+>
+> Any program running as you can read a keyring item. Use this store when no hardware store is available, and prefer `sopsy init --require onchip,exthardware` in repositories that must not accept software keys.
+
+## Plaintext key file
+
+The last resort: the age private key sits in your per-user `keys.txt` (see [Where your identity lives](#where-your-identity-lives)), readable only by you (mode `0600`). It needs no extra tools, so it works on any machine, including containers and headless servers, but anyone who can read the file can decrypt.
+
+```text
+$ sopsy init -s file --no-emergency-keys        # illustrative output, on Linux
+╭──────────────────────────────────────────────────────────────╮
+│ Your private key will be a PLAINTEXT file on this machine.   │
+╰──────────────────────────────────────────────────────────────╯
+⚠   enclave not used: no Secure Enclave on this platform
+⚠   yubikey not used: no YubiKey with PIV (CCID) is plugged in
+```
+
+`auto` reaches this store only when nothing better is available. `SOPSY_PRIVATE_KEY_STORE_PRIORITY` lets you leave it out (for example `enclave,yubikey,keychain`), and a repository can refuse it with `--require`.
 
 ## Break-glass keys
 
