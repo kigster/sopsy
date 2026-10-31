@@ -134,10 +134,11 @@ impl Recipient {
         Self { store, ..self }
     }
 
-    /// The recorded store, else the one implied by the key's prefix.
+    /// The store implied by the key's prefix, else the recorded one when the
+    /// key could have come from it (a recorded store is self-reported).
     pub fn effective_store(&self) -> Option<Store> {
-        self.store
-            .or_else(|| Store::from_recipient(&self.public_key))
+        Store::from_recipient(&self.public_key)
+            .or(self.store.filter(|s| Store::admits(&self.public_key, *s)))
     }
 
     /// Whether this member is awaiting approval.

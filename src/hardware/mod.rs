@@ -123,6 +123,18 @@ impl Store {
         }
     }
 
+    /// Whether a key with this recipient can come from `declared`.
+    ///
+    /// The prefix is the only evidence a store claim can be checked against:
+    /// `age1se1…` is always the Secure Enclave and `age1yubikey1…` always a
+    /// YubiKey, while a plain `age1…` key is software and cannot be hardware.
+    pub fn admits(public_key: &str, declared: Store) -> bool {
+        match Store::from_recipient(public_key) {
+            Some(implied) => implied == declared,
+            None => declared.kind() != StoreKind::Hardware,
+        }
+    }
+
     /// Whether this machine can use the store right now.
     pub fn probe(self) -> Availability {
         match self {

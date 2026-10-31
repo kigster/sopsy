@@ -359,8 +359,52 @@ fn join_and_approve_honor_the_allowed_set() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "`colin`: key store `enclave` is not allowed",
+            "a plain age1… key cannot come from the enclave store",
         ));
+}
+
+#[test]
+fn a_declared_hardware_store_cannot_launder_a_plain_key() {
+    let sb = Sandbox::new();
+    sb.sopsy()
+        .args([
+            "init",
+            "--require",
+            "exthardware,software",
+            "--store",
+            "file",
+            "--no-emergency-keys",
+        ])
+        .assert()
+        .success();
+    // Narrow the policy to hardware only, as an owner might later.
+    let narrowed = sb
+        .read(".sopsy.yml")
+        .replace("- keychain\n", "")
+        .replace("- file\n", "");
+    assert!(
+        !narrowed.contains("- file"),
+        "policy edit applied:\n{narrowed}"
+    );
+    std::fs::write(sb.path().join(".sopsy.yml"), narrowed).unwrap();
+    std::fs::remove_file(sb.path().join(".sopsy.sha")).unwrap();
+
+    // A plain X25519 key declared as a YubiKey is refused.
+    sb.sopsy()
+        .args([
+            "join",
+            "annie",
+            "--age-public-key",
+            "age1qannie",
+            "--store",
+            "yubikey",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "plain age1… key cannot come from the yubikey store",
+        ));
+    assert!(!sb.read(".sopsy.yml").contains("annie"));
 }
 
 #[test]

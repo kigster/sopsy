@@ -295,14 +295,30 @@ fn warn_if_weak(ui: &Ui, store: Store) {
 }
 
 /// Check a supplied public key against the repo's allowed set, returning the
-/// store to record: `declared` (from `--store`), else what the key's prefix
-/// implies.
+/// store to record.
+///
+/// The key's prefix wins over a declared store (`--store`, or `store:` in a
+/// member's own `.sopsy.yml` entry): both are self-reported, so a declaration
+/// that contradicts the key is rejected rather than trusted.
 pub(crate) fn check_allowed(
     allowed: Option<&[Store]>,
     public_key: &str,
     declared: Option<Store>,
 ) -> Result<Option<Store>> {
-    let store = declared.or_else(|| Store::from_recipient(public_key));
+    if let Some(declared) = declared
+        && !Store::admits(public_key, declared)
+    {
+        return Err(Error::Validation(match Store::from_recipient(public_key) {
+            Some(implied) => {
+                format!("this is a {implied} key (from its prefix), not a {declared} key")
+            }
+            None => format!(
+                "a plain age1… key cannot come from the {declared} store; \
+                 hardware keys have their own prefix (age1se1…, age1yubikey1…)"
+            ),
+        }));
+    }
+    let store = Store::from_recipient(public_key).or(declared);
     let Some(allowed) = allowed else {
         return Ok(store);
     };
@@ -353,6 +369,33 @@ mod tests {
         assert_eq!(
             check_allowed(None, "age1se1qx", None).unwrap(),
             Some(Store::Enclave)
+        );
+    }
+
+    #[test]
+    fn a_declared_store_cannot_contradict_the_key() {
+        let hardware = [Store::Enclave, Store::YubiKey];
+        // A plain key claiming to be hardware is refused, allowed set or not.
+        for declared in hardware {
+            let err = check_allowed(Some(&hardware), "age1qplain", Some(declared)).unwrap_err();
+            assert!(err.to_string().contains("plain age1… key cannot come from"));
+            assert!(check_allowed(None, "age1qplain", Some(declared)).is_err());
+        }
+        // A hardware prefix fixes the store.
+        let err = check_allowed(None, "age1se1qx", Some(Store::YubiKey)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("enclave key (from its prefix), not a yubikey")
+        );
+        assert!(check_allowed(None, "age1yubikey1qx", Some(Store::Keychain)).is_err());
+        // Consistent declarations still pass.
+        assert_eq!(
+            check_allowed(None, "age1qplain", Some(Store::File)).unwrap(),
+            Some(Store::File)
+        );
+        assert_eq!(
+            check_allowed(None, "age1yubikey1qx", Some(Store::YubiKey)).unwrap(),
+            Some(Store::YubiKey)
         );
     }
 
