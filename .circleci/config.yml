@@ -1,0 +1,384 @@
+# CircleCI port of .github/workflows/{ci,secret-scan,release}.yml.
+#
+# Workflows:
+#   ci           — every push: fmt + clippy + test, coverage, secret scan.
+#   release      — tags v*: create the GitHub release, build four targets,
+#                  attach sopsy-<target>.tar.gz + .sha256, notify the Homebrew tap.
+#   release-tag  — manual re-run for an existing tag: trigger a pipeline with
+#                  the `release_tag` parameter set (replaces workflow_dispatch).
+#
+# Project settings that config cannot express:
+#   - Enable "Auto-cancel redundant workflows" (GitHub's cancel-in-progress).
+#   - Environment variables (or a context): CODECOV_TOKEN, GITHUB_TOKEN
+#     (contents:write on kigster/sopsy), optional TAP_DISPATCH_TOKEN.
+#   - Make the "secret-scan" job a required check in branch protection.
+version: 2.1
+
+parameters:
+  release_tag:
+    type: string
+    default: ""
+    description: Existing tag to build and attach binaries to (e.g. v1.0.2)
+
+executors:
+  rust:
+    docker:
+      - image: cimg/rust:1.99
+    resource_class: medium
+    environment:
+      CARGO_TERM_COLOR: always
+      # Docker executors set neither USER nor LOGNAME; GitHub runners do, and
+      # sopsy records `$USER` as a member's username and approver.
+      USER: circleci
+      # Pinned tool versions for reproducible integration tests.
+      SOPS_VERSION: v3.9.4
+      AGE_VERSION: v1.2.1
+
+commands:
+  install-sops-age:
+    description: Install the Linux sops and age binaries the integration tests shell out to
+    steps:
+      - run:
+          name: Install sops
+          command: |
+            sudo curl -fsSL -o /usr/local/bin/sops \
+              "https://github.com/getsops/sops/releases/download/${SOPS_VERSION}/sops-${SOPS_VERSION}.linux.amd64"
+            sudo chmod +x /usr/local/bin/sops
+            sops --version
+      - run:
+          name: Install age
+          command: |
+            curl -fsSL -o /tmp/age.tar.gz \
+              "https://github.com/FiloSottile/age/releases/download/${AGE_VERSION}/age-${AGE_VERSION}-linux-amd64.tar.gz"
+            tar -xzf /tmp/age.tar.gz -C /tmp
+            sudo install -m 0755 /tmp/age/age /tmp/age/age-keygen /usr/local/bin/
+            age --version
+
+  restore-cargo-cache:
+    parameters:
+      key:
+        type: string
+    steps:
+      - restore_cache:
+          keys:
+            - cargo-<< parameters.key >>-v1-{{ arch }}-{{ checksum "Cargo.lock" }}
+            - cargo-<< parameters.key >>-v1-{{ arch }}-
+
+  save-cargo-cache:
+    parameters:
+      key:
+        type: string
+    steps:
+      - save_cache:
+          key: cargo-<< parameters.key >>-v1-{{ arch }}-{{ checksum "Cargo.lock" }}
+          paths:
+            - ~/.cargo/registry
+            - ~/.cargo/git
+            - target
+
+  release-tag:
+    description: Export TAG — the pipeline parameter when set, otherwise the pushed tag
+    steps:
+      - run:
+          name: Resolve release tag
+          command: |
+            TAG="<< pipeline.parameters.release_tag >>"
+            TAG="${TAG:-${CIRCLE_TAG:-}}"
+            if [ -z "$TAG" ]; then echo "No tag: push a v* tag or set release_tag"; exit 1; fi
+            echo "export TAG=$TAG" >> "$BASH_ENV"
+            echo "Release tag: $TAG"
+
+  install-gh:
+    description: Install the GitHub CLI (Linux)
+    steps:
+      - run:
+          name: Install gh
+          command: |
+            command -v gh >/dev/null && exit 0
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+              | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+              | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+            sudo apt-get update -qq && sudo apt-get install -y -qq gh
+
+  build-and-upload:
+    description: Build a release binary, archive it with a checksum, and attach both to the release
+    parameters:
+      target:
+        type: string
+      sha256:
+        type: string
+    steps:
+      - run:
+          name: Build << parameters.target >>
+          command: |
+            rustup target add << parameters.target >>
+            cargo build --release --locked --bin sopsy --target << parameters.target >>
+      - run:
+          name: Archive and upload sopsy-<< parameters.target >>
+          command: |
+            set -euo pipefail
+            archive="sopsy-<< parameters.target >>.tar.gz"
+            tar -czf "$archive" -C "target/<< parameters.target >>/release" sopsy
+            << parameters.sha256 >> "$archive" > "$archive.sha256"
+            export GH_TOKEN="$GITHUB_TOKEN" GH_REPO="${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}"
+            gh release upload "$TAG" "$archive" "$archive.sha256" --clobber
+
+jobs:
+  # ── ci.yml: build ────────────────────────────────────────────────────────────
+  build:
+    executor: rust
+    steps:
+      - checkout
+      - run: rustup component add rustfmt clippy
+      - restore-cargo-cache:
+          key: build
+      - install-sops-age
+      # Quality gates: each step fails the build on its own.
+      - run:
+          name: Check formatting
+          command: cargo fmt --all -- --check
+      - run:
+          name: Clippy (deny warnings)
+          command: cargo clippy --all-targets --all-features -- -D warnings
+      - run:
+          name: Run tests
+          command: cargo test --all
+      - save-cargo-cache:
+          key: build
+
+  # ── ci.yml: coverage ─────────────────────────────────────────────────────────
+  coverage:
+    executor: rust
+    steps:
+      - checkout
+      - run: rustup component add llvm-tools-preview
+      - run:
+          name: Install cargo-llvm-cov
+          command: |
+            curl -fsSL https://github.com/taiki-e/cargo-llvm-cov/releases/latest/download/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz \
+              | tar -xz -C ~/.cargo/bin
+            cargo llvm-cov --version
+      - restore-cargo-cache:
+          key: coverage
+      - install-sops-age
+      - run:
+          name: Generate coverage (lcov)
+          command: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+      - save-cargo-cache:
+          key: coverage
+      - run:
+          name: Upload to Codecov
+          # Non-fatal, like fail_ci_if_error: false on GitHub; flip once the token is set and a run is green.
+          command: |
+            if [ -z "${CODECOV_TOKEN:-}" ]; then echo "CODECOV_TOKEN not set — skipping upload."; exit 0; fi
+            curl -fsSL -o /tmp/codecov https://cli.codecov.io/latest/linux/codecov
+            chmod +x /tmp/codecov
+            /tmp/codecov upload-process -t "$CODECOV_TOKEN" -f lcov.info || echo "Codecov upload failed (non-fatal)."
+      - store_artifacts:
+          path: lcov.info
+
+  # ── secret-scan.yml ──────────────────────────────────────────────────────────
+  # The authoritative, non-bypassable secret gate (local lefthook hooks are advisory).
+  # gitleaks is pinned to match the Brewfile / local hook; bump in lockstep.
+  secret-scan:
+    docker:
+      - image: cimg/base:current
+    resource_class: small
+    environment:
+      GITLEAKS_VERSION: "8.30.1"
+    steps:
+      # CircleCI's checkout is a full clone, so the commit range below resolves.
+      - checkout
+      - run:
+          name: Install gitleaks (pinned)
+          command: |
+            set -euo pipefail
+            tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+            curl --fail --silent --show-error --location \
+              "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}" -o "/tmp/${tarball}"
+            tar -xzf "/tmp/${tarball}" -C /tmp gitleaks
+            sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+            gitleaks version
+      - run:
+          name: gitleaks
+          no_output_timeout: 10m
+          # CircleCI has no PR base SHA, so a branch scans its commits since it left main;
+          # main itself gets a full working-tree scan.
+          command: |
+            set -euo pipefail
+            if [ "${CIRCLE_BRANCH:-}" != "main" ] && [ -z "${CIRCLE_TAG:-}" ]; then
+              git fetch --quiet origin main
+              BASE_SHA="$(git merge-base origin/main HEAD)"
+              echo "Scanning branch commit range ${BASE_SHA}..${CIRCLE_SHA1}"
+              gitleaks git --config .gitleaks.toml --redact --no-banner --verbose \
+                --log-opts="${BASE_SHA}..${CIRCLE_SHA1}"
+            else
+              echo "Scanning the full working tree"
+              gitleaks dir --config .gitleaks.toml --redact --no-banner --verbose .
+            fi
+
+  # ── release.yml: create-release ──────────────────────────────────────────────
+  # Pushing a tag does not create a GitHub Release object, so create (or reuse) it once.
+  create-release:
+    docker:
+      - image: cimg/base:current
+    resource_class: small
+    steps:
+      - release-tag
+      - install-gh
+      - run:
+          name: Ensure the GitHub release exists
+          command: |
+            set -euo pipefail
+            export GH_TOKEN="$GITHUB_TOKEN" GH_REPO="${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}"
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              echo "Release $TAG already exists; reusing it."
+            else
+              gh release create "$TAG" --title "$TAG" --generate-notes
+            fi
+
+  # ── release.yml: upload (one job per target) ─────────────────────────────────
+  # Builds the binary, tars it as sopsy-<target>.tar.gz, writes a .sha256, and
+  # uploads both to the release (what taiki-e/upload-rust-binary-action does).
+  upload-macos:
+    parameters:
+      target:
+        type: string
+    macos:
+      xcode: "16.4.0"
+    resource_class: m4pro.medium
+    steps:
+      - release-tag
+      - checkout
+      - run:
+          name: Check out the tag
+          command: git fetch --quiet --tags origin && git checkout --quiet "refs/tags/$TAG"
+      - run:
+          name: Install Rust and gh
+          command: |
+            curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --target << parameters.target >>
+            echo 'source "$HOME/.cargo/env"' >> "$BASH_ENV"
+            command -v gh >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install gh
+      - build-and-upload:
+          target: << parameters.target >>
+          sha256: shasum -a 256
+
+  upload-linux:
+    parameters:
+      target:
+        type: string
+      resource_class:
+        type: string
+    docker:
+      - image: cimg/rust:1.99
+    resource_class: << parameters.resource_class >>
+    steps:
+      - release-tag
+      - checkout
+      - run:
+          name: Check out the tag
+          command: git fetch --quiet --tags origin && git checkout --quiet "refs/tags/$TAG"
+      - install-gh
+      - build-and-upload:
+          target: << parameters.target >>
+          sha256: sha256sum
+
+  # ── release.yml: notify-tap ──────────────────────────────────────────────────
+  notify-tap:
+    docker:
+      - image: cimg/base:current
+    resource_class: small
+    steps:
+      - release-tag
+      - install-gh
+      - run:
+          name: Trigger tap update-formula workflow
+          # Optional: TAP_DISPATCH_TOKEN, a PAT with `repo` scope on kigster/homebrew-tap.
+          command: |
+            set -euo pipefail
+            if [ -z "${TAP_DISPATCH_TOKEN:-}" ]; then
+              echo "TAP_DISPATCH_TOKEN not set — skipping auto-update."
+              echo "Run the tap's update-formula workflow manually:"
+              echo "  gh workflow run update-formula.yml -R kigster/homebrew-tap -f tag=$TAG"
+              exit 0
+            fi
+            GH_TOKEN="$TAP_DISPATCH_TOKEN" gh api "repos/kigster/homebrew-tap/dispatches" \
+              -f "event_type=sopsy-release" \
+              -f "client_payload[tag]=$TAG"
+
+workflows:
+  ci:
+    when:
+      equal: ["", << pipeline.parameters.release_tag >>]
+    jobs:
+      - build
+      - coverage
+      - secret-scan
+
+  release:
+    when:
+      equal: ["", << pipeline.parameters.release_tag >>]
+    jobs:
+      - create-release:
+          filters: &tags_only
+            tags:
+              only: /^v.*/
+            branches:
+              ignore: /.*/
+      - upload-macos:
+          name: upload-<< matrix.target >>
+          requires: [create-release]
+          filters: *tags_only
+          matrix:
+            parameters:
+              # x86_64 is cross-compiled on the Apple Silicon executor.
+              target: [aarch64-apple-darwin, x86_64-apple-darwin]
+      - upload-linux:
+          name: upload-x86_64-unknown-linux-gnu
+          target: x86_64-unknown-linux-gnu
+          resource_class: medium
+          requires: [create-release]
+          filters: *tags_only
+      - upload-linux:
+          name: upload-aarch64-unknown-linux-gnu
+          target: aarch64-unknown-linux-gnu
+          resource_class: arm.medium
+          requires: [create-release]
+          filters: *tags_only
+      - notify-tap:
+          requires:
+            - upload-aarch64-apple-darwin
+            - upload-x86_64-apple-darwin
+            - upload-x86_64-unknown-linux-gnu
+            - upload-aarch64-unknown-linux-gnu
+          filters: *tags_only
+
+  release-tag:
+    when:
+      not:
+        equal: ["", << pipeline.parameters.release_tag >>]
+    jobs:
+      - create-release
+      - upload-macos:
+          name: upload-<< matrix.target >>
+          requires: [create-release]
+          matrix:
+            parameters:
+              target: [aarch64-apple-darwin, x86_64-apple-darwin]
+      - upload-linux:
+          name: upload-x86_64-unknown-linux-gnu
+          target: x86_64-unknown-linux-gnu
+          resource_class: medium
+          requires: [create-release]
+      - upload-linux:
+          name: upload-aarch64-unknown-linux-gnu
+          target: aarch64-unknown-linux-gnu
+          resource_class: arm.medium
+          requires: [create-release]
+      - notify-tap:
+          requires:
+            - upload-aarch64-apple-darwin
+            - upload-x86_64-apple-darwin
+            - upload-x86_64-unknown-linux-gnu
+            - upload-aarch64-unknown-linux-gnu

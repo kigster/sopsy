@@ -36,7 +36,7 @@ fn sopsy() -> Command {
 #[test]
 fn reports_nothing_to_do_when_all_present() {
     let bin = TempDir::new().unwrap();
-    for tool in ["sops", "age", "age-plugin-se"] {
+    for tool in sopsy::commands::deps::dependencies() {
         present(bin.path(), tool);
     }
     sopsy()
@@ -52,7 +52,7 @@ fn installs_only_missing_tools_via_brew() {
     let bin = TempDir::new().unwrap();
     present(bin.path(), "sops");
     present(bin.path(), "age");
-    // age-plugin-se intentionally absent.
+    // The key-store plugins are intentionally absent.
     let log = bin.path().join("brew.log");
     write_exe(
         bin.path(),
@@ -68,7 +68,7 @@ fn installs_only_missing_tools_via_brew() {
 
     let recorded = fs::read_to_string(&log).unwrap();
     assert!(
-        recorded.contains("install age-plugin-se"),
+        recorded.contains("install") && recorded.contains("age-plugin-yubikey"),
         "brew should install the missing tool; got: {recorded}"
     );
     assert!(
@@ -96,8 +96,11 @@ fn installs_all_dependencies_when_none_present() {
 
     let recorded = fs::read_to_string(&log).unwrap();
     assert!(
-        recorded.contains("install sops age age-plugin-se"),
-        "all three missing tools should install in one brew call; got: {recorded}"
+        recorded.contains(&format!(
+            "install {}",
+            sopsy::commands::deps::dependencies().join(" ")
+        )),
+        "all missing tools should install in one brew call; got: {recorded}"
     );
 }
 
@@ -106,7 +109,7 @@ fn honors_brew_bin_override() {
     let bin = TempDir::new().unwrap();
     present(bin.path(), "sops");
     present(bin.path(), "age");
-    // age-plugin-se missing; `brew` is NOT on PATH — only via SOPSY_BREW_BIN.
+    // key-store plugins missing; `brew` is NOT on PATH — only via SOPSY_BREW_BIN.
     let brew_dir = TempDir::new().unwrap();
     let log = brew_dir.path().join("brew.log");
     write_exe(
@@ -125,7 +128,7 @@ fn honors_brew_bin_override() {
 
     let recorded = fs::read_to_string(&log).unwrap();
     assert!(
-        recorded.contains("install age-plugin-se"),
+        recorded.contains("install") && recorded.contains("age-plugin-yubikey"),
         "the SOPSY_BREW_BIN override should be invoked; got: {recorded}"
     );
 }
@@ -147,7 +150,10 @@ fn dry_run_prints_command_without_running_brew() {
         .env("PATH", bin.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains("brew install age-plugin-se"));
+        .stdout(
+            predicate::str::contains("brew install")
+                .and(predicate::str::contains("age-plugin-yubikey")),
+        );
 
     assert!(!log.exists(), "brew must not run in --dry-run mode");
 }
@@ -157,7 +163,7 @@ fn surfaces_brew_failure() {
     let bin = TempDir::new().unwrap();
     present(bin.path(), "sops");
     present(bin.path(), "age");
-    // age-plugin-se missing; brew exists but fails.
+    // key-store plugins missing; brew exists but fails.
     write_exe(bin.path(), "brew", "#!/bin/sh\necho 'boom' >&2\nexit 1\n");
     sopsy()
         .args(["deps", "-y"])
@@ -171,7 +177,7 @@ fn surfaces_brew_failure() {
 fn check_exits_nonzero_when_a_tool_is_missing() {
     let bin = TempDir::new().unwrap();
     present(bin.path(), "sops");
-    // age + age-plugin-se missing.
+    // age and the key-store plugins missing.
     sopsy()
         .args(["deps", "--check"])
         .env("PATH", bin.path())
@@ -183,7 +189,7 @@ fn check_exits_nonzero_when_a_tool_is_missing() {
 #[test]
 fn check_exits_zero_when_all_present() {
     let bin = TempDir::new().unwrap();
-    for tool in ["sops", "age", "age-plugin-se"] {
+    for tool in sopsy::commands::deps::dependencies() {
         present(bin.path(), tool);
     }
     sopsy()

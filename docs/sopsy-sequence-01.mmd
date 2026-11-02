@@ -8,7 +8,7 @@ sequenceDiagram
 
     Dev->>Sopsy: init
     Sopsy->>Git: find repo root
-    alt --public-key supplied
+    alt --age-public-key supplied
         Sopsy->>Sopsy: use existing age recipient
     else generate identity (default)
         Sopsy->>SE: age-plugin-se keygen
@@ -17,7 +17,7 @@ sequenceDiagram
     Sopsy->>FS: scaffold .sops.yaml, .env.example, .sopsy.yml, .gitignore
     Sopsy->>Sops: encrypt .env.encrypted (dotenv)
     Sops-->>FS: write encrypted .env.encrypted
-    opt break-glass (prompted, or --break-glass)
+    opt break-glass (prompted, or --generate-emergency-keys)
         Sopsy->>Dev: generate portable key, copy to 1Password, wait for ENTER
         Sopsy->>FS: delete local key files, register break-glass, re-key
     end

@@ -10,21 +10,41 @@
 //! - Section headers and an [`Ui::animated_line`] helper that cycles colors for
 //!   a touch of delight (non-blocking and test-friendly).
 //! - A spinner/progress helper backed by `indicatif`.
-//! - Thin wrappers over `inquire` ([`Ui::select`], [`Ui::multi_select`],
-//!   [`Ui::confirm`], [`Ui::text`]) that return a clear [`Error::NonInteractive`]
-//!   when called in `--non-interactive` mode instead of blocking forever.
+//! - Prompts that return a clear [`Error::NonInteractive`] when called in
+//!   `--non-interactive` mode instead of blocking forever: [`Ui::select`] and
+//!   [`Ui::multi_select`] (drawn by the `checklist` module), and
+//!   [`Ui::confirm`] and [`Ui::text`] (thin wrappers over `inquire`).
 //!
 //! Color is suppressed when `--no-color` is passed, when the `NO_COLOR`
 //! environment variable is set, or when stdout is not a TTY.
 
 use std::io::{IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressStyle};
-use inquire::{Confirm, MultiSelect, Select, Text};
+use inquire::ui::{Color, RenderConfig, StyleSheet};
+use inquire::{Confirm, Text};
 use owo_colors::{OwoColorize, Style};
 
 use crate::error::{Error, Result};
+
+mod checklist;
+
+/// Whether the last line printed is blank, so a prompt doesn't add a second.
+static AT_BLANK_LINE: AtomicBool = AtomicBool::new(false);
+
+/// `println!` that keeps [`AT_BLANK_LINE`] up to date.
+macro_rules! out {
+    () => {{
+        println!();
+        AT_BLANK_LINE.store(true, Ordering::Relaxed);
+    }};
+    ($($arg:tt)*) => {{
+        println!($($arg)*);
+        AT_BLANK_LINE.store(false, Ordering::Relaxed);
+    }};
+}
 
 /// Presentation handle threaded through commands.
 ///
@@ -43,7 +63,28 @@ pub struct Ui {
     /// is a resolved global flag like the others; consumed by
     /// [`crate::git::stage_and_advise`].
     git: bool,
+    /// Canned prompt answers, replayed in order instead of reading the
+    /// terminal. Unit tests only; see [`Ui::scripted`].
+    #[cfg(test)]
+    script: Option<std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<Answer>>>>,
 }
+
+/// A canned answer for one prompt of a [`Ui::scripted`] handle.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) enum Answer {
+    /// Keys for a checklist or select, fed through the real widget logic.
+    Keys(Vec<checklist::Key>),
+    /// The answer to a yes/no question.
+    Yes(bool),
+    /// Typed text (an empty string takes the default, if there is one).
+    Text(String),
+    /// ENTER for [`Ui::press_enter`].
+    Enter,
+}
+
+#[cfg(test)]
+pub(crate) use checklist::Key;
 
 impl Ui {
     /// Total width, in columns, of the yellow band [`Ui::header`] paints.
@@ -79,6 +120,8 @@ impl Ui {
             // Enabled explicitly via `with_git`; off by default so every test and
             // nested call starts without staging behavior.
             git: false,
+            #[cfg(test)]
+            script: None,
         }
     }
 
@@ -98,6 +141,27 @@ impl Ui {
             git: false,
             ..self.clone()
         }
+    }
+
+    /// An interactive, colorless handle that answers prompts from `answers`
+    /// in order, for unit-testing interactive flows without a terminal.
+    #[cfg(test)]
+    pub(crate) fn scripted(answers: Vec<Answer>) -> Self {
+        Self {
+            color: false,
+            verbose: false,
+            interactive: true,
+            git: false,
+            script: Some(std::rc::Rc::new(std::cell::RefCell::new(answers.into()))),
+        }
+    }
+
+    /// The next canned answer, when this handle is scripted.
+    #[cfg(test)]
+    fn scripted_answer(&self, prompt: &str) -> Option<Answer> {
+        let script = self.script.as_ref()?;
+        let answer = script.borrow_mut().pop_front();
+        Some(answer.unwrap_or_else(|| panic!("no scripted answer left for `{prompt}`")))
     }
 
     /// Whether the user requested `git add` + commit/PR advice (`--git`).
@@ -132,7 +196,7 @@ impl Ui {
 
     /// Print a green `✔` success line.
     pub fn success(&self, msg: impl AsRef<str>) {
-        println!(
+        out!(
             "{} {}",
             self.paint("✔", Style::new().green().bold()),
             msg.as_ref()
@@ -141,7 +205,7 @@ impl Ui {
 
     /// Print a red `✗` failure line.
     pub fn failure(&self, msg: impl AsRef<str>) {
-        println!(
+        out!(
             "{} {}",
             self.paint("✗", Style::new().red().bold()),
             msg.as_ref()
@@ -150,7 +214,7 @@ impl Ui {
 
     /// Print a yellow `⚠` warning line.
     pub fn warn(&self, msg: impl AsRef<str>) {
-        println!(
+        out!(
             "{} {}",
             self.paint("⚠", Style::new().yellow().bold()),
             msg.as_ref()
@@ -159,7 +223,7 @@ impl Ui {
 
     /// Print a blue `ℹ` informational line.
     pub fn info(&self, msg: impl AsRef<str>) {
-        println!(
+        out!(
             "{} {}",
             self.paint("ℹ", Style::new().blue().bold()),
             msg.as_ref()
@@ -169,7 +233,7 @@ impl Ui {
     /// Print a dimmed line, only when verbose mode is enabled.
     pub fn debug(&self, msg: impl AsRef<str>) {
         if self.verbose {
-            println!("{}", self.paint(msg.as_ref(), Style::new().dimmed()));
+            out!("{}", self.paint(msg.as_ref(), Style::new().dimmed()));
         }
     }
 
@@ -179,7 +243,7 @@ impl Ui {
     /// selected and run as-is. Used to present the `git`/`gh` commands the
     /// `--git` flow suggests.
     pub fn command(&self, cmd: impl AsRef<str>) {
-        println!("  {}", self.paint(cmd.as_ref(), Style::new().bold().cyan()));
+        out!("  {}", self.paint(cmd.as_ref(), Style::new().bold().cyan()));
     }
 
     // ----- Full-width banner boxes -----------------------------------------
@@ -213,10 +277,10 @@ impl Ui {
     fn banner(&self, glyph: &str, msg: &str, style: Style) {
         let width = term_width().max(20);
         let lines = wrap_text(msg, width - 6);
-        println!();
+        out!();
         if self.color {
             let pad = " ".repeat(width);
-            println!("{}", self.paint(&pad, style));
+            out!("{}", self.paint(&pad, style));
             for (i, line) in lines.iter().enumerate() {
                 let lead = if i == 0 {
                     format!("  {glyph} ")
@@ -225,11 +289,11 @@ impl Ui {
                 };
                 let used = lead.chars().count() + line.chars().count();
                 let text = format!("{lead}{line}{}", " ".repeat(width.saturating_sub(used)));
-                println!("{}", self.paint(&text, style));
+                out!("{}", self.paint(&text, style));
             }
-            println!("{}", self.paint(&pad, style));
+            out!("{}", self.paint(&pad, style));
         } else {
-            println!("┌{}┐", "─".repeat(width - 2));
+            out!("┌{}┐", "─".repeat(width - 2));
             for (i, line) in lines.iter().enumerate() {
                 let lead = if i == 0 {
                     format!("{glyph} ")
@@ -237,11 +301,11 @@ impl Ui {
                     "  ".into()
                 };
                 let used = 4 + lead.chars().count() + line.chars().count();
-                println!("│ {lead}{line}{} │", " ".repeat(width.saturating_sub(used)));
+                out!("│ {lead}{line}{} │", " ".repeat(width.saturating_sub(used)));
             }
-            println!("└{}┘", "─".repeat(width - 2));
+            out!("└{}┘", "─".repeat(width - 2));
         }
-        println!();
+        out!();
     }
 
     /// Print a section header — bold white text on a yellow band padded to
@@ -249,16 +313,24 @@ impl Ui {
     /// below. Longer titles are not truncated — the band simply extends.
     /// Without color the title is printed plainly (no invisible padding for
     /// logs/pipes).
+    /// Print an empty line.
+    pub fn blank(&self) {
+        out!();
+    }
+
     pub fn header(&self, title: impl AsRef<str>) {
         let title = title.as_ref();
-        println!();
-        println!();
+        // Two blank lines above the band, counting one a prompt already left.
+        if !AT_BLANK_LINE.load(Ordering::Relaxed) {
+            out!();
+        }
+        out!();
         if self.color {
             // HEADER_WIDTH columns total: two leading spaces (title starts on
             // column 3) + title + padding out to the edge.
             let pad = Self::HEADER_WIDTH.saturating_sub(title.chars().count() + 2);
             let band = format!("  {title}{}", " ".repeat(pad));
-            println!(
+            out!(
                 "{}",
                 // Two separate SGR sequences with the background opened FIRST:
                 // a single combined `38;2;R;G;B;43;1` run-on can trip up SGR
@@ -272,9 +344,9 @@ impl Ui {
                 )
             );
         } else {
-            println!("{title}");
+            out!("{title}");
         }
-        println!();
+        out!();
     }
 
     /// Print a line whose characters cycle through a rainbow of colors.
@@ -285,7 +357,7 @@ impl Ui {
     pub fn animated_line(&self, text: impl AsRef<str>) {
         let text = text.as_ref();
         if !self.color {
-            println!("{text}");
+            out!("{text}");
             return;
         }
         // A small palette cycled per-character for a playful gradient effect.
@@ -302,7 +374,7 @@ impl Ui {
             let style = palette[i % palette.len()];
             out.push_str(&ch.to_string().style(style).to_string());
         }
-        println!("{out}");
+        out!("{out}");
     }
 
     /// Create an `indicatif` spinner with a playful message.
@@ -352,11 +424,23 @@ impl Ui {
                 flag: "an interactive terminal (this step cannot be scripted)".to_string(),
             });
         }
-        println!();
-        print!("{} ", self.paint(prompt, Style::new().bold().cyan()));
+        if !AT_BLANK_LINE.load(Ordering::Relaxed) {
+            out!();
+        }
+        print!("{} ", self.paint(prompt, Style::new().green()));
         let _ = std::io::stdout().flush();
+        #[cfg(test)]
+        if let Some(answer) = self.scripted_answer(prompt) {
+            assert!(
+                matches!(answer, Answer::Enter),
+                "`{prompt}` expects Enter, got {answer:?}"
+            );
+            out!();
+            return Ok(());
+        }
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
+        out!();
         Ok(())
     }
 
@@ -366,10 +450,11 @@ impl Ui {
     ///
     /// Returns [`Error::NonInteractive`] when prompting is disabled.
     pub fn select(&self, prompt: &str, flag: &str, options: Vec<String>) -> Result<String> {
-        self.ensure_interactive(prompt, flag)?;
-        // Irreducible interactive tail: requires a real TTY, so it stays thin and
-        // untested while all guarding logic above is unit-tested.
-        Select::new(prompt, options).prompt().map_err(into_other)
+        let picked = self.checklist(prompt, flag, checklist::Checklist::single(options))?;
+        picked
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::Validation("nothing to choose from".into()))
     }
 
     /// Ask the user to pick zero or more options from `options`.
@@ -381,10 +466,96 @@ impl Ui {
         flag: &str,
         options: Vec<String>,
     ) -> Result<Vec<String>> {
+        self.checklist(
+            prompt,
+            flag,
+            checklist::Checklist::new(options, &[], Vec::new()),
+        )
+    }
+
+    /// Like [`Ui::multi_select`], with every option selected to start with.
+    pub fn multi_select_all(
+        &self,
+        prompt: &str,
+        flag: &str,
+        options: Vec<String>,
+    ) -> Result<Vec<String>> {
+        let all: Vec<usize> = (0..options.len()).collect();
+        self.checklist(
+            prompt,
+            flag,
+            checklist::Checklist::new(options, &all, Vec::new()),
+        )
+    }
+
+    /// Like [`Ui::multi_select_all`], with a column marking each option
+    /// available on this machine (✅) or not (`[ｘ]`).
+    pub fn multi_select_all_marked(
+        &self,
+        prompt: &str,
+        flag: &str,
+        options: Vec<(String, bool)>,
+    ) -> Result<Vec<String>> {
+        let all: Vec<usize> = (0..options.len()).collect();
+        let (options, available) = options.into_iter().unzip();
+        self.checklist(
+            prompt,
+            flag,
+            checklist::Checklist::new(options, &all, available),
+        )
+    }
+
+    // Irreducible interactive tail: the key handling and rendering are
+    // unit-tested in `checklist`; this needs a real TTY.
+    fn checklist(
+        &self,
+        prompt: &str,
+        flag: &str,
+        list: checklist::Checklist,
+    ) -> Result<Vec<String>> {
         self.ensure_interactive(prompt, flag)?;
-        MultiSelect::new(prompt, options)
-            .prompt()
-            .map_err(into_other)
+        self.spaced(|| {
+            #[cfg(test)]
+            if let Some(answer) = self.scripted_answer(prompt) {
+                let Answer::Keys(keys) = answer else {
+                    panic!("`{prompt}` expects keys, got {answer:?}");
+                };
+                let mut keys = keys.into_iter();
+                let picked = checklist::drive(
+                    prompt,
+                    list,
+                    self.color,
+                    &mut std::io::sink(),
+                    || 100,
+                    || Ok(keys.next().unwrap_or(checklist::Key::Cancel)),
+                )?;
+                return picked.ok_or_else(canceled);
+            }
+            checklist::run(prompt, list, self.color)?.ok_or_else(canceled)
+        })
+    }
+
+    /// Run a prompt with a blank line before the question and after the answer.
+    /// (See [`canceled`] for the error a canceled checklist turns into.)
+    /// Consecutive prompts share one blank line.
+    fn spaced<T>(&self, prompt: impl FnOnce() -> Result<T>) -> Result<T> {
+        if !AT_BLANK_LINE.load(Ordering::Relaxed) {
+            eprintln!();
+        }
+        let answer = prompt()?;
+        eprintln!();
+        AT_BLANK_LINE.store(true, Ordering::Relaxed);
+        Ok(answer)
+    }
+
+    /// `inquire` styling: the question in green, like the checklist's.
+    fn render_config(&self) -> RenderConfig<'static> {
+        if !self.color {
+            return RenderConfig::empty();
+        }
+        let mut config = RenderConfig::default_colored();
+        config.prompt = StyleSheet::new().with_fg(Color::DarkGreen);
+        config
     }
 
     /// Ask the user a yes/no question with a default.
@@ -392,10 +563,20 @@ impl Ui {
     /// Returns [`Error::NonInteractive`] when prompting is disabled.
     pub fn confirm(&self, prompt: &str, flag: &str, default: bool) -> Result<bool> {
         self.ensure_interactive(prompt, flag)?;
-        Confirm::new(prompt)
-            .with_default(default)
-            .prompt()
-            .map_err(into_other)
+        self.spaced(|| {
+            #[cfg(test)]
+            if let Some(answer) = self.scripted_answer(prompt) {
+                let Answer::Yes(yes) = answer else {
+                    panic!("`{prompt}` expects yes/no, got {answer:?}");
+                };
+                return Ok(yes);
+            }
+            Confirm::new(prompt)
+                .with_default(default)
+                .with_render_config(self.render_config())
+                .prompt()
+                .map_err(into_other)
+        })
     }
 
     /// Ask the user for a free-form text value.
@@ -403,7 +584,16 @@ impl Ui {
     /// Returns [`Error::NonInteractive`] when prompting is disabled.
     pub fn text(&self, prompt: &str, flag: &str) -> Result<String> {
         self.ensure_interactive(prompt, flag)?;
-        Text::new(prompt).prompt().map_err(into_other)
+        self.spaced(|| {
+            #[cfg(test)]
+            if let Some(answer) = self.scripted_answer(prompt) {
+                return Ok(scripted_text(prompt, answer, ""));
+            }
+            Text::new(prompt)
+                .with_render_config(self.render_config())
+                .prompt()
+                .map_err(into_other)
+        })
     }
 
     /// Ask the user for a free-form text value, offering `default` when they
@@ -412,10 +602,17 @@ impl Ui {
     /// Returns [`Error::NonInteractive`] when prompting is disabled.
     pub fn text_with_default(&self, prompt: &str, flag: &str, default: &str) -> Result<String> {
         self.ensure_interactive(prompt, flag)?;
-        Text::new(prompt)
-            .with_default(default)
-            .prompt()
-            .map_err(into_other)
+        self.spaced(|| {
+            #[cfg(test)]
+            if let Some(answer) = self.scripted_answer(prompt) {
+                return Ok(scripted_text(prompt, answer, default));
+            }
+            Text::new(prompt)
+                .with_default(default)
+                .with_render_config(self.render_config())
+                .prompt()
+                .map_err(into_other)
+        })
     }
 
     /// Guard that converts a disallowed prompt into a clear error.
@@ -486,6 +683,27 @@ where
     Error::Other(error.into())
 }
 
+/// The error a canceled checklist (Esc, Ctrl-C) turns into.
+fn canceled() -> Error {
+    into_other(std::io::Error::new(
+        std::io::ErrorKind::Interrupted,
+        "prompt canceled",
+    ))
+}
+
+/// A scripted text answer, with an empty one taking `default`.
+#[cfg(test)]
+fn scripted_text(prompt: &str, answer: Answer, default: &str) -> String {
+    let Answer::Text(text) = answer else {
+        panic!("`{prompt}` expects text, got {answer:?}");
+    };
+    if text.is_empty() {
+        default.to_string()
+    } else {
+        text
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,6 +715,7 @@ mod tests {
             verbose: false,
             interactive: false,
             git: false,
+            script: None,
         }
     }
 
@@ -511,6 +730,7 @@ mod tests {
             verbose: true,
             interactive: true,
             git: false,
+            script: None,
         }
     }
 
@@ -729,5 +949,67 @@ mod tests {
         let err = into_other(std::io::Error::other("boom"));
         assert!(matches!(err, Error::Other(_)));
         assert!(err.to_string().contains("boom"));
+    }
+
+    // ----- Scripted prompts ----------------------------------------------
+
+    fn pick(down: usize) -> Answer {
+        let mut keys = vec![Key::Down; down];
+        keys.push(Key::Submit);
+        Answer::Keys(keys)
+    }
+
+    #[test]
+    fn scripted_prompts_answer_through_the_real_widgets() {
+        let opts = || vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let ui = Ui::scripted(vec![
+            pick(1),
+            Answer::Keys(vec![
+                Key::Toggle,
+                Key::Down,
+                Key::Down,
+                Key::Toggle,
+                Key::Submit,
+            ]),
+            Answer::Keys(vec![Key::Down, Key::Toggle, Key::Submit]),
+            Answer::Keys(vec![Key::Toggle, Key::Submit]),
+            Answer::Yes(true),
+            Answer::Text("typed".into()),
+            Answer::Text(String::new()),
+            Answer::Enter,
+        ]);
+        assert_eq!(ui.select("pick one", "--x", opts()).unwrap(), "b");
+        assert_eq!(ui.multi_select("pick", "--x", opts()).unwrap(), ["a", "c"]);
+        assert_eq!(
+            ui.multi_select_all("drop one", "--x", opts()).unwrap(),
+            ["a", "c"]
+        );
+        let marked = vec![("a".to_string(), true), ("b".to_string(), false)];
+        assert_eq!(
+            ui.multi_select_all_marked("marked", "--x", marked).unwrap(),
+            ["b"]
+        );
+        assert!(ui.confirm("ok?", "--x", false).unwrap());
+        assert_eq!(ui.text("name?", "--x").unwrap(), "typed");
+        assert_eq!(
+            ui.text_with_default("name?", "--x", "dflt").unwrap(),
+            "dflt"
+        );
+        ui.press_enter("press ENTER").unwrap();
+        ui.pause(Duration::from_millis(1));
+    }
+
+    #[test]
+    fn a_canceled_or_empty_select_is_an_error() {
+        let ui = Ui::scripted(vec![Answer::Keys(vec![Key::Cancel]), pick(0)]);
+        let err = ui.select("pick", "--x", vec!["a".into()]).unwrap_err();
+        assert!(err.to_string().contains("prompt canceled"), "{err}");
+        assert!(ui.select("pick", "--x", Vec::new()).is_err());
+    }
+
+    #[test]
+    fn press_enter_needs_a_terminal() {
+        let err = noninteractive_ui().press_enter("press ENTER").unwrap_err();
+        assert!(matches!(err, Error::NonInteractive { .. }));
     }
 }

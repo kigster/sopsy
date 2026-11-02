@@ -14,5 +14,6 @@ pub mod doctor;
 pub mod edit;
 pub mod init;
 pub mod join;
+pub(crate) mod keys;
 pub mod recipient;
 pub mod secrets;

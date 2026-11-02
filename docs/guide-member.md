@@ -91,7 +91,7 @@ This generates your Secure Enclave identity (Touch ID may prompt; the private ke
 
 > [!TIP]
 >
-> Already have a Secure Enclave public key? Skip generation with `sopsy join alice --public-key age1se1…`.
+> Already have a Secure Enclave public key? Skip generation with `sopsy join alice --age-public-key age1se1…`.
 
 > [!TIP]
 >
@@ -119,9 +119,18 @@ Any active member checks out your branch and runs `sopsy approve alice`. That ad
 
 Once it's merged, `git pull` and you're in.
 
-> [!NOTE]
->
-> No Apple Silicon / Secure Enclave? You can still participate with a software `age` key (`age-keygen -o ~/.config/sops/age/keys.txt`) and pass that public key to `sopsy join alice --public-key age1…` — you just don't get hardware protection. Point `SOPS_AGE_KEY_FILE` at your key file so `sops` can find it.
+### Choosing where your key lives
+
+`sopsy join` generates your key in the most secure **store** your machine supports, in this order: `enclave` (Apple Silicon), `yubikey` (a plugged-in YubiKey), `keychain` (macOS Keychain or Linux Secret Service), then `file` (plaintext, last resort). Run `sopsy doctor` to see which are available. The repository may allow only some of them (`key_policy.required` in `.sopsy.yml`, set by `sopsy init --require`).
+
+```bash
+sopsy join alice --store yubikey                     # PIN once per session, touch cached 15s
+sopsy join alice --store yubikey --yubikey-pin-policy always --yubikey-touch-policy always
+sopsy join alice --store keychain                    # software key, no hardware needed
+SOPSY_PRIVATE_KEY_STORE_PRIORITY=exthardware,software sopsy join alice
+```
+
+With a YubiKey, the plugin asks for its PIN and for a touch. On a YubiKey still at factory settings it also makes you choose a new PIN (6–8 characters) and asks for the **PUK** (PIN Unblock Key), which resets the PIN after 3 wrong tries. The factory PIN is `123456` and the factory PUK `12345678`; if your organization set the key up, ask them for the PUK. The plugin then sets the PUK to your new PIN. To keep a separate PUK, answer "Yes, set PUK separately." when sopsy asks: it changes the PUK and then the PIN with `ykman` (`brew install ykman`) before the plugin runs. Three wrong PUK entries lock it for good, and only a PIV reset (`ykman piv reset`, which erases the YubiKey's PIV keys and certificates) recovers. An existing sopsy-usable key with the same policies is reused; pass `--always-new-slot` for a fresh one. With several YubiKeys plugged in, sopsy asks which one to use. `--without-touch-id` drops the touch requirement (YubiKey) or Touch ID (Enclave).
 
 ## Day-to-day workflow
 

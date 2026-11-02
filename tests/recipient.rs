@@ -151,6 +151,7 @@ fn add_command(
     no_updatekeys: bool,
 ) -> RecipientCommand {
     RecipientCommand::Add(RecipientAddArgs {
+        store: None,
         name_pos: None,
         name: Some(name.to_string()),
         public_key: Some(public_key.to_string()),
@@ -452,6 +453,7 @@ fn join_empty_name_rejected() {
                 sopsy_file: None,
                 public_key: Some("age1x".into()),
                 without_touch_id: false,
+                key: Default::default(),
                 age_args: vec![],
             },
         )
@@ -477,6 +479,7 @@ fn join_rejects_duplicate_pending_request() {
                 sopsy_file: None,
                 public_key: Some("age1bobnew".into()),
                 without_touch_id: false,
+                key: Default::default(),
                 age_args: vec![],
             },
         )
@@ -499,6 +502,7 @@ fn join_rejects_duplicate_public_key() {
                 sopsy_file: None,
                 public_key: Some("age1alice".into()),
                 without_touch_id: false,
+                key: Default::default(),
                 age_args: vec![],
             },
         )
@@ -526,6 +530,7 @@ fn join_with_sopsy_file_targets_custom_path() {
             sopsy_file: Some(file.clone()),
             public_key: Some("age1bobkey".into()),
             without_touch_id: false,
+            key: Default::default(),
             age_args: vec![],
         },
     )
@@ -547,6 +552,7 @@ fn join_with_missing_sopsy_file_errors() {
             sopsy_file: Some("/nonexistent/dir/custom.yml".into()),
             public_key: Some("age1bobkey".into()),
             without_touch_id: false,
+            key: Default::default(),
             age_args: vec![],
         },
     )
@@ -986,6 +992,7 @@ fn join_records_pending_member_without_granting_access() {
             sopsy_file: None,
             public_key: Some(key_b.public.clone()),
             without_touch_id: false,
+            key: Default::default(),
             age_args: vec![],
         },
     )
@@ -1026,6 +1033,7 @@ fn join_rejects_existing_member() {
                 sopsy_file: None,
                 public_key: Some("age1x".into()),
                 without_touch_id: false,
+                key: Default::default(),
                 age_args: vec![],
             },
         )
@@ -1050,6 +1058,7 @@ fn approve_activates_pending_member_and_rekeys() {
             sopsy_file: None,
             public_key: Some(key_b.public.clone()),
             without_touch_id: false,
+            key: Default::default(),
             age_args: vec![],
         },
     )
@@ -1279,6 +1288,7 @@ fn join_then_batch_approve_handles_multiword_names() {
                     sopsy_file: None,
                     public_key: Some(key.into()),
                     without_touch_id: false,
+                    key: Default::default(),
                     age_args: vec![],
                 },
             )
@@ -1328,6 +1338,7 @@ fn join_defaults_username_to_system_user() {
                 sopsy_file: None,
                 public_key: Some("age1konstantin".into()),
                 without_touch_id: false,
+                key: Default::default(),
                 age_args: vec![],
             },
         )
@@ -1968,6 +1979,7 @@ fn add_args(
     no_updatekeys: bool,
 ) -> RecipientCommand {
     RecipientCommand::Add(RecipientAddArgs {
+        store: None,
         name_pos: None,
         name: name.map(str::to_string),
         public_key: key.map(str::to_string),
