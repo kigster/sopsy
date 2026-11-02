@@ -20,7 +20,7 @@ use crate::commands::recipient::{self, system_username};
 use crate::config::KeyPolicy;
 use crate::config::{CONFIG_FILE_NAME, Config, Recipient};
 use crate::error::{Error, Result};
-use crate::hardware::{self, Availability, Store};
+use crate::hardware::{self, Availability, Store, StoreKind};
 use crate::sops::{self, FileType};
 use crate::ui::Ui;
 use crate::{git, keystore};
@@ -299,22 +299,98 @@ fn guard_repo_root(ui: &Ui, cwd: &Path, root: &Path, args: &InitArgs) -> Result<
     Ok(())
 }
 
+/// Groups recorded when init defaults to hardware-only.
+const DEFAULT_REQUIRED: [&str; 2] = ["onchip", "exthardware"];
+
+/// `--require` tokens that mean "no restriction" rather than a store or group.
+fn is_unrestricted_token(token: &str) -> bool {
+    matches!(token, "any" | "all")
+}
+
+/// Split, trim and lowercase `--require` entries (they may also be comma-separated).
+fn normalize_selectors(entries: &[String]) -> Vec<String> {
+    entries
+        .iter()
+        .flat_map(|e| e.split(','))
+        .map(|e| e.trim().to_ascii_lowercase())
+        .filter(|e| !e.is_empty())
+        .collect()
+}
+
+/// Parse `--require` into a `key_policy.required` list.
+///
+/// `None` means the flag was omitted (the caller applies the default or prompt).
+/// `Some(vec![])` is the explicit opt-out (`any` / `all`): unrestricted.
+fn parse_require(entries: &[String]) -> Result<Option<Vec<String>>> {
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let tokens = normalize_selectors(entries);
+    let unrestricted = tokens.iter().any(|t| is_unrestricted_token(t));
+    let stores: Vec<String> = tokens
+        .iter()
+        .filter(|t| !is_unrestricted_token(t))
+        .cloned()
+        .collect();
+    if unrestricted {
+        if !stores.is_empty() {
+            return Err(Error::Validation(
+                "`--require any` (or `all`) cannot be combined with specific stores; \
+                 pass `--require any` alone for no restriction, or list the stores you want"
+                    .into(),
+            ));
+        }
+        return Ok(Some(Vec::new()));
+    }
+    // Validate now so a typo fails before anything is written.
+    hardware::expand_selectors(&tokens)?;
+    Ok(Some(tokens))
+}
+
+/// Hardware-only policy (`onchip` + `exthardware`), or an error naming `--require`
+/// when this machine has no hardware store at all.
+///
+/// `MissingTool` still counts as hardware present: the Secure Enclave or YubiKey
+/// is there, its plugin just isn't installed, and `keys::generate` will say so.
+/// Only every hardware store [`Availability::Unavailable`] (Linux CI, no
+/// YubiKey) is refused — never silently weakened to unrestricted.
+fn hardware_only_default(probe: impl Fn(Store) -> Availability) -> Result<Vec<String>> {
+    let hardware_present = Store::ALL.into_iter().any(|s| {
+        s.kind() == StoreKind::Hardware && !matches!(probe(s), Availability::Unavailable { .. })
+    });
+    if !hardware_present {
+        return Err(Error::Validation(
+            "this machine has no hardware key store (Secure Enclave or YubiKey), \
+             so sopsy will not record an unrestricted policy. \
+             Pass `--require software` to allow keychain and file keys, \
+             `--require any` (or `--require all`) for no restriction, \
+             or plug in a YubiKey / run on Apple Silicon to use the hardware-only default"
+                .into(),
+        ));
+    }
+    Ok(DEFAULT_REQUIRED.iter().map(|s| (*s).to_string()).collect())
+}
+
 /// The repository's allowed key stores: `--require`, else (interactively) a
-/// multi-select over every store. Empty means unrestricted.
+/// multi-select over every store with hardware pre-selected, else hardware only.
+/// Empty means unrestricted.
 fn resolve_required(ui: &Ui, args: &InitArgs) -> Result<Vec<String>> {
-    if !args.require.is_empty() {
-        // Validate now so a typo fails before anything is written.
-        hardware::expand_selectors(&args.require)?;
-        return Ok(args
-            .require
-            .iter()
-            .map(|r| r.trim().to_ascii_lowercase())
-            .filter(|r| !r.is_empty())
-            .collect());
+    if let Some(required) = parse_require(&args.require)? {
+        return Ok(required);
     }
-    if !ui.is_interactive() {
-        return Ok(Vec::new());
+    if ui.is_interactive() {
+        return prompt_required(ui);
     }
+    let required = hardware_only_default(Store::probe)?;
+    ui.info("No --require given; recording a hardware-only policy (Secure Enclave and YubiKey).");
+    ui.info(
+        "Pass `--require software` to allow keychain/file keys, or `--require any` for no restriction.",
+    );
+    Ok(required)
+}
+
+/// Interactive multi-select: hardware stores start checked, software does not.
+fn prompt_required(ui: &Ui) -> Result<Vec<String>> {
     let options: Vec<(String, bool)> = Store::ALL
         .iter()
         .map(|s| {
@@ -326,10 +402,17 @@ fn resolve_required(ui: &Ui, args: &InitArgs) -> Result<Vec<String>> {
             (label, s.probe() == Availability::Ready)
         })
         .collect();
-    let picked = ui.multi_select_all_marked(
+    let hardware: Vec<usize> = Store::ALL
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.kind() == StoreKind::Hardware)
+        .map(|(i, _)| i)
+        .collect();
+    let picked = ui.multi_select_marked(
         "Which key stores may members of this repository use?",
         "--require",
         options,
+        &hardware,
     )?;
     let picked: Vec<String> = picked
         .iter()
@@ -337,7 +420,7 @@ fn resolve_required(ui: &Ui, args: &InitArgs) -> Result<Vec<String>> {
         .collect();
     if picked.is_empty() {
         return Err(Error::Validation(
-            "select at least one key store (or pass --require)".into(),
+            "select at least one key store (or pass --require any)".into(),
         ));
     }
     // Everything selected is the same as no restriction; don't record it.
@@ -631,13 +714,88 @@ mod tests {
     }
 
     #[test]
+    fn parse_require_tokens() {
+        assert_eq!(parse_require(&[]).unwrap(), None);
+        assert_eq!(parse_require(&["any".into()]).unwrap(), Some(Vec::new()));
+        assert_eq!(parse_require(&["ALL".into()]).unwrap(), Some(Vec::new()));
+        assert_eq!(
+            parse_require(&["any,all".into()]).unwrap(),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            parse_require(&[" onchip ".into(), "exthardware".into()]).unwrap(),
+            Some(vec!["onchip".into(), "exthardware".into()])
+        );
+        assert_eq!(
+            parse_require(&["yubikey,keychain".into()]).unwrap(),
+            Some(vec!["yubikey".into(), "keychain".into()])
+        );
+        let mixed = parse_require(&["any".into(), "file".into()]).unwrap_err();
+        assert!(mixed.to_string().contains("cannot be combined"));
+        assert!(parse_require(&["tpm".into()]).is_err());
+        assert!(parse_require(&[String::new(), "  ".into()]).is_err());
+    }
+
+    #[test]
+    fn hardware_only_default_fails_when_every_hardware_store_is_unavailable() {
+        let probe = |_| Availability::Unavailable {
+            reason: "nope".into(),
+        };
+        let err = hardware_only_default(probe).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--require any"), "{msg}");
+        assert!(msg.contains("--require software"), "{msg}");
+        assert!(msg.contains("no hardware key store"), "{msg}");
+    }
+
+    #[test]
+    fn hardware_only_default_treats_a_missing_tool_as_hardware_present() {
+        let probe = |s| match s {
+            Store::Enclave => Availability::MissingTool {
+                install: "brew install age-plugin-se".into(),
+            },
+            _ => Availability::Unavailable {
+                reason: "nope".into(),
+            },
+        };
+        assert_eq!(
+            hardware_only_default(probe).unwrap(),
+            ["onchip", "exthardware"]
+        );
+    }
+
+    #[test]
+    fn hardware_only_default_accepts_a_ready_yubikey() {
+        let probe = |s| match s {
+            Store::YubiKey => Availability::Ready,
+            _ => Availability::Unavailable {
+                reason: "nope".into(),
+            },
+        };
+        assert_eq!(
+            hardware_only_default(probe).unwrap(),
+            ["onchip", "exthardware"]
+        );
+    }
+
+    #[test]
     fn required_stores_come_from_the_checklist() {
         let args = init_args(&[]);
-        // Everything stays selected: no restriction is recorded.
+        // Hardware stores start selected: Enter records enclave + yubikey.
         let ui = Ui::scripted(vec![keys(&[Key::Submit])]);
+        assert_eq!(
+            resolve_required(&ui, &args).unwrap(),
+            ["enclave", "yubikey"]
+        );
+        // Select everything: no restriction is recorded.
+        let ui = Ui::scripted(vec![keys(&[Key::All, Key::Submit])]);
         assert!(resolve_required(&ui, &args).unwrap().is_empty());
-        // Deselect the first two (enclave, yubikey).
+        // Deselect hardware, then select software.
         let ui = Ui::scripted(vec![keys(&[
+            Key::Toggle,
+            Key::Down,
+            Key::Toggle,
+            Key::Down,
             Key::Toggle,
             Key::Down,
             Key::Toggle,
@@ -651,12 +809,49 @@ mod tests {
         // Esc cancels the prompt.
         let ui = Ui::scripted(vec![keys(&[Key::Cancel])]);
         assert!(resolve_required(&ui, &args).is_err());
-        // Non-interactive with no --require: unrestricted.
+        // Explicit opt-out, non-interactive.
         assert!(
-            resolve_required(&Ui::new(false, false, false), &args)
-                .unwrap()
-                .is_empty()
+            resolve_required(
+                &Ui::new(false, false, false),
+                &init_args(&["--require", "any"])
+            )
+            .unwrap()
+            .is_empty()
         );
+        assert!(
+            resolve_required(
+                &Ui::new(false, false, false),
+                &init_args(&["--require", "all"])
+            )
+            .unwrap()
+            .is_empty()
+        );
+        // Explicit hardware groups still parse.
+        assert_eq!(
+            resolve_required(
+                &Ui::new(false, false, false),
+                &init_args(&["--require", "onchip,exthardware"])
+            )
+            .unwrap(),
+            ["onchip", "exthardware"]
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn non_interactive_default_records_hardware_only_when_a_store_is_ready() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let plugin = write_fake_sops(dir.path(), "exit 0\n");
+        // SAFETY: serialized via `#[serial]`. A present plugin makes the
+        // Enclave store Ready, so the default policy can be recorded.
+        unsafe {
+            std::env::set_var(crate::hardware::enclave::PLUGIN_BIN_ENV, &plugin);
+        }
+        let required = resolve_required(&Ui::new(false, false, false), &init_args(&[]));
+        unsafe {
+            std::env::remove_var(crate::hardware::enclave::PLUGIN_BIN_ENV);
+        }
+        assert_eq!(required.unwrap(), ["onchip", "exthardware"]);
     }
 
     #[test]

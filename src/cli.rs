@@ -157,7 +157,9 @@ pub struct InitArgs {
     /// Key stores (or groups) members of this repository may use, recorded as
     /// `key_policy.required` in `.sopsy.yml`. Comma-separated or repeated:
     /// `enclave`, `yubikey`, `keychain`, `file`, or the groups `onchip`,
-    /// `exthardware`, `software`. Omit for no restriction (interactive runs ask).
+    /// `exthardware`, `software`. `any` or `all` records no restriction.
+    /// Non-interactive default: hardware only (`onchip,exthardware`). Interactive
+    /// runs ask, with the hardware stores pre-selected.
     #[arg(long, short = 'r', value_name = "STORES", value_delimiter = ',')]
     pub require: Vec<String>,
 
@@ -580,6 +582,17 @@ mod tests {
         assert!(args.key.new_slot && args.break_glass);
         assert_eq!(args.key.pin_policy, Some(PinPolicy::Once));
         assert_eq!(args.key.touch_policy, Some(TouchPolicy::Always));
+    }
+
+    #[test]
+    fn init_accepts_require_any_and_all() {
+        for token in ["any", "all", "ANY"] {
+            let cli = Cli::try_parse_from(["sopsy", "init", "--require", token]).unwrap();
+            let Command::Init(args) = cli.command else {
+                panic!("expected init");
+            };
+            assert_eq!(args.require, [token]);
+        }
     }
 
     #[test]

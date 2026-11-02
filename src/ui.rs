@@ -488,8 +488,25 @@ impl Ui {
         )
     }
 
-    /// Like [`Ui::multi_select_all`], with a column marking each option
-    /// available on this machine (✅) or not (`[ｘ]`).
+    /// Like [`Ui::multi_select`], with a column marking each option
+    /// available on this machine (✅) or not (`[ｘ]`). `selected` indexes are
+    /// pre-checked.
+    pub fn multi_select_marked(
+        &self,
+        prompt: &str,
+        flag: &str,
+        options: Vec<(String, bool)>,
+        selected: &[usize],
+    ) -> Result<Vec<String>> {
+        let (options, available) = options.into_iter().unzip();
+        self.checklist(
+            prompt,
+            flag,
+            checklist::Checklist::new(options, selected, available),
+        )
+    }
+
+    /// Like [`Ui::multi_select_marked`], with every option selected to start with.
     pub fn multi_select_all_marked(
         &self,
         prompt: &str,
@@ -497,12 +514,7 @@ impl Ui {
         options: Vec<(String, bool)>,
     ) -> Result<Vec<String>> {
         let all: Vec<usize> = (0..options.len()).collect();
-        let (options, available) = options.into_iter().unzip();
-        self.checklist(
-            prompt,
-            flag,
-            checklist::Checklist::new(options, &all, available),
-        )
+        self.multi_select_marked(prompt, flag, options, &all)
     }
 
     // Irreducible interactive tail: the key handling and rendering are
@@ -973,6 +985,7 @@ mod tests {
             ]),
             Answer::Keys(vec![Key::Down, Key::Toggle, Key::Submit]),
             Answer::Keys(vec![Key::Toggle, Key::Submit]),
+            Answer::Keys(vec![Key::Submit]),
             Answer::Yes(true),
             Answer::Text("typed".into()),
             Answer::Text(String::new()),
@@ -986,8 +999,15 @@ mod tests {
         );
         let marked = vec![("a".to_string(), true), ("b".to_string(), false)];
         assert_eq!(
-            ui.multi_select_all_marked("marked", "--x", marked).unwrap(),
+            ui.multi_select_all_marked("marked", "--x", marked.clone())
+                .unwrap(),
             ["b"]
+        );
+        // Only the first option is pre-checked; submitting keeps just that.
+        assert_eq!(
+            ui.multi_select_marked("partial", "--x", marked, &[0])
+                .unwrap(),
+            ["a"]
         );
         assert!(ui.confirm("ok?", "--x", false).unwrap());
         assert_eq!(ui.text("name?", "--x").unwrap(), "typed");

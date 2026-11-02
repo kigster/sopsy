@@ -71,6 +71,7 @@ Enter
 Sleep 800ms
 Type "export SOPSY_KEYS_FILE=$KADMIN"
 Enter
+# -y records a hardware-only key policy (Secure Enclave + YubiKey) by default.
 Type "sopsy init -y --recipient-name 'Konstantin (admin)' --no-break-glass"
 Enter
 Sleep 2500ms

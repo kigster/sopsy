@@ -100,6 +100,8 @@ fn init_with_public_key_encrypts_real_env() {
         .args([
             "--non-interactive",
             "init",
+            "--require",
+            "any",
             "--no-generate",
             "--public-key",
             &public_key,
@@ -169,6 +171,8 @@ fn init_with_git_flag_stages_created_files_once() {
             "--non-interactive",
             "--git",
             "init",
+            "--require",
+            "any",
             "--no-generate",
             "--public-key",
             &public_key,
@@ -237,6 +241,8 @@ fn init_seeds_from_env_example_when_no_dotenv() {
         .args([
             "--non-interactive",
             "init",
+            "--require",
+            "any",
             "--no-generate",
             "--public-key",
             &public_key,
@@ -287,6 +293,8 @@ fn init_rescues_encrypted_artifacts_in_legacy_gitignore() {
         .args([
             "--non-interactive",
             "init",
+            "--require",
+            "any",
             "--no-generate",
             "--public-key",
             &public_key,
@@ -347,6 +355,8 @@ fn rerun_preserves_sops_yaml_unless_forced() {
     let args = [
         "--non-interactive",
         "init",
+        "--require",
+        "any",
         "--no-generate",
         "--public-key",
         public_key.as_str(),
@@ -423,7 +433,9 @@ fn init_generates_enclave_identity_with_fakes() {
         .env("SOPSY_KEYS_FILE", dir.path().join("age-keys.txt"))
         .args(["--non-interactive", "init"])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("hardware-only"))
+        .stdout(predicate::str::contains("--require any"));
 
     // The fake identity was stored in the redirected keystore, not the real one.
     let keys = std::fs::read_to_string(dir.path().join("age-keys.txt")).unwrap();
@@ -437,6 +449,13 @@ fn init_generates_enclave_identity_with_fakes() {
     assert!(
         config.contains(fake_pubkey),
         "enclave identity not recorded in .sopsy.yml:\n{config}"
+    );
+    // Non-interactive init without `--require` records hardware only.
+    assert!(
+        config.contains("key_policy:")
+            && config.contains("- onchip")
+            && config.contains("- exthardware"),
+        "default policy should be hardware only:\n{config}"
     );
 
     // sops was actually invoked to encrypt, resolving recipients by the
@@ -491,6 +510,8 @@ fn init_failed_encryption_leaves_no_plaintext_artifact() {
         .args([
             "--non-interactive",
             "init",
+            "--require",
+            "any",
             "--no-generate",
             "--public-key",
             &public_key,
@@ -529,7 +550,13 @@ fn non_interactive_without_key_or_generation_fails_friendly() {
     init_git_repo(dir.path());
 
     sopsy_in(dir.path())
-        .args(["--non-interactive", "init", "--no-generate"])
+        .args([
+            "--non-interactive",
+            "init",
+            "--require",
+            "any",
+            "--no-generate",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("--public-key"));
@@ -546,6 +573,8 @@ fn init_outside_git_repo_fails_friendly() {
         .args([
             "--non-interactive",
             "init",
+            "--require",
+            "any",
             "--no-generate",
             "--public-key",
             "age1abc",
@@ -566,6 +595,8 @@ fn init_records_username_and_respects_no_break_glass() {
         .args([
             "--non-interactive",
             "init",
+            "--require",
+            "any",
             "--no-generate",
             "--public-key",
             &public_key,
@@ -603,6 +634,8 @@ fn init_without_break_glass_prints_guidance() {
         .args([
             "--non-interactive",
             "init",
+            "--require",
+            "any",
             "--no-generate",
             "--public-key",
             &public_key,
@@ -634,6 +667,8 @@ fn init_break_glass_flag_registers_offline_key() {
         .args([
             "--non-interactive",
             "init",
+            "--require",
+            "any",
             "--no-generate",
             "--public-key",
             &public_key,
@@ -673,5 +708,101 @@ fn init_break_glass_flag_registers_offline_key() {
         decrypted.status.success(),
         "owner should still decrypt after break-glass re-key: {}",
         String::from_utf8_lossy(&decrypted.stderr)
+    );
+}
+
+// ----------------------------------------------------------------------------
+// Key-store policy default
+// ----------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn init_require_any_records_no_restriction() {
+    let dir = TempDir::new().unwrap();
+    init_git_repo(dir.path());
+    let (public_key, _key_file) = generate_age_key(dir.path());
+
+    sopsy_in(dir.path())
+        .args([
+            "--non-interactive",
+            "init",
+            "--require",
+            "any",
+            "--no-generate",
+            "--public-key",
+            &public_key,
+        ])
+        .assert()
+        .success();
+
+    let config = std::fs::read_to_string(dir.path().join(".sopsy.yml")).unwrap();
+    assert!(
+        !config.contains("key_policy"),
+        "--require any must omit key_policy:\n{config}"
+    );
+}
+
+#[test]
+#[serial]
+fn init_require_all_is_the_same_opt_out() {
+    let dir = TempDir::new().unwrap();
+    init_git_repo(dir.path());
+    let (public_key, _key_file) = generate_age_key(dir.path());
+
+    sopsy_in(dir.path())
+        .args([
+            "--non-interactive",
+            "init",
+            "--require",
+            "all",
+            "--no-generate",
+            "--public-key",
+            &public_key,
+        ])
+        .assert()
+        .success();
+
+    let config = std::fs::read_to_string(dir.path().join(".sopsy.yml")).unwrap();
+    assert!(
+        !config.contains("key_policy"),
+        "--require all must omit key_policy:\n{config}"
+    );
+}
+
+/// On Linux (and Intel Macs) both hardware stores are Unavailable without a
+/// plugin or a YubiKey, so the implicit default refuses to weaken the policy.
+/// Apple Silicon reports the Enclave as MissingTool instead, and generate
+/// asks you to install `age-plugin-se`.
+#[test]
+#[serial]
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+fn init_without_hardware_fails_naming_require() {
+    let dir = TempDir::new().unwrap();
+    init_git_repo(dir.path());
+    let (public_key, _key_file) = generate_age_key(dir.path());
+    write_script(&dir.path().join("no-usb"), "echo 'Apple Keyboard'\n");
+
+    sopsy_in(dir.path())
+        .env("SOPSY_AGE_PLUGIN_SE_BIN", dir.path().join("no-such-plugin"))
+        .env(
+            "SOPSY_AGE_PLUGIN_YUBIKEY_BIN",
+            dir.path().join("no-such-yubikey"),
+        )
+        .env("SOPSY_USB_LIST_BIN", dir.path().join("no-usb"))
+        .args([
+            "--non-interactive",
+            "init",
+            "--no-generate",
+            "--public-key",
+            &public_key,
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--require any"))
+        .stderr(predicate::str::contains("--require software"));
+
+    assert!(
+        !dir.path().join(".sopsy.yml").exists(),
+        "init must not write a weakened policy"
     );
 }

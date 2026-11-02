@@ -45,6 +45,17 @@ fn doctor_runs_and_reports_tools() {
 }
 
 #[test]
+fn init_help_documents_require_any() {
+    sopsy()
+        .args(["init", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--require"))
+        .stdout(predicate::str::contains("any"))
+        .stdout(predicate::str::contains("hardware only"));
+}
+
+#[test]
 fn recipient_help_lists_subcommands() {
     sopsy()
         .args(["recipient", "--help"])
