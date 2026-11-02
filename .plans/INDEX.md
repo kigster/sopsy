@@ -1,4 +1,4 @@
-# Project Sopsy
+# Project Resync Plans Bump Version
 
 > [!IMPORTANT]
 > **This file is auto generated.** To regenerate it, run `openlanes index`.
@@ -7,7 +7,7 @@
 ## Current specifications and their status
 
 
-## 001.00 — ⭐ Yubikey Support
+## 002.00 — ⭐ Encrypt Write Flag
 
 <table>
   <thead>
@@ -22,30 +22,8 @@
     <tr>
       <td valign="top">⭐&nbsp;Planned</td>
       <td valign="top"><em>—</em></td>
-      <td valign="top"><p>This feature adds more diverse hardware support to sopsy:</p><p>On a MacOS the choice becomes:</p></td>
-      <td valign="top"><ul><li><a href="001.00%E2%94%81%E2%94%81%E2%AD%90%E2%94%81%E2%94%81%E2%9D%AFyubikey-support/spec.md">Spec</a></li><li><a href="001.00%E2%94%81%E2%94%81%E2%AD%90%E2%94%81%E2%94%81%E2%9D%AFyubikey-support/plan.md">Plan</a></li></ul></td>
-    </tr>
-  </tbody>
-</table>
-
-
-## 002.00 — ⚪ Encrypt Write Flag
-
-<table>
-  <thead>
-    <tr>
-      <th align="left">Status</th>
-      <th align="left">Pull Requests</th>
-      <th align="left">What it is</th>
-      <th align="left">Artifacts</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td valign="top">⚪&nbsp;New<br><sub>⚠️ New requires `spec.md`</sub></td>
-      <td valign="top"><em>—</em></td>
-      <td valign="top"><em>No specification yet.</em></td>
-      <td valign="top"><ul><li><a href="002.00%E2%94%81%E2%94%81%E2%9A%AA%E2%94%81%E2%94%81%E2%9D%AFencrypt-write-flag/plan.md">Plan</a></li></ul></td>
+      <td valign="top"><p>Today to encrypt or decrypt a file you must pass the file name, and <code>-o output-file-name</code>. However, there is a relationship between encrypted file names and non-encrypted:</p><p>Typically, encrypting <code>.env</code> results in <code>.env.encrypted</code>.</p></td>
+      <td valign="top"><ul><li><a href="002.00%E2%94%81%E2%94%81%E2%AD%90%E2%94%81%E2%94%81%E2%9D%AFencrypt-write-flag/spec.md">Spec</a></li><li><a href="002.00%E2%94%81%E2%94%81%E2%AD%90%E2%94%81%E2%94%81%E2%9D%AFencrypt-write-flag/plan.md">Plan</a></li></ul></td>
     </tr>
   </tbody>
 </table>
@@ -75,4 +53,4 @@
 
 ---
 
-3 plans &nbsp; ⭐ 1 &nbsp; ⚪ 2
+2 plans &nbsp; ⭐ 1 &nbsp; ⚪ 1
