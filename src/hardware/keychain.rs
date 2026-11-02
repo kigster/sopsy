@@ -176,7 +176,13 @@ fn run(args: &[String], stdin: Option<&str>) -> Result<String> {
         .stderr(Stdio::piped())
         .spawn()?;
     if let (Some(input), Some(mut pipe)) = (stdin, child.stdin.take()) {
-        pipe.write_all(input.as_bytes())?;
+        // A tool that exits without reading its stdin closes the pipe; its
+        // exit status, checked below, is the error worth reporting.
+        if let Err(e) = pipe.write_all(input.as_bytes())
+            && e.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(e.into());
+        }
     }
     let output = child.wait_with_output()?;
     if !output.status.success() {
