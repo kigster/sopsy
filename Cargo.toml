@@ -1,8 +1,8 @@
 [package]
 name = "sopsy"
-version = "1.3.3"
+version = "1.4.0"
 edition = "2024"
-description = "Public/private individual key encryption for repo secrets with biometrics support and explicit approval of who can decrypt. In other words — the missing good UX for SOPS"
+description = "Public/private individual key encryption for repo secrets with biometrics support and explicit approval of who can decrypt. In other words — the missing good UX for SOPS. In more details, however it's a convenience wrapper around age, sops and various age plugins, allowing you to encrypt your dev secrets using private keys minted on the hardware (either in Mac's Enclave for M1, M2, ...), or YubiKey (both MacOS and Linux are supported), or on the Mac you can also use KeyChain. With sops powering it, the team that needs access must onboard and be approved one at a time, and similarly an employee who left can be removed from the chain. This ensures only those who are supposed to see dev secrets do, and you can safely commit them into git, instead of 'let me just slack my .env to you', which is what most teams do, you just git pull from the repo, run 'sopsy join <name>' and as sooon as someone approves it you can decrypt. Sopsy solves several security related developer-flow problems, the main one being — not having your dev secrets lying around decrypted on your file system, and to load them into environment  by decrypting them on the fly, and running shell's eval() and exporting the variables. In other words, sopsy facilitates each team member's biometric key in the process of encryption and decryption of the sensitive files, such as API keys, serial numbers, and more. And it comes to you with git pull!"
 license = "MIT"
 repository = "https://github.com/kigster/sopsy.git"
 homepage = "https://sopsy-cli.dev"
