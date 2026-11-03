@@ -150,14 +150,17 @@ impl Recipient {
 /// The repository's rules for member keys, set by `sopsy init`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeyPolicy {
-    /// The allowed set: member keys must live in one of these stores or groups
-    /// (`onchip`, `exthardware`, `software`, or a store name). Empty means no
-    /// restriction (`sopsy init --require any`). `sopsy init` without `--require`
-    /// records hardware only (`onchip`, `exthardware`). Break-glass and CI keys
-    /// are exempt. A soft guardrail like the rest of `.sopsy.yml`: crypto cannot
-    /// enforce it.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required: Vec<String>,
+    /// The allowed set: member keys must live in any one of these stores or
+    /// groups (`onchip`, `exthardware`, `software`, or a store name). It filters
+    /// stores, and its order is the default `--store auto` order within each
+    /// tier (hardware first); `SOPSY_PRIVATE_KEY_STORE_PRIORITY` overrides it.
+    /// Empty means no restriction (`sopsy init --allow-stores any`); without
+    /// `--allow-stores`, `sopsy init` records hardware only (`onchip`,
+    /// `exthardware`). Break-glass and CI keys are exempt. A soft guardrail like
+    /// the rest of `.sopsy.yml`: crypto cannot enforce it. Read from the legacy
+    /// `required` key that earlier sopsy versions wrote.
+    #[serde(default, alias = "required", skip_serializing_if = "Vec::is_empty")]
+    pub allowed: Vec<String>,
 }
 
 /// The full deserialized contents of `.sopsy.yml`.
@@ -227,8 +230,8 @@ impl Config {
     /// The stores members may use, or `None` when the repo sets no restriction.
     pub fn allowed_stores(&self) -> Result<Option<Vec<Store>>> {
         match &self.key_policy {
-            Some(policy) if !policy.required.is_empty() => {
-                hardware::expand_selectors(&policy.required)
+            Some(policy) if !policy.allowed.is_empty() => {
+                hardware::expand_selectors(&policy.allowed)
                     .map(Some)
                     .map_err(|err| {
                         Error::Validation(format!("{CONFIG_FILE_NAME} key_policy: {err}"))
@@ -488,6 +491,17 @@ mod tests {
 
         // A clean round-trip verifies.
         assert_eq!(Config::load(&path).unwrap(), cfg);
+    }
+
+    #[test]
+    fn key_policy_reads_legacy_required_and_writes_allowed() {
+        let legacy: KeyPolicy = serde_yaml_ng::from_str("required: [onchip]").unwrap();
+        assert_eq!(legacy.allowed, ["onchip"]);
+        let written = serde_yaml_ng::to_string(&legacy).unwrap();
+        assert!(
+            written.contains("allowed:") && !written.contains("required"),
+            "{written}"
+        );
     }
 
     #[test]

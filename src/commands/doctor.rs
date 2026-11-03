@@ -196,7 +196,7 @@ fn tool_checks(ui: &Ui) {
 /// Probe every private-key store and show the `auto` order, so a member can
 /// see where `sopsy join` would put their key and why.
 fn store_checks(ui: &Ui) {
-    use crate::hardware::{self, Availability, PRIORITY_ENV, Store, StoreKind};
+    use crate::hardware::{self, Availability, Store, StoreKind};
 
     ui.header("Key stores");
     for store in Store::ALL {
@@ -216,18 +216,29 @@ fn store_checks(ui: &Ui) {
             Availability::Unavailable { reason } => ui.info(format!("{label}: {reason}")),
         }
     }
-    match hardware::priority() {
-        Ok(order) => {
-            let source = if std::env::var_os(PRIORITY_ENV).is_some() {
-                PRIORITY_ENV
-            } else {
-                "default"
-            };
+    // Inside a sopsy repository, its allow list shapes (and filters) `auto`.
+    // A config that fails to load is reported by the repository checks; an
+    // invalid `key_policy` is reported here, where it changes the outcome.
+    let allowed = match crate::commands::recipient::current_repo_root()
+        .ok()
+        .and_then(|repo| Config::load_from_dir(&repo).ok())
+        .map(|config| config.allowed_stores())
+    {
+        Some(Ok(allowed)) => allowed,
+        Some(Err(err)) => {
+            ui.failure(format!("key policy: {err}"));
+            return;
+        }
+        None => None,
+    };
+    match hardware::priority(allowed.as_deref()) {
+        Ok((order, source)) => {
             ui.info(format!(
-                "auto order ({source}): {}",
+                "auto order ({}): {}",
+                source.as_str(),
                 hardware::names(&order)
             ));
-            match hardware::candidates(None, None, &order, Store::probe) {
+            match hardware::candidates(None, allowed.as_deref(), &order, Store::probe) {
                 Ok(ready) => ui.success(format!("auto would use: {}", ready[0])),
                 Err(err) => ui.failure(format!("auto: {err}")),
             }

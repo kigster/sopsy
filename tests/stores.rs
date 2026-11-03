@@ -1,5 +1,5 @@
 //! Integration tests for private-key stores (`--store`, `auto`, and the
-//! repository's `key_policy.required` allowed set), through the real binary.
+//! repository's `key_policy.allowed` allowed set), through the real binary.
 //!
 //! `file` and `keychain` run against the real `sops` + `age` so a decrypt
 //! round-trip proves `sops` finds the key. The keychain itself and the YubiKey
@@ -84,6 +84,7 @@ impl Sandbox {
 
     fn sopsy(&self) -> Command {
         let mut cmd = Command::cargo_bin("sopsy").unwrap();
+        cmd.env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew"); // never run a real `brew` from tests
         cmd.current_dir(self.path())
             .env("SOPSY_KEYS_FILE", self.keys_file())
             .env("SOPSY_KEYCHAIN_BIN", self.path().join("fake-keyring"))
@@ -114,14 +115,14 @@ impl Sandbox {
 /// weaken the policy. Apple Silicon reports the Enclave as MissingTool instead.
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 #[test]
-fn init_without_require_fails_when_no_hardware_store_is_available() {
+fn init_without_allow_stores_fails_when_no_hardware_store_is_available() {
     let sb = Sandbox::new();
     sb.sopsy()
         .args(["init", "--no-emergency-keys"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("--require any"))
-        .stderr(predicate::str::contains("--require software"));
+        .stderr(predicate::str::contains("--allow-stores any"))
+        .stderr(predicate::str::contains("--allow-stores software"));
     assert!(
         !sb.path().join(".sopsy.yml").exists(),
         "must not write an unrestricted policy just because hardware is missing"
@@ -134,7 +135,7 @@ fn file_store_round_trips_and_warns() {
     sb.sopsy()
         .args([
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--store",
             "file",
@@ -156,7 +157,7 @@ fn keychain_store_keeps_the_secret_off_disk_and_out_of_argv() {
     sb.sopsy()
         .args([
             "init",
-            "--require",
+            "--allow-stores",
             "software",
             "--store",
             "keychain",
@@ -184,7 +185,7 @@ fn auto_falls_back_through_the_priority_list() {
     // No enclave and no YubiKey here; keychain is next.
     sb.sopsy()
         .env("SOPSY_PRIVATE_KEY_STORE_PRIORITY", "exthardware,software")
-        .args(["init", "--require", "any", "--no-emergency-keys"])
+        .args(["init", "--allow-stores", "any", "--no-emergency-keys"])
         .assert()
         .success();
     assert!(sb.read(".sopsy.yml").contains("store: keychain"));
@@ -192,7 +193,7 @@ fn auto_falls_back_through_the_priority_list() {
     let sb = Sandbox::new();
     sb.sopsy()
         .env("SOPSY_PRIVATE_KEY_STORE_PRIORITY", "exthardware")
-        .args(["init", "--require", "any", "--no-emergency-keys"])
+        .args(["init", "--allow-stores", "any", "--no-emergency-keys"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("no usable key store"));
@@ -230,7 +231,7 @@ fn yubikey_store_records_stub_and_recipient() {
         .env("SOPSY_SOPS_BIN", p.join("sops"))
         .args([
             "init",
-            "--require",
+            "--allow-stores",
             "exthardware",
             "--yubikey-pin-policy",
             "always",
@@ -256,7 +257,7 @@ fn yubikey_store_records_stub_and_recipient() {
 }
 
 #[test]
-fn init_without_require_defaults_to_hardware_only() {
+fn init_without_allow_stores_defaults_to_hardware_only() {
     let sb = Sandbox::new();
     let p = sb.path();
     write_script(&p.join("usb"), "echo '+-o YubiKey OTP+FIDO+CCID@1'\n");
@@ -277,11 +278,18 @@ fn init_without_require_defaults_to_hardware_only() {
         .env("SOPSY_USB_LIST_BIN", p.join("usb"))
         .env("SOPSY_AGE_PLUGIN_YUBIKEY_BIN", p.join("age-plugin-yubikey"))
         .env("SOPSY_SOPS_BIN", p.join("sops"))
+        // Pin the order: on Apple Silicon `enclave` would come first, and its
+        // plugin is deliberately missing in the sandbox.
+        .env("SOPSY_PRIVATE_KEY_STORE_PRIORITY", "yubikey")
         .args(["init", "--no-emergency-keys"])
         .assert()
         .success()
         .stdout(predicate::str::contains("hardware-only"))
-        .stdout(predicate::str::contains("--require any"));
+        .stdout(predicate::str::contains("--allow-stores any"))
+        .stdout(predicate::str::contains("you must touch the YubiKey"))
+        .stdout(predicate::str::contains(
+            "[!NOTE] To be asked for the PIN only once per session",
+        ));
 
     let config = sb.read(".sopsy.yml");
     assert!(
@@ -312,10 +320,10 @@ fn several_yubikeys_need_a_serial_when_not_interactive() {
 }
 
 #[test]
-fn init_require_any_cannot_mix_with_stores() {
+fn init_allow_stores_any_cannot_mix_with_stores() {
     let sb = Sandbox::new();
     sb.sopsy()
-        .args(["init", "--require", "any,file", "--no-emergency-keys"])
+        .args(["init", "--allow-stores", "any,file", "--no-emergency-keys"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("cannot be combined"));
@@ -325,14 +333,20 @@ fn init_require_any_cannot_mix_with_stores() {
 fn init_rejects_stores_outside_the_allowed_set() {
     let sb = Sandbox::new();
     sb.sopsy()
-        .args(["init", "--require", "yubikey,keychain", "--store", "file"])
+        .args([
+            "init",
+            "--allow-stores",
+            "yubikey,keychain",
+            "--store",
+            "file",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("allows only: yubikey, keychain"));
     assert!(!sb.path().join(".sopsy.yml").exists());
 
     sb.sopsy()
-        .args(["init", "--require", "tpm"])
+        .args(["init", "--allow-stores", "tpm"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("unknown key store or group `tpm`"));
@@ -349,7 +363,7 @@ fn init_refuses_a_broken_sops_yaml_before_generating_a_key() {
     sb.sopsy()
         .args([
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "-s",
             "file",
@@ -375,7 +389,7 @@ fn init_adds_its_key_to_an_existing_sops_yaml() {
     sb.sopsy()
         .args([
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "-s",
             "file",
@@ -400,7 +414,7 @@ fn init_adds_its_key_to_an_existing_sops_yaml() {
 fn init_rejects_a_pasted_non_key() {
     let sb = Sandbox::new();
     sb.sopsy()
-        .args(["init", "--require", "any", "--age-public-key", "n"])
+        .args(["init", "--allow-stores", "any", "--age-public-key", "n"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("not an age public key"));
@@ -412,7 +426,7 @@ fn join_and_approve_honor_the_allowed_set() {
     sb.sopsy()
         .args([
             "init",
-            "--require",
+            "--allow-stores",
             "software",
             "--store",
             "file",
@@ -464,7 +478,7 @@ fn a_declared_hardware_store_cannot_launder_a_plain_key() {
     sb.sopsy()
         .args([
             "init",
-            "--require",
+            "--allow-stores",
             "exthardware,software",
             "--store",
             "file",
@@ -508,7 +522,7 @@ fn without_touch_id_is_rejected_for_software_stores() {
     sb.sopsy()
         .args([
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--store",
             "file",
@@ -555,7 +569,7 @@ fn recipient_add_honors_the_allowed_set() {
     sb.sopsy()
         .args([
             "init",
-            "--require",
+            "--allow-stores",
             "software",
             "--store",
             "file",
@@ -587,4 +601,47 @@ fn recipient_add_honors_the_allowed_set() {
         .env("SOPSY_ASSUME_YES", "1")
         .assert()
         .stderr(predicate::str::contains("allows only").not());
+}
+
+/// The repository's allow list is also the default `auto` order: with both a
+/// YubiKey and the Secure Enclave ready, `yubikey,enclave` picks the YubiKey.
+#[test]
+fn allow_stores_order_is_the_default_auto_order() {
+    let sb = Sandbox::new();
+    let p = sb.path();
+    write_script(&p.join("usb"), "echo '+-o YubiKey OTP+FIDO+CCID@1'\n");
+    // Present on PATH-equivalent, so the Enclave probes as ready.
+    write_script(&p.join("age-plugin-se"), "exit 0\n");
+    write_script(
+        &p.join("age-plugin-yubikey"),
+        "case \"$*\" in *--list*) exit 0;; esac\n\
+         cat <<'EOF'\n\
+         #       Serial: 12345678, Slot: 1\n\
+         #    Recipient: age1tag1qfake\n\
+         # Legacy recipient: age1yubikey1qfakelegacy\n\
+         AGE-PLUGIN-YUBIKEY-1QFAKESTUB\n\
+         EOF\n",
+    );
+    write_script(
+        &p.join("sops"),
+        "case \"$1\" in --version) echo 'sops 9.9.9';; *) echo 'ENC[fake]';; esac\n",
+    );
+
+    sb.sopsy()
+        .env("SOPSY_USB_LIST_BIN", p.join("usb"))
+        .env("SOPSY_AGE_PLUGIN_SE_BIN", p.join("age-plugin-se"))
+        .env("SOPSY_AGE_PLUGIN_YUBIKEY_BIN", p.join("age-plugin-yubikey"))
+        .env("SOPSY_SOPS_BIN", p.join("sops"))
+        .args([
+            "init",
+            "--allow-stores",
+            "yubikey,enclave",
+            "--no-emergency-keys",
+        ])
+        .assert()
+        .success();
+
+    let config = sb.read(".sopsy.yml");
+    assert!(config.contains("store: yubikey"), "{config}");
+    assert!(config.contains("allowed:") && config.contains("- yubikey"));
 }

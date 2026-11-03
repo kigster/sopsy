@@ -65,6 +65,7 @@ fn generate_age_key(dir: &Path) -> (String, PathBuf) {
 /// Build a `Command` for the compiled `sopsy` binary rooted at `dir`.
 fn sopsy_in(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("sopsy").expect("binary `sopsy` should build");
+    cmd.env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew"); // never run a real `brew` from tests
     cmd.current_dir(dir);
     cmd
 }
@@ -100,7 +101,7 @@ fn init_with_public_key_encrypts_real_env() {
         .args([
             "--non-interactive",
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--no-generate",
             "--public-key",
@@ -171,7 +172,7 @@ fn init_with_git_flag_stages_created_files_once() {
             "--non-interactive",
             "--git",
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--no-generate",
             "--public-key",
@@ -241,7 +242,7 @@ fn init_seeds_from_env_example_when_no_dotenv() {
         .args([
             "--non-interactive",
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--no-generate",
             "--public-key",
@@ -293,7 +294,7 @@ fn init_rescues_encrypted_artifacts_in_legacy_gitignore() {
         .args([
             "--non-interactive",
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--no-generate",
             "--public-key",
@@ -355,7 +356,7 @@ fn rerun_preserves_sops_yaml_unless_forced() {
     let args = [
         "--non-interactive",
         "init",
-        "--require",
+        "--allow-stores",
         "any",
         "--no-generate",
         "--public-key",
@@ -435,7 +436,7 @@ fn init_generates_enclave_identity_with_fakes() {
         .assert()
         .success()
         .stdout(predicate::str::contains("hardware-only"))
-        .stdout(predicate::str::contains("--require any"));
+        .stdout(predicate::str::contains("--allow-stores any"));
 
     // The fake identity was stored in the redirected keystore, not the real one.
     let keys = std::fs::read_to_string(dir.path().join("age-keys.txt")).unwrap();
@@ -450,7 +451,7 @@ fn init_generates_enclave_identity_with_fakes() {
         config.contains(fake_pubkey),
         "enclave identity not recorded in .sopsy.yml:\n{config}"
     );
-    // Non-interactive init without `--require` records hardware only.
+    // Non-interactive init without `--allow-stores` records hardware only.
     assert!(
         config.contains("key_policy:")
             && config.contains("- onchip")
@@ -510,7 +511,7 @@ fn init_failed_encryption_leaves_no_plaintext_artifact() {
         .args([
             "--non-interactive",
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--no-generate",
             "--public-key",
@@ -553,7 +554,7 @@ fn non_interactive_without_key_or_generation_fails_friendly() {
         .args([
             "--non-interactive",
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--no-generate",
         ])
@@ -573,7 +574,7 @@ fn init_outside_git_repo_fails_friendly() {
         .args([
             "--non-interactive",
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--no-generate",
             "--public-key",
@@ -595,7 +596,7 @@ fn init_records_username_and_respects_no_break_glass() {
         .args([
             "--non-interactive",
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--no-generate",
             "--public-key",
@@ -634,7 +635,7 @@ fn init_without_break_glass_prints_guidance() {
         .args([
             "--non-interactive",
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--no-generate",
             "--public-key",
@@ -653,26 +654,37 @@ fn init_without_break_glass_prints_guidance() {
 
 #[test]
 #[serial]
-fn init_break_glass_flag_registers_offline_key() {
+fn break_glass_after_unattended_init_registers_offline_key() {
     let dir = TempDir::new().unwrap();
     init_git_repo(dir.path());
     let (public_key, key_file) = generate_age_key(dir.path());
 
-    // `--break-glass` runs the ceremony; SOPS_AGE_KEY_FILE lets the implicit
-    // re-key decrypt with the owner's key, and SOPSY_ASSUME_YES skips the
-    // interactive "copy to 1Password, press ENTER" wait.
+    // An unattended init skips the emergency key; `recipient break-glass` runs
+    // the ceremony afterwards. SOPS_AGE_KEY_FILE lets the re-key decrypt with
+    // the owner's key, and SOPSY_ASSUME_YES skips the "press ENTER" wait.
+    sopsy_in(dir.path())
+        .env("SOPS_AGE_KEY_FILE", &key_file)
+        .args([
+            "--non-interactive",
+            "init",
+            "--allow-stores",
+            "any",
+            "--no-generate",
+            "--public-key",
+            &public_key,
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sopsy recipient break-glass"));
     sopsy_in(dir.path())
         .env("SOPS_AGE_KEY_FILE", &key_file)
         .env("SOPSY_ASSUME_YES", "1")
         .args([
             "--non-interactive",
-            "init",
-            "--require",
-            "any",
-            "--no-generate",
-            "--public-key",
-            &public_key,
-            "--break-glass",
+            "recipient",
+            "break-glass",
+            "-o",
+            "break-glass",
         ])
         .assert()
         .success();
@@ -717,7 +729,7 @@ fn init_break_glass_flag_registers_offline_key() {
 
 #[test]
 #[serial]
-fn init_require_any_records_no_restriction() {
+fn init_allow_stores_any_records_no_restriction() {
     let dir = TempDir::new().unwrap();
     init_git_repo(dir.path());
     let (public_key, _key_file) = generate_age_key(dir.path());
@@ -726,7 +738,7 @@ fn init_require_any_records_no_restriction() {
         .args([
             "--non-interactive",
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--no-generate",
             "--public-key",
@@ -738,13 +750,13 @@ fn init_require_any_records_no_restriction() {
     let config = std::fs::read_to_string(dir.path().join(".sopsy.yml")).unwrap();
     assert!(
         !config.contains("key_policy"),
-        "--require any must omit key_policy:\n{config}"
+        "--allow-stores any must omit key_policy:\n{config}"
     );
 }
 
 #[test]
 #[serial]
-fn init_require_all_is_the_same_opt_out() {
+fn init_allow_stores_all_is_the_same_opt_out() {
     let dir = TempDir::new().unwrap();
     init_git_repo(dir.path());
     let (public_key, _key_file) = generate_age_key(dir.path());
@@ -753,7 +765,7 @@ fn init_require_all_is_the_same_opt_out() {
         .args([
             "--non-interactive",
             "init",
-            "--require",
+            "--allow-stores",
             "all",
             "--no-generate",
             "--public-key",
@@ -765,7 +777,7 @@ fn init_require_all_is_the_same_opt_out() {
     let config = std::fs::read_to_string(dir.path().join(".sopsy.yml")).unwrap();
     assert!(
         !config.contains("key_policy"),
-        "--require all must omit key_policy:\n{config}"
+        "--allow-stores all must omit key_policy:\n{config}"
     );
 }
 
@@ -776,7 +788,7 @@ fn init_require_all_is_the_same_opt_out() {
 #[test]
 #[serial]
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-fn init_without_hardware_fails_naming_require() {
+fn init_without_hardware_fails_naming_allow_stores() {
     let dir = TempDir::new().unwrap();
     init_git_repo(dir.path());
     let (public_key, _key_file) = generate_age_key(dir.path());
@@ -798,11 +810,93 @@ fn init_without_hardware_fails_naming_require() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("--require any"))
-        .stderr(predicate::str::contains("--require software"));
+        .stderr(predicate::str::contains("--allow-stores any"))
+        .stderr(predicate::str::contains("--allow-stores software"));
 
     assert!(
         !dir.path().join(".sopsy.yml").exists(),
         "init must not write a weakened policy"
     );
+}
+
+// ----------------------------------------------------------------------------
+// `init` installs missing supporting tools (as `sopsy deps` would)
+// ----------------------------------------------------------------------------
+
+/// A repo plus a bin directory holding only `git`, so every supporting tool
+/// probes as missing.
+#[cfg(unix)]
+fn repo_with_bare_path() -> (TempDir, PathBuf) {
+    let dir = TempDir::new().unwrap();
+    init_git_repo(dir.path());
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let git = which::which("git").expect("git should be installed");
+    std::os::unix::fs::symlink(git, bin.join("git")).unwrap();
+    (dir, bin)
+}
+
+#[cfg(unix)]
+#[test]
+fn init_non_interactive_installs_missing_tools_with_brew() {
+    let (dir, bin) = repo_with_bare_path();
+    let log = dir.path().join("brew.log");
+    write_script(
+        &bin.join("brew"),
+        &format!("echo \"$@\" >> '{}'\n", log.display()),
+    );
+
+    // The fake brew installs nothing, so init then stops at the `sops` check.
+    sopsy_in(dir.path())
+        .env("PATH", &bin)
+        .env("SOPSY_BREW_BIN", bin.join("brew"))
+        .args(["--non-interactive", "init", "--allow-stores", "any"])
+        .assert()
+        .failure();
+
+    let recorded = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        recorded.contains(&format!(
+            "install {}",
+            sopsy::commands::deps::dependencies().join(" ")
+        )),
+        "init should brew-install every missing tool; got: {recorded}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn init_without_brew_warns_and_carries_on() {
+    let (dir, bin) = repo_with_bare_path();
+    sopsy_in(dir.path())
+        .env("PATH", &bin)
+        .args(["--non-interactive", "init", "--allow-stores", "any"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("Homebrew was not found"))
+        .stderr(predicate::str::contains("sops"));
+}
+
+#[cfg(unix)]
+#[test]
+fn init_skip_deps_never_runs_brew() {
+    let (dir, bin) = repo_with_bare_path();
+    let log = dir.path().join("brew.log");
+    write_script(
+        &bin.join("brew"),
+        &format!("echo \"$@\" >> '{}'\n", log.display()),
+    );
+    sopsy_in(dir.path())
+        .env("PATH", &bin)
+        .env("SOPSY_BREW_BIN", bin.join("brew"))
+        .args([
+            "--non-interactive",
+            "init",
+            "--skip-deps",
+            "--allow-stores",
+            "any",
+        ])
+        .assert()
+        .failure();
+    assert!(!log.exists(), "--skip-deps must not call brew");
 }

@@ -40,24 +40,31 @@ pub struct Cli {
 
 /// Flags available on every subcommand.
 #[derive(Debug, Args, Clone)]
+#[command(next_help_heading = "Global options")]
 pub struct GlobalArgs {
     /// Disable all interactive prompts; fail instead of asking. Also enabled
     /// automatically when stdout is not a TTY. Aliased as `--yes`/`-y`.
-    #[arg(long, short = 'y', visible_alias = "yes", global = true)]
+    #[arg(
+        long,
+        short = 'y',
+        visible_alias = "yes",
+        global = true,
+        display_order = 100
+    )]
     pub non_interactive: bool,
 
     /// Disable colored output (also honors the `NO_COLOR` environment variable).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, display_order = 103)]
     pub no_color: bool,
 
     /// Increase output verbosity (show debug detail).
-    #[arg(long, short = 'v', global = true)]
+    #[arg(long, short = 'v', global = true, display_order = 102)]
     pub verbose: bool,
 
     /// After a command changes files, `git add` exactly those files and print
     /// ready-to-paste commit and pull-request instructions. A no-op for commands
     /// that don't modify committed files.
-    #[arg(long, short = 'g', global = true)]
+    #[arg(long, short = 'g', global = true, display_order = 101)]
     pub git: bool,
 }
 
@@ -128,8 +135,78 @@ pub enum Command {
     Completion(CompletionArgs),
 }
 
+/// Heading for where a key is generated (`--store`, `--age-public-key`, …).
+const KEY_HEADING: &str = "Key options";
+
+/// Heading for the YubiKey PIV tuning flags.
+const YUBIKEY_HEADING: &str = "YubiKey options";
+
+/// `sopsy init` heading for flags recorded in the repository for every member.
+const INIT_REPO_HEADING: &str = "Repository options (affect everyone using this repository)";
+
+/// `sopsy init` heading for flags that only shape the admin's own key.
+const INIT_PERSONAL_HEADING: &str = "Personal options (affect only you)";
+
+/// Shown at the end of `sopsy init --help`.
+const INIT_EXAMPLES: &str = "\
+Examples:
+  # Interactive: asks for the store policy and your key store, then creates
+  # the offline break-glass emergency key
+  sopsy init
+
+  # Your key on a YubiKey (even on a Mac with a Secure Enclave);
+  # members may use any hardware store (the default policy)
+  sopsy init --store yubikey
+
+  # Your key on a YubiKey, and every member must use a YubiKey too
+  sopsy init --store yubikey --allow-stores yubikey
+
+  # Allow software keys (keychain / file) as well as hardware
+  sopsy init --allow-stores onchip,exthardware,software
+
+  # No store restriction at all
+  sopsy init --allow-stores any
+
+  # Register an existing public key instead of generating one
+  sopsy init --age-public-key age1… --recipient-name \"Alan Turing\"
+
+  # Scripted, on your laptop (no prompts, so no emergency key):
+  # Secure Enclave key, hardware-only policy
+  sopsy init -y --store enclave --allow-stores onchip,exthardware
+
+  # CI never runs `init`: runners have no Enclave or YubiKey. After init,
+  # give CI its own portable key, stored as the `SOPS_AGE_KEY` CI secret
+  sopsy recipient ci
+
+  # Emergency key: interactive runs create it; after an unattended run, do it here
+  sopsy recipient break-glass";
+
 /// Arguments for `sopsy init`.
 #[derive(Debug, Args)]
+#[command(mut_arg("store", |a| {
+    let help = "Where the admin's (your) private key lives. Applies to the admin only: other \
+                members pick their own store with `sopsy join --store`, limited by `--allow-stores`. \
+                `auto` picks the most secure store this machine supports, in the order of \
+                `SOPSY_PRIVATE_KEY_STORE_PRIORITY` (default: enclave, yubikey, keychain, file)";
+    a.help(help).long_help(help)
+}))]
+// `--help` separates flags recorded for everyone using the repository from
+// flags that only shape the admin's own key; within each, most used first.
+#[command(
+    mut_arg("allow_stores", |a| a.help_heading(INIT_REPO_HEADING).display_order(1)),
+    mut_arg("no_break_glass", |a| a.help_heading(INIT_REPO_HEADING).display_order(3)),
+    mut_arg("store", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(4)),
+    mut_arg("recipient_name", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(5)),
+    mut_arg("username", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(6)),
+    mut_arg("public_key", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(7)),
+    mut_arg("no_generate", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(8)),
+    mut_arg("pin_policy", |a| a.display_order(9)),
+    mut_arg("touch_policy", |a| a.display_order(10)),
+    mut_arg("new_slot", |a| a.display_order(11)),
+    mut_arg("skip_deps", |a| a.display_order(98)),
+    mut_arg("force", |a| a.display_order(12)),
+)]
+#[command(after_long_help = INIT_EXAMPLES)]
 pub struct InitArgs {
     /// Name to record for the recipient created/registered during init.
     #[arg(long, short = 'n')]
@@ -154,32 +231,37 @@ pub struct InitArgs {
     #[arg(long)]
     pub no_generate: bool,
 
-    /// Key stores (or groups) members of this repository may use, recorded as
-    /// `key_policy.required` in `.sopsy.yml`. Comma-separated or repeated:
-    /// `enclave`, `yubikey`, `keychain`, `file`, or the groups `onchip`,
-    /// `exthardware`, `software`. `any` or `all` records no restriction.
+    /// Key stores (or groups) members of this repository may use, in order of
+    /// preference, recorded as `key_policy.allowed` in `.sopsy.yml`.
+    /// Comma-separated or repeated: `enclave`, `yubikey`, `keychain`, `file`,
+    /// or the groups `onchip`, `exthardware`, `software`. The order is also the
+    /// default order `--store auto` tries, within each tier (hardware stores
+    /// always come first); each developer can override it with
+    /// `SOPSY_PRIVATE_KEY_STORE_PRIORITY`. `any` or `all` records no restriction.
     /// Non-interactive default: hardware only (`onchip,exthardware`). Interactive
     /// runs ask, with the hardware stores pre-selected.
-    #[arg(long, short = 'r', value_name = "STORES", value_delimiter = ',')]
-    pub require: Vec<String>,
+    #[arg(
+        long = "allow-stores",
+        short = 'A',
+        value_name = "STORES",
+        value_delimiter = ','
+    )]
+    pub allow_stores: Vec<String>,
 
     /// Where to generate the admin's key.
     #[command(flatten)]
     pub key: StoreArgs,
 
-    /// Generate the portable "break glass" emergency key as part of init, for
-    /// offline storage (interactive runs ask). Conflicts with `--no-emergency-keys`.
-    #[arg(
-        long = "generate-emergency-keys",
-        short = 'e',
-        alias = "break-glass",
-        conflicts_with = "no_break_glass"
-    )]
-    pub break_glass: bool,
-
-    /// Skip generating the break-glass emergency key during init.
+    /// Skip the break-glass emergency key that interactive runs create.
+    /// Unattended runs (`-y`) always skip it; create it later with
+    /// `sopsy recipient break-glass`.
     #[arg(long = "no-emergency-keys", alias = "no-break-glass")]
     pub no_break_glass: bool,
+
+    /// Do not install missing supporting tools (the `sopsy deps` step). Useful
+    /// on shared or managed machines where `brew install` must not run.
+    #[arg(long)]
+    pub skip_deps: bool,
 
     /// Proceed even if some doctor checks fail.
     #[arg(long)]
@@ -205,7 +287,7 @@ pub struct EditArgs {
 #[derive(Debug, Args)]
 pub struct JoinArgs {
     /// Your name as recorded in `.sopsy.yml` (full name or first name,
-    /// e.g. `"Konstantin Gredeskoul"` or `annie`).
+    /// e.g. `"Alan Turing"` or `alan`).
     pub name: String,
 
     /// System username recorded alongside the name (defaults to `$USER`).
@@ -221,7 +303,8 @@ pub struct JoinArgs {
         long = "age-public-key",
         short = 'p',
         alias = "public-key",
-        value_name = "AGE1…"
+        value_name = "AGE1…",
+        help_heading = KEY_HEADING,
     )]
     pub public_key: Option<String>,
 
@@ -229,7 +312,7 @@ pub struct JoinArgs {
     /// `--access-control none` (no Touch ID / passcode); for a YubiKey, touch
     /// policy `never` (the PIN is kept). The private key still never leaves the
     /// device. Rejected for software stores. Ignored with `--age-public-key`.
-    #[arg(short = 't', long = "without-touch-id")]
+    #[arg(short = 't', long = "without-touch-id", help_heading = KEY_HEADING)]
     pub without_touch_id: bool,
 
     /// Where to generate your key.
@@ -276,7 +359,8 @@ pub struct StoreArgs {
     /// Where the private key lives. `auto` picks the most secure store this
     /// machine supports, in the order of `SOPSY_PRIVATE_KEY_STORE_PRIORITY`
     /// (default: enclave, yubikey, keychain, file).
-    #[arg(long, short = 's', value_enum, default_value_t = StoreChoice::Auto)]
+    #[arg(long, short = 's', value_enum, default_value_t = StoreChoice::Auto, help_heading = KEY_HEADING,
+        display_order = 0)]
     pub store: StoreChoice,
 
     /// YubiKey serial, for scripts; interactive runs list the plugged-in keys.
@@ -289,7 +373,8 @@ pub struct StoreArgs {
     pub yubikey_slot: Option<u8>,
 
     /// Always generate a new YubiKey key instead of reusing an existing one.
-    #[arg(long = "always-new-slot", short = 'a', alias = "new-slot")]
+    #[arg(long = "always-new-slot", short = 'a', alias = "new-slot", help_heading = YUBIKEY_HEADING,
+        display_order = 22)]
     pub new_slot: bool,
 
     /// When the YubiKey asks for its PIN: every decryption, once per session
@@ -298,7 +383,9 @@ pub struct StoreArgs {
         long = "yubikey-pin-policy",
         short = 'c',
         alias = "pin-policy",
-        value_enum
+        value_enum,
+        help_heading = YUBIKEY_HEADING,
+        display_order = 20,
     )]
     pub pin_policy: Option<PinPolicy>,
 
@@ -308,7 +395,9 @@ pub struct StoreArgs {
         long = "yubikey-touch-policy",
         short = 'b',
         alias = "touch-policy",
-        value_enum
+        value_enum,
+        help_heading = YUBIKEY_HEADING,
+        display_order = 21,
     )]
     pub touch_policy: Option<TouchPolicy>,
 }
@@ -547,6 +636,69 @@ mod tests {
     }
 
     #[test]
+    fn init_store_help_says_admin_only() {
+        let help = |sub: &str| {
+            let mut cmd = Cli::command();
+            cmd.find_subcommand_mut(sub)
+                .unwrap()
+                .render_long_help()
+                .to_string()
+        };
+        assert!(help("init").contains("Applies to the admin only"));
+        assert!(!help("join").contains("admin only"));
+    }
+
+    #[test]
+    fn init_help_groups_repository_and_personal_flags() {
+        let mut cmd = Cli::command();
+        cmd.build(); // propagate the global flags into subcommands
+        let help = cmd
+            .find_subcommand_mut("init")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        // Index of the flag's own entry line, ignoring mentions in help prose.
+        let pos = |flag: &str| {
+            help.lines()
+                .position(|l| {
+                    (l.starts_with(flag) || l.trim_start().starts_with('-')) && l.contains(flag)
+                })
+                .unwrap_or_else(|| panic!("{flag} missing from init help"))
+        };
+        // clap always lists its default `Options:` group first.
+        let order = [
+            "Options:",
+            "--force",
+            "Repository options",
+            "--allow-stores",
+            "--no-emergency-keys",
+            "Personal options",
+            "--store",
+            "--recipient-name",
+            "--username",
+            "--age-public-key",
+            "--no-generate",
+            "YubiKey options",
+            "--yubikey-pin-policy",
+            "--yubikey-touch-policy",
+            "--always-new-slot",
+            "Global options",
+            "--non-interactive",
+            "--git",
+            "--verbose",
+            "--no-color",
+        ];
+        for pair in order.windows(2) {
+            assert!(
+                pos(pair[0]) < pos(pair[1]),
+                "{} should precede {}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    #[test]
     fn init_accepts_short_flags() {
         let cli = Cli::try_parse_from([
             "sopsy",
@@ -558,7 +710,7 @@ mod tests {
             "sam",
             "-p",
             "age1sam",
-            "-r",
+            "-A",
             "yubikey,keychain",
             "-s",
             "yubikey",
@@ -567,7 +719,6 @@ mod tests {
             "cached",
             "-b",
             "always",
-            "-e",
         ])
         .unwrap();
         assert!(cli.global.git);
@@ -577,21 +728,21 @@ mod tests {
         assert_eq!(args.recipient_name.as_deref(), Some("admin"));
         assert_eq!(args.username.as_deref(), Some("sam"));
         assert_eq!(args.public_key.as_deref(), Some("age1sam"));
-        assert_eq!(args.require, ["yubikey", "keychain"]);
+        assert_eq!(args.allow_stores, ["yubikey", "keychain"]);
         assert_eq!(args.key.store, StoreChoice::Yubikey);
-        assert!(args.key.new_slot && args.break_glass);
+        assert!(args.key.new_slot);
         assert_eq!(args.key.pin_policy, Some(PinPolicy::Once));
         assert_eq!(args.key.touch_policy, Some(TouchPolicy::Always));
     }
 
     #[test]
-    fn init_accepts_require_any_and_all() {
+    fn init_accepts_allow_stores_any_and_all() {
         for token in ["any", "all", "ANY"] {
-            let cli = Cli::try_parse_from(["sopsy", "init", "--require", token]).unwrap();
+            let cli = Cli::try_parse_from(["sopsy", "init", "--allow-stores", token]).unwrap();
             let Command::Init(args) = cli.command else {
                 panic!("expected init");
             };
-            assert_eq!(args.require, [token]);
+            assert_eq!(args.allow_stores, [token]);
         }
     }
 

@@ -189,6 +189,7 @@ fn build_repo(opts: FixtureOpts) -> TempDir {
 fn run_check(repo: &Path) -> assert_cmd::assert::Assert {
     AssertCommand::cargo_bin("sopsy")
         .expect("binary `sopsy` should build")
+        .env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew")
         .arg("check")
         .current_dir(repo)
         .assert()

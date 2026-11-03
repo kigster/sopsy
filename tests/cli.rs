@@ -9,7 +9,9 @@ use predicates::prelude::*;
 
 /// Build a `Command` for the compiled `sopsy` binary.
 fn sopsy() -> Command {
-    Command::cargo_bin("sopsy").expect("binary `sopsy` should build")
+    let mut cmd = Command::cargo_bin("sopsy").expect("binary `sopsy` should build");
+    cmd.env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew"); // never run a real `brew` from tests
+    cmd
 }
 
 #[test]
@@ -45,12 +47,12 @@ fn doctor_runs_and_reports_tools() {
 }
 
 #[test]
-fn init_help_documents_require_any() {
+fn init_help_documents_allow_stores_any() {
     sopsy()
         .args(["init", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("--require"))
+        .stdout(predicate::str::contains("--allow-stores"))
         .stdout(predicate::str::contains("any"))
         .stdout(predicate::str::contains("hardware only"));
 }

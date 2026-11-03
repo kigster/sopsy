@@ -121,7 +121,7 @@ Once it's merged, `git pull` and you're in.
 
 ### Choosing where your key lives
 
-`sopsy join` generates your key in the most secure **store** your machine supports, in this order: `enclave` (Apple Silicon), `yubikey` (a plugged-in YubiKey), `keychain` (macOS Keychain or Linux Secret Service), then `file` (plaintext, last resort). Run `sopsy doctor` to see which are available. The repository may allow only some of them (`key_policy.required` in `.sopsy.yml`, set by `sopsy init --require`; the default is hardware only).
+`sopsy join` generates your key in the first **store** that works on your machine, trying them in the repository's order (`key_policy.allowed` in `.sopsy.yml`, set by `sopsy init --allow-stores`; the default is hardware only: `enclave`, then `yubikey`). Stores your machine cannot support are skipped. Without a repository restriction the order is `enclave` (Apple Silicon), `yubikey` (a plugged-in YubiKey), `keychain` (macOS Keychain or Linux Secret Service), then `file` (plaintext, last resort). `SOPSY_PRIVATE_KEY_STORE_PRIORITY` sets your own order within what the repository allows. Run `sopsy doctor` to see which stores are available and which one `auto` would use.
 
 ```bash
 sopsy join alice --store yubikey                     # PIN once per session, touch cached 15s

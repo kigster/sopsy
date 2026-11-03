@@ -41,6 +41,7 @@ fn write_sops_yaml(dir: &Path, key: &str) {
 /// A `sopsy` command rooted in `dir` (child cwd, so it finds `.sops.yaml`).
 fn sopsy(dir: &Path) -> assert_cmd::Command {
     let mut cmd = assert_cmd::Command::cargo_bin("sopsy").expect("binary builds");
+    cmd.env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew"); // never run a real `brew` from tests
     cmd.current_dir(dir);
     cmd
 }
