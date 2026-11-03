@@ -21,10 +21,10 @@ use serde_yaml_ng::Value;
 
 use crate::cli::{
     RecipientAddArgs, RecipientBreakGlassArgs, RecipientCiArgs, RecipientCommand,
-    RecipientKeygenArgs, RecipientRemoveArgs,
+    RecipientKeygenArgs, RecipientRemoveArgs, RecipientRotateArgs,
 };
 use crate::commands::keys;
-use crate::config::{CONFIG_FILE_NAME, Config, Recipient};
+use crate::config::{CONFIG_FILE_NAME, Config, MemberState, Recipient};
 use crate::error::{Error, Result};
 use crate::hardware::StoreKind;
 use crate::ui::Ui;
@@ -66,6 +66,7 @@ pub fn run(ui: &Ui, command: &RecipientCommand) -> Result<()> {
         RecipientCommand::Remove(args) => remove(ui, args),
         RecipientCommand::List => list(ui),
         RecipientCommand::Keygen(args) => keygen(ui, args),
+        RecipientCommand::Rotate(args) => rotate(ui, args),
         RecipientCommand::BreakGlass(args) => break_glass(ui, args),
         RecipientCommand::Ci(args) => ci(ui, args),
     }
@@ -534,8 +535,12 @@ fn keygen(ui: &Ui, args: &RecipientKeygenArgs) -> Result<()> {
     ui.animated_line(&identity.public_key);
 
     if identity.store.kind() == StoreKind::Hardware {
-        ui.header("Identity reference (store this where you keep your age identities)");
+        // The identity line is a non-secret handle to the device; saving it
+        // lets `sops` find the key without any manual step.
+        ui.header("Identity reference (a handle to the device, not the key)");
         println!("{}", identity.identity);
+        let location = crate::hardware::persist(&label, &identity)?;
+        ui.success(format!("Saved the identity reference in {location}."));
     } else {
         // A software key is saved locally; printing it would leak the secret.
         let location = crate::hardware::persist(&label, &identity)?;
@@ -543,6 +548,123 @@ fn keygen(ui: &Ui, args: &RecipientKeygenArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Replace a member's key with a freshly generated (or reused YubiKey) key
+/// under the same name, then re-wrap every secret for the new key.
+///
+/// The old key still decrypts during `updatekeys` (it is in `keys.txt`), and
+/// is no longer a recipient afterwards. A failed re-key rolls the config back.
+fn rotate(ui: &Ui, args: &RecipientRotateArgs) -> Result<()> {
+    ui.header("sopsy recipient rotate");
+
+    let repo = current_repo_root()?;
+    let mut config = load_config(&repo)?;
+    let sops_config = sops_config_path(&repo)?;
+    let user = system_username();
+
+    let name = rotate_target(ui, &config, args.name.as_deref(), user.as_deref())?;
+    let old = config
+        .recipient(&name)
+        .cloned()
+        .ok_or_else(|| Error::Validation(format!("no recipient named `{name}`")))?;
+    if old.break_glass {
+        return Err(Error::Validation(format!(
+            "`{name}` is the break-glass key; make a new one with `sopsy recipient break-glass`, \
+             then remove this one with `sopsy recipient remove {name}`"
+        )));
+    }
+    if old.state != MemberState::Active {
+        return Err(Error::Validation(format!(
+            "`{name}` is not active yet; a pending member runs `sopsy join` again instead"
+        )));
+    }
+    if let (Some(owner), Some(me)) = (old.username.as_deref(), user.as_deref())
+        && owner != me
+    {
+        return Err(Error::Validation(format!(
+            "`{name}` belongs to `{owner}`; only they can rotate it, on their own machine"
+        )));
+    }
+
+    let allowed = config.allowed_stores()?;
+    let identity = keys::generate(
+        ui,
+        &args.key,
+        &name,
+        allowed.as_deref(),
+        false,
+        &args.age_args,
+        true,
+    )?;
+    if identity.public_key == old.public_key {
+        ui.info(format!("that is already `{name}`'s key; nothing to rotate"));
+        return Ok(());
+    }
+    if let Some(other) = config
+        .recipients
+        .iter()
+        .find(|r| r.public_key == identity.public_key)
+    {
+        return Err(Error::Validation(format!(
+            "that key is already registered as `{}`",
+            other.name
+        )));
+    }
+
+    let snapshot = ConfigSnapshot::capture(&repo, &sops_config);
+    if let Some(member) = config.recipients.iter_mut().find(|r| r.name == name) {
+        member.public_key = identity.public_key.clone();
+        member.store = Some(identity.store);
+    }
+    config.save_to_dir(&repo)?;
+    add_key_to_sops_yaml(&sops_config, &identity.public_key)?;
+    remove_key_from_sops_yaml(&sops_config, &old.public_key)?;
+    ui.success(format!(
+        "replaced `{name}`'s key in {CONFIG_FILE_NAME} and {SOPS_CONFIG_FILE_NAME}"
+    ));
+
+    if let Err(err) = run_updatekeys(ui, &repo, false) {
+        snapshot.restore()?;
+        ui.warn("rolled back configuration changes; the old key is still in use");
+        return Err(rewrap_error(err));
+    }
+
+    ui.success(format!(
+        "rotated `{name}` to a {} key",
+        identity.store.display_name()
+    ));
+    ui.info("The old key no longer opens these secrets; its line in keys.txt is harmless.");
+    maybe_stage(ui, &repo, &format!("Rotate sopsy key for {name}"))?;
+    Ok(())
+}
+
+/// Which recipient `rotate` replaces: the named one, else the caller's own
+/// active key (asking when there are several).
+fn rotate_target(
+    ui: &Ui,
+    config: &Config,
+    name: Option<&str>,
+    user: Option<&str>,
+) -> Result<String> {
+    if let Some(name) = name {
+        return Ok(name.trim().to_string());
+    }
+    let mine: Vec<String> = config
+        .recipients
+        .iter()
+        .filter(|r| !r.break_glass && r.state == MemberState::Active)
+        .filter(|r| user.is_some() && r.username.as_deref() == user)
+        .map(|r| r.name.clone())
+        .collect();
+    match mine.len() {
+        0 => Err(Error::Validation(format!(
+            "no active key of yours (`{}`) in {CONFIG_FILE_NAME}; pass the recipient name",
+            user.unwrap_or("unknown user")
+        ))),
+        1 => Ok(mine[0].clone()),
+        _ => ui.select("Which of your keys should be rotated?", "NAME", mine),
+    }
 }
 
 /// The two portable-key ceremonies. Both generate an *exportable* age keypair

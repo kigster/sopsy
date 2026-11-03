@@ -528,7 +528,7 @@ $ sopsy init -A exthardware,software -s yubikey
   ℹ Talking to your YubiKey: enter its PIN when asked.
   ℹ Nothing is shown while you type a PIN or PUK; the plugin prints [hidden] afterwards.
   ℹ After entering your PIN, you must touch the YubiKey (its light blinks); nothing happens until you do.
-  ℹ > [!NOTE] To be asked for the PIN only once per session, generate your YubiKey key with `-c cached` (`--yubikey-pin-policy cached`, the default) on `sopsy init`, `join` or `recipient keygen`. The policy is fixed in the key; changing it means generating a new one.
+  ℹ > [!NOTE] To be asked for the PIN only once per session, generate your YubiKey key with `-c cached` (`--yubikey-pin-policy cached`, the default) on `sopsy init`, `join` or `recipient keygen`. The policy is fixed in the key; to change it, `sopsy recipient rotate -s yubikey -c cached` swaps in a new key.
 
 🔐 Enter PIN for YubiKey with serial 12345678 (default is 123456): [hidden]
 👆 Please touch the YubiKey
@@ -571,6 +571,18 @@ API_KEY=…
 ```
 
 To have every member's `auto` prefer a plugged-in YubiKey over the Secure Enclave, list it first when you create the repository: `sopsy init --allow-stores yubikey,enclave`. For just yourself, set your own order: `export SOPSY_PRIVATE_KEY_STORE_PRIORITY=yubikey,enclave`.
+
+### Several keys on one YubiKey
+
+A YubiKey holds up to 20 age keys, one per PIV slot, each with its own PIN and touch policy. Which one decrypts a repository depends on which public key the repository lists, so switching keys means switching the recipient:
+
+```bash
+sopsy yubikey --list                              # every key on the YubiKey: slot, PIN and touch policy
+sopsy recipient rotate -s yubikey -c cached       # pick an existing key or make a new one; re-keys the secrets
+sopsy recipient rotate -s yubikey --yubikey-slot 3   # scripted: use the key in slot 3
+```
+
+`rotate` keeps your name, username and approval, swaps the public key in `.sopsy.yml` and `.sops.yaml`, and re-encrypts every secret for the new key. The old key stops working for this repository; its line in `keys.txt` is harmless.
 
 ### PIN, PUK and touch
 
@@ -732,6 +744,7 @@ Before anything else, `init` installs missing supporting tools (the `sopsy deps`
 | `-c`, `--yubikey-pin-policy <POLICY>` | `always`, `cached` (once per session, until the key is unplugged; default) or `never`. |
 | `-b`, `--yubikey-touch-policy <POLICY>` | `always`, `cached` (15 seconds, fixed by the YubiKey; default) or `never`. |
 | `-a`, `--always-new-slot` | Generate a new YubiKey key even if a reusable one exists. Interactive runs list the existing keys (and the YubiKeys, when several are plugged in). |
+| `--yubikey-slot <SLOT>` | Use the existing key in this slot (1–20) instead of asking. `sopsy yubikey --list` shows the slots. |
 
 **Other options:**
 
@@ -907,12 +920,28 @@ sopsy recipient list
 
 #### `recipient keygen`
 
-Generate a fresh Secure Enclave identity and print its public key + identity **without** touching any config (use the printed key with `recipient add`). Trailing args after `--` are forwarded to `age-plugin-se keygen`.
+Generate a fresh identity in any store (`-s enclave|yubikey|keychain|file`) and print its public key, without changing the repository (register the key with `recipient add`, or use `recipient rotate` to swap it in). The identity is saved to your `keys.txt`, so `sops` finds it: for the Enclave and YubiKey that is a non-secret handle to the device. Trailing args after `--` are forwarded to the store's plugin.
 
 ```bash
 sopsy recipient keygen
+sopsy recipient keygen -s yubikey -c cached -a
 sopsy recipient keygen -- --access-control=any-biometry-or-passcode
 ```
+
+#### `recipient rotate`
+
+Replace your key with a new one under the same name, and re-encrypt every secret for it. Use it to move to another store or YubiKey slot, or to change a YubiKey's PIN or touch policy. Takes the same key options as `keygen`; with a YubiKey, interactive runs offer the keys already on it.
+
+| Argument / Flag | Description |
+| --- | --- |
+| `[NAME]` | The recipient to rotate. Defaults to your own key (matched by `$USER`); with several, interactive runs ask. |
+
+```bash
+sopsy recipient rotate -s yubikey -c cached   # a YubiKey key that asks for the PIN once per session
+sopsy recipient rotate -s enclave             # move from a YubiKey to the Secure Enclave
+```
+
+Only your own key can be rotated (`username` must match `$USER`), and not the break-glass key: make a new one with `recipient break-glass`, then remove the old one. A failed re-encryption rolls the configuration back.
 
 #### `recipient break-glass`
 
@@ -1049,6 +1078,16 @@ sopsy check && echo "secrets hygiene: OK"
 > If `.sopsy.yml` is absent, the repository is not sopsy-managed, so `check` prints a notice and exits **0** rather than failing unrelated repositories.
 
 ______________________________________________________________________
+
+### `sopsy yubikey` / `sopsy enclave`
+
+Run `age-plugin-yubikey` or `age-plugin-se` with your arguments, passed through unchanged, so you never need the plugin's own name. `--help` shows the plugin's help.
+
+```bash
+sopsy yubikey --list        # the age keys on your YubiKey: slot, name, PIN and touch policy
+sopsy yubikey --identity    # print the identity lines (non-secret handles)
+sopsy enclave --help        # age-plugin-se's own help
+```
 
 ### `sopsy deps`
 

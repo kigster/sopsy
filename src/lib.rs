@@ -99,6 +99,8 @@ fn dispatch(ui: &Ui, command: Command) -> Result<()> {
         Command::Check => commands::check::run(ui),
         Command::Deps(args) => commands::deps::run(ui, &args),
         Command::Completion(args) => commands::completion::run(&args),
+        Command::Yubikey(args) => crate::hardware::yubikey::passthrough(&args.args),
+        Command::Enclave(args) => crate::hardware::enclave::passthrough(&args.args),
     }
 }
 

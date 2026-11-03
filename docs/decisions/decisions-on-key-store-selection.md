@@ -47,3 +47,10 @@ Rejected: a special rule that a plugged-in YubiKey always wins. It would silentl
 
 - Interactive runs ask the user to insert a missing YubiKey and check again, rather than failing: before generating a key with `--store yubikey`, and before decrypt, edit and re-keying when every active key the user (`$USER`) has in the repository lives on a YubiKey.
 - `encrypt` never asks, since it needs only public keys. Unattended runs and `SOPS_AGE_KEY` skip the prompt.
+
+## Rotating keys and plugin pass-through
+
+- `sopsy recipient rotate [NAME]` replaces a member's key under the same name and re-keys the secrets. It is how you switch between keys on one YubiKey (or change a PIN or touch policy, which is fixed per key): the repository's recipient decides which key decrypts. Only your own key (`username` = `$USER`), never the break-glass key.
+- `recipient keygen` saves hardware identity handles to `keys.txt`, like `init` and `join`.
+- `--yubikey-slot` is visible now, for scripts that pick a key.
+- `sopsy yubikey …` and `sopsy enclave …` pass their arguments unchanged to `age-plugin-yubikey` and `age-plugin-se`. sopsy is the UX for every tool it wraps.

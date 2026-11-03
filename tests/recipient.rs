@@ -18,7 +18,7 @@ use assert_fs::TempDir;
 use serial_test::serial;
 use sopsy::cli::{
     ApproveArgs, JoinArgs, RecipientAddArgs, RecipientBreakGlassArgs, RecipientCiArgs,
-    RecipientCommand, RecipientRemoveArgs,
+    RecipientCommand, RecipientRemoveArgs, RecipientRotateArgs, StoreArgs, StoreChoice,
 };
 use sopsy::commands::{approve, join, recipient};
 use sopsy::config::{Config, MemberState};
@@ -2351,4 +2351,69 @@ fn updatekeys_failure_surfaces_process_error() {
         std::env::remove_var("SOPSY_SOPS_BIN");
     }
     restore_cwd(&original);
+}
+
+// ---------------------------------------------------------------------------
+// `recipient rotate` — replace a key under the same name, against real sops.
+// ---------------------------------------------------------------------------
+
+fn rotate_command(name: &str) -> RecipientCommand {
+    RecipientCommand::Rotate(RecipientRotateArgs {
+        name: Some(name.to_string()),
+        key: StoreArgs {
+            store: StoreChoice::File,
+            ..StoreArgs::default()
+        },
+        age_args: vec![],
+    })
+}
+
+#[test]
+#[serial]
+fn rotate_swaps_the_key_and_rekeys_the_secrets() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let (repo, key_a, _key_b) = setup_repo(dir.path());
+
+    // The member's keys file starts with only the old key.
+    let keys = repo.join("member-keys.txt");
+    std::fs::copy(&key_a.file, &keys).unwrap();
+    set_age_key_file(None);
+    set_env("SOPSY_KEYS_FILE", Some(&keys));
+
+    let result = recipient::run(&test_ui(), &rotate_command("original"));
+
+    let config = Config::load_from_dir(&repo).unwrap();
+    let member = config.recipient("original").unwrap().clone();
+    let sops_yaml = std::fs::read_to_string(repo.join(".sops.yaml")).unwrap();
+    let with_new = sops::decrypt(&repo.join(".env.encrypted"), FileType::Dotenv);
+    set_env("SOPSY_KEYS_FILE", Some(&key_a.file));
+    let with_old = sops::decrypt(&repo.join(".env.encrypted"), FileType::Dotenv);
+    set_env("SOPSY_KEYS_FILE", None);
+    restore_cwd(&original);
+
+    result.unwrap();
+    assert_ne!(member.public_key, key_a.public, "the key must change");
+    assert_eq!(config.recipients.len(), 1, "same member, no new entry");
+    assert!(sops_yaml.contains(&member.public_key), "{sops_yaml}");
+    assert!(!sops_yaml.contains(&key_a.public), "{sops_yaml}");
+    assert!(with_new.unwrap().contains("FOO=bar"));
+    assert!(with_old.is_err(), "the old key must no longer decrypt");
+}
+
+#[test]
+#[serial]
+fn rotate_refuses_the_break_glass_key() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let (repo, _key_a, key_b) = setup_repo(dir.path());
+    let add = recipient::run(&test_ui(), &add_command("vault", &key_b.public, true, true));
+    let result = recipient::run(&test_ui(), &rotate_command("vault"));
+    let config = Config::load_from_dir(&repo).unwrap();
+    restore_cwd(&original);
+
+    add.unwrap();
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("break-glass"), "{err}");
+    assert_eq!(config.recipient("vault").unwrap().public_key, key_b.public);
 }
