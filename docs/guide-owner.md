@@ -64,7 +64,7 @@ As the owner, you run `sopsy init` **once**:
 cd my-repo
 sopsy init                       # generates a Secure Enclave identity for you
 # or, in CI / on non-Enclave hardware (must opt out of the hardware-only default):
-sopsy init -y --require any --recipient-name ci --age-public-key age1… --no-generate
+sopsy init -y --allow-stores any --recipient-name ci --age-public-key age1… --no-generate
 ```
 
 When it generates a new identity, `init` shows the public key, pauses so you can take it in, and asks for your **name** (defaulting to your system username) — this is recorded as the key's `username` in `.sopsy.yml`, so it is obvious later who generated it. It then writes `.sops.yaml`, `.env.example`, an encrypted `.env.encrypted`, the `.gitignore` safety rules, and `.sopsy.yml`.

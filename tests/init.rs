@@ -100,7 +100,7 @@ fn init_with_public_key_encrypts_real_env() {
         .args([
             "--non-interactive",
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--no-generate",
             "--public-key",
@@ -171,7 +171,7 @@ fn init_with_git_flag_stages_created_files_once() {
             "--non-interactive",
             "--git",
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--no-generate",
             "--public-key",
@@ -241,7 +241,7 @@ fn init_seeds_from_env_example_when_no_dotenv() {
         .args([
             "--non-interactive",
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--no-generate",
             "--public-key",
@@ -293,7 +293,7 @@ fn init_rescues_encrypted_artifacts_in_legacy_gitignore() {
         .args([
             "--non-interactive",
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--no-generate",
             "--public-key",
@@ -355,7 +355,7 @@ fn rerun_preserves_sops_yaml_unless_forced() {
     let args = [
         "--non-interactive",
         "init",
-        "--require",
+        "--allow-stores",
         "any",
         "--no-generate",
         "--public-key",
@@ -435,7 +435,7 @@ fn init_generates_enclave_identity_with_fakes() {
         .assert()
         .success()
         .stdout(predicate::str::contains("hardware-only"))
-        .stdout(predicate::str::contains("--require any"));
+        .stdout(predicate::str::contains("--allow-stores any"));
 
     // The fake identity was stored in the redirected keystore, not the real one.
     let keys = std::fs::read_to_string(dir.path().join("age-keys.txt")).unwrap();
@@ -450,7 +450,7 @@ fn init_generates_enclave_identity_with_fakes() {
         config.contains(fake_pubkey),
         "enclave identity not recorded in .sopsy.yml:\n{config}"
     );
-    // Non-interactive init without `--require` records hardware only.
+    // Non-interactive init without `--allow-stores` records hardware only.
     assert!(
         config.contains("key_policy:")
             && config.contains("- onchip")
@@ -510,7 +510,7 @@ fn init_failed_encryption_leaves_no_plaintext_artifact() {
         .args([
             "--non-interactive",
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--no-generate",
             "--public-key",
@@ -553,7 +553,7 @@ fn non_interactive_without_key_or_generation_fails_friendly() {
         .args([
             "--non-interactive",
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--no-generate",
         ])
@@ -573,7 +573,7 @@ fn init_outside_git_repo_fails_friendly() {
         .args([
             "--non-interactive",
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--no-generate",
             "--public-key",
@@ -595,7 +595,7 @@ fn init_records_username_and_respects_no_break_glass() {
         .args([
             "--non-interactive",
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--no-generate",
             "--public-key",
@@ -634,7 +634,7 @@ fn init_without_break_glass_prints_guidance() {
         .args([
             "--non-interactive",
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--no-generate",
             "--public-key",
@@ -667,7 +667,7 @@ fn init_break_glass_flag_registers_offline_key() {
         .args([
             "--non-interactive",
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--no-generate",
             "--public-key",
@@ -717,7 +717,7 @@ fn init_break_glass_flag_registers_offline_key() {
 
 #[test]
 #[serial]
-fn init_require_any_records_no_restriction() {
+fn init_allow_stores_any_records_no_restriction() {
     let dir = TempDir::new().unwrap();
     init_git_repo(dir.path());
     let (public_key, _key_file) = generate_age_key(dir.path());
@@ -726,7 +726,7 @@ fn init_require_any_records_no_restriction() {
         .args([
             "--non-interactive",
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--no-generate",
             "--public-key",
@@ -738,13 +738,13 @@ fn init_require_any_records_no_restriction() {
     let config = std::fs::read_to_string(dir.path().join(".sopsy.yml")).unwrap();
     assert!(
         !config.contains("key_policy"),
-        "--require any must omit key_policy:\n{config}"
+        "--allow-stores any must omit key_policy:\n{config}"
     );
 }
 
 #[test]
 #[serial]
-fn init_require_all_is_the_same_opt_out() {
+fn init_allow_stores_all_is_the_same_opt_out() {
     let dir = TempDir::new().unwrap();
     init_git_repo(dir.path());
     let (public_key, _key_file) = generate_age_key(dir.path());
@@ -753,7 +753,7 @@ fn init_require_all_is_the_same_opt_out() {
         .args([
             "--non-interactive",
             "init",
-            "--require",
+            "--allow-stores",
             "all",
             "--no-generate",
             "--public-key",
@@ -765,7 +765,7 @@ fn init_require_all_is_the_same_opt_out() {
     let config = std::fs::read_to_string(dir.path().join(".sopsy.yml")).unwrap();
     assert!(
         !config.contains("key_policy"),
-        "--require all must omit key_policy:\n{config}"
+        "--allow-stores all must omit key_policy:\n{config}"
     );
 }
 
@@ -776,7 +776,7 @@ fn init_require_all_is_the_same_opt_out() {
 #[test]
 #[serial]
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-fn init_without_hardware_fails_naming_require() {
+fn init_without_hardware_fails_naming_allow_stores() {
     let dir = TempDir::new().unwrap();
     init_git_repo(dir.path());
     let (public_key, _key_file) = generate_age_key(dir.path());
@@ -798,8 +798,8 @@ fn init_without_hardware_fails_naming_require() {
         ])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("--require any"))
-        .stderr(predicate::str::contains("--require software"));
+        .stderr(predicate::str::contains("--allow-stores any"))
+        .stderr(predicate::str::contains("--allow-stores software"));
 
     assert!(
         !dir.path().join(".sopsy.yml").exists(),

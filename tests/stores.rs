@@ -1,5 +1,5 @@
 //! Integration tests for private-key stores (`--store`, `auto`, and the
-//! repository's `key_policy.required` allowed set), through the real binary.
+//! repository's `key_policy.allowed` allowed set), through the real binary.
 //!
 //! `file` and `keychain` run against the real `sops` + `age` so a decrypt
 //! round-trip proves `sops` finds the key. The keychain itself and the YubiKey
@@ -114,14 +114,14 @@ impl Sandbox {
 /// weaken the policy. Apple Silicon reports the Enclave as MissingTool instead.
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 #[test]
-fn init_without_require_fails_when_no_hardware_store_is_available() {
+fn init_without_allow_stores_fails_when_no_hardware_store_is_available() {
     let sb = Sandbox::new();
     sb.sopsy()
         .args(["init", "--no-emergency-keys"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("--require any"))
-        .stderr(predicate::str::contains("--require software"));
+        .stderr(predicate::str::contains("--allow-stores any"))
+        .stderr(predicate::str::contains("--allow-stores software"));
     assert!(
         !sb.path().join(".sopsy.yml").exists(),
         "must not write an unrestricted policy just because hardware is missing"
@@ -134,7 +134,7 @@ fn file_store_round_trips_and_warns() {
     sb.sopsy()
         .args([
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--store",
             "file",
@@ -156,7 +156,7 @@ fn keychain_store_keeps_the_secret_off_disk_and_out_of_argv() {
     sb.sopsy()
         .args([
             "init",
-            "--require",
+            "--allow-stores",
             "software",
             "--store",
             "keychain",
@@ -184,7 +184,7 @@ fn auto_falls_back_through_the_priority_list() {
     // No enclave and no YubiKey here; keychain is next.
     sb.sopsy()
         .env("SOPSY_PRIVATE_KEY_STORE_PRIORITY", "exthardware,software")
-        .args(["init", "--require", "any", "--no-emergency-keys"])
+        .args(["init", "--allow-stores", "any", "--no-emergency-keys"])
         .assert()
         .success();
     assert!(sb.read(".sopsy.yml").contains("store: keychain"));
@@ -192,7 +192,7 @@ fn auto_falls_back_through_the_priority_list() {
     let sb = Sandbox::new();
     sb.sopsy()
         .env("SOPSY_PRIVATE_KEY_STORE_PRIORITY", "exthardware")
-        .args(["init", "--require", "any", "--no-emergency-keys"])
+        .args(["init", "--allow-stores", "any", "--no-emergency-keys"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("no usable key store"));
@@ -230,7 +230,7 @@ fn yubikey_store_records_stub_and_recipient() {
         .env("SOPSY_SOPS_BIN", p.join("sops"))
         .args([
             "init",
-            "--require",
+            "--allow-stores",
             "exthardware",
             "--yubikey-pin-policy",
             "always",
@@ -256,7 +256,7 @@ fn yubikey_store_records_stub_and_recipient() {
 }
 
 #[test]
-fn init_without_require_defaults_to_hardware_only() {
+fn init_without_allow_stores_defaults_to_hardware_only() {
     let sb = Sandbox::new();
     let p = sb.path();
     write_script(&p.join("usb"), "echo '+-o YubiKey OTP+FIDO+CCID@1'\n");
@@ -281,7 +281,7 @@ fn init_without_require_defaults_to_hardware_only() {
         .assert()
         .success()
         .stdout(predicate::str::contains("hardware-only"))
-        .stdout(predicate::str::contains("--require any"));
+        .stdout(predicate::str::contains("--allow-stores any"));
 
     let config = sb.read(".sopsy.yml");
     assert!(
@@ -312,10 +312,10 @@ fn several_yubikeys_need_a_serial_when_not_interactive() {
 }
 
 #[test]
-fn init_require_any_cannot_mix_with_stores() {
+fn init_allow_stores_any_cannot_mix_with_stores() {
     let sb = Sandbox::new();
     sb.sopsy()
-        .args(["init", "--require", "any,file", "--no-emergency-keys"])
+        .args(["init", "--allow-stores", "any,file", "--no-emergency-keys"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("cannot be combined"));
@@ -325,14 +325,20 @@ fn init_require_any_cannot_mix_with_stores() {
 fn init_rejects_stores_outside_the_allowed_set() {
     let sb = Sandbox::new();
     sb.sopsy()
-        .args(["init", "--require", "yubikey,keychain", "--store", "file"])
+        .args([
+            "init",
+            "--allow-stores",
+            "yubikey,keychain",
+            "--store",
+            "file",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains("allows only: yubikey, keychain"));
     assert!(!sb.path().join(".sopsy.yml").exists());
 
     sb.sopsy()
-        .args(["init", "--require", "tpm"])
+        .args(["init", "--allow-stores", "tpm"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("unknown key store or group `tpm`"));
@@ -349,7 +355,7 @@ fn init_refuses_a_broken_sops_yaml_before_generating_a_key() {
     sb.sopsy()
         .args([
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "-s",
             "file",
@@ -375,7 +381,7 @@ fn init_adds_its_key_to_an_existing_sops_yaml() {
     sb.sopsy()
         .args([
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "-s",
             "file",
@@ -400,7 +406,7 @@ fn init_adds_its_key_to_an_existing_sops_yaml() {
 fn init_rejects_a_pasted_non_key() {
     let sb = Sandbox::new();
     sb.sopsy()
-        .args(["init", "--require", "any", "--age-public-key", "n"])
+        .args(["init", "--allow-stores", "any", "--age-public-key", "n"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("not an age public key"));
@@ -412,7 +418,7 @@ fn join_and_approve_honor_the_allowed_set() {
     sb.sopsy()
         .args([
             "init",
-            "--require",
+            "--allow-stores",
             "software",
             "--store",
             "file",
@@ -464,7 +470,7 @@ fn a_declared_hardware_store_cannot_launder_a_plain_key() {
     sb.sopsy()
         .args([
             "init",
-            "--require",
+            "--allow-stores",
             "exthardware,software",
             "--store",
             "file",
@@ -508,7 +514,7 @@ fn without_touch_id_is_rejected_for_software_stores() {
     sb.sopsy()
         .args([
             "init",
-            "--require",
+            "--allow-stores",
             "any",
             "--store",
             "file",
@@ -555,7 +561,7 @@ fn recipient_add_honors_the_allowed_set() {
     sb.sopsy()
         .args([
             "init",
-            "--require",
+            "--allow-stores",
             "software",
             "--store",
             "file",

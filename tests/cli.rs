@@ -45,12 +45,12 @@ fn doctor_runs_and_reports_tools() {
 }
 
 #[test]
-fn init_help_documents_require_any() {
+fn init_help_documents_allow_stores_any() {
     sopsy()
         .args(["init", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("--require"))
+        .stdout(predicate::str::contains("--allow-stores"))
         .stdout(predicate::str::contains("any"))
         .stdout(predicate::str::contains("hardware only"));
 }

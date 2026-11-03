@@ -65,7 +65,7 @@ ______________________________________________________________________
 
 The killer property: the secret values live in Git in *encrypted* form, while the private key that can decrypt them stays in hardware you hold.
 
-Each member's private key lives in one of four **key stores**, strongest first. `--store auto` picks the first one your machine has, and a repository limits which ones its members may use (`sopsy init --require`). The default is hardware only (Secure Enclave and YubiKey); pass `--require software` or `--require any` to allow weaker stores:
+Each member's private key lives in one of four **key stores**, strongest first. `--store auto` picks the first one your machine has, and a repository limits which ones its members may use (`sopsy init --allow-stores`). The default is hardware only (Secure Enclave and YubiKey); pass `--allow-stores software` or `--allow-stores any` to allow weaker stores:
 
 | Store      | Where the key lives                                    | Unlocked by                    | Details                                               |
 | ---------- | ------------------------------------------------------ | ------------------------------ | ----------------------------------------------------- |
@@ -87,7 +87,7 @@ The hardware stores never let the private key out. The two software stores are f
 
 - **Secure Enclave-backed identities** — private key bound to the hardware, protected by Touch ID, and impossible to exfiltrate.
 - **YubiKey-backed identities** — the private key lives in a YubiKey PIV slot (via `age-plugin-yubikey`), works on Intel Macs and Linux, and needs your PIN and a touch to decrypt.
-- **Key stores and repo policy** — Secure Enclave, YubiKey, OS keychain or a plaintext file; `sopsy init --require` decides which ones members may use (default: hardware only).
+- **Key stores and repo policy** — Secure Enclave, YubiKey, OS keychain or a plaintext file; `sopsy init --allow-stores` decides which ones members may use (default: hardware only).
 - **Repository bootstrap** — one command writes `.sops.yaml`, `.env.example`, an encrypted `.env.encrypted`, `.gitignore` safety rules, and `.sopsy.yml`.
 - **`doctor` health checks** — macOS / Apple Silicon / Secure Enclave / Touch ID, the external tools, repo health, and a break-glass reminder.
 - **`edit`** — open an encrypted file in your editor through SOPS, with nicer errors and automatic file-type detection (including `dotenv`).
@@ -216,7 +216,7 @@ brew install sops age age-plugin-se
 > | `keychain` | software  | macOS Keychain / Linux Secret Service, encrypted at rest      |
 > | `file`     | plaintext | `keys.txt` (mode `0600`); last resort, with a loud warning    |
 >
-> `sopsy init` records a hardware-only policy by default (`onchip,exthardware`). `--require yubikey,keychain` (or the groups `onchip`, `exthardware`, `software`) changes that; `--require any` (or `all`) records no restriction. `SOPSY_PRIVATE_KEY_STORE_PRIORITY` reorders or restricts `auto` for you personally. `sopsy doctor` shows what is available here.
+> `sopsy init` records a hardware-only policy by default (`onchip,exthardware`). `--allow-stores yubikey,keychain` (or the groups `onchip`, `exthardware`, `software`) changes that; `--allow-stores any` (or `all`) records no restriction. `SOPSY_PRIVATE_KEY_STORE_PRIORITY` reorders or restricts `auto` for you personally. `sopsy doctor` shows what is available here.
 
 > [!TIP]
 >
@@ -503,7 +503,7 @@ sopsy init -s yubikey --always-new-slot \
 
 - With several YubiKeys plugged in, sopsy asks which one to use (by serial). Without a terminal it stops and asks you to unplug all but one.
 - When the YubiKey already holds age keys, sopsy offers to reuse one. `-a` / `--always-new-slot` skips the question and fills the next free slot.
-- `-r` / `--require` records the allowed stores in `.sopsy.yml` (`key_policy.required`). Non-interactive init without the flag records hardware only (`onchip,exthardware`). `--require any` (or `all`) records no restriction. Members whose key comes from another store are refused by `join`, `recipient add` and `approve`.
+- `-r` / `--allow-stores` records the allowed stores in `.sopsy.yml` (`key_policy.allowed`). Non-interactive init without the flag records hardware only (`onchip,exthardware`). `--allow-stores any` (or `all`) records no restriction. Members whose key comes from another store are refused by `join`, `recipient add` and `approve`.
 
 ### Join with a YubiKey
 
@@ -556,14 +556,14 @@ $ sopsy join "Alex Example" -s keychain        # illustrative output
 
 > [!WARNING]
 >
-> Any program running as you can read a keyring item. Use this store when no hardware store is available. `sopsy init` already records a hardware-only policy by default; pass `--require software` (or `--require any`) only when the repository should accept software keys.
+> Any program running as you can read a keyring item. Use this store when no hardware store is available. `sopsy init` already records a hardware-only policy by default; pass `--allow-stores software` (or `--allow-stores any`) only when the repository should accept software keys.
 
 ## Plaintext key file
 
 The last resort: the age private key sits in your per-user `keys.txt` (see [Where your identity lives](#where-your-identity-lives)), readable only by you (mode `0600`). It needs no extra tools, so it works on any machine, including containers and headless servers, but anyone who can read the file can decrypt.
 
 ```text
-$ sopsy init --require any -s file --no-emergency-keys        # illustrative output, on Linux
+$ sopsy init --allow-stores any -s file --no-emergency-keys        # illustrative output, on Linux
 ╭──────────────────────────────────────────────────────────────╮
 │ Your private key will be a PLAINTEXT file on this machine.   │
 ╰──────────────────────────────────────────────────────────────╯
@@ -571,7 +571,7 @@ $ sopsy init --require any -s file --no-emergency-keys        # illustrative out
 ⚠   yubikey not used: no YubiKey with PIV (CCID) is plugged in
 ```
 
-`auto` reaches this store only when nothing better is available. `SOPSY_PRIVATE_KEY_STORE_PRIORITY` lets you leave it out (for example `enclave,yubikey,keychain`). A repository refuses it by default (`sopsy init` records hardware only); pass `--require software` or `--require any` to allow it.
+`auto` reaches this store only when nothing better is available. `SOPSY_PRIVATE_KEY_STORE_PRIORITY` lets you leave it out (for example `enclave,yubikey,keychain`). A repository refuses it by default (`sopsy init` records hardware only); pass `--allow-stores software` or `--allow-stores any` to allow it.
 
 ## Break-glass keys
 
@@ -666,7 +666,7 @@ Bootstrap an encrypted repository. Verifies the toolchain, acquires an `age` rec
 | `-u`, `--username <NAME>`               | Username of who generated the key, recorded in `.sopsy.yml`. When generating interactively, this is the default offered at the prompt (falls back to `$USER`).  |
 | `-p`, `--age-public-key <age1...>`      | Use an existing `age` public key instead of generating a new identity.                                                                                          |
 | `--no-generate`                         | Skip identity generation. Requires `--age-public-key`, else init errors.                                                                                        |
-| `-r`, `--require <STORES>`              | Key stores members may use, comma-separated: `enclave`, `yubikey`, `keychain`, `file`, or the groups `onchip`, `exthardware`, `software`. `any` or `all` records no restriction. Non-interactive default: hardware only (`onchip,exthardware`). Interactive runs ask, with hardware stores pre-selected. On a machine with no hardware store, init fails rather than weakening the policy — pass `--require software` or `--require any`. |
+| `-r`, `--allow-stores <STORES>`              | Key stores members may use, comma-separated: `enclave`, `yubikey`, `keychain`, `file`, or the groups `onchip`, `exthardware`, `software`. `any` or `all` records no restriction. Non-interactive default: hardware only (`onchip,exthardware`). Interactive runs ask, with hardware stores pre-selected. On a machine with no hardware store, init fails rather than weakening the policy — pass `--allow-stores software` or `--allow-stores any`. |
 | `-s`, `--store <STORE>`                 | Where your private key lives: `auto` (default), `enclave`, `yubikey`, `keychain`, `file`.                                                                       |
 | `-a`, `--always-new-slot`               | Generate a new YubiKey key even if a reusable one exists. Interactive runs list the existing keys (and the YubiKeys, when several are plugged in).              |
 | `-c`, `--yubikey-pin-policy <POLICY>`   | `always`, `cached` (once per session, default) or `never`.                                                                                                      |
@@ -683,8 +683,8 @@ sopsy init
 sopsy init -n alice
 
 # Non-interactive / CI: bring your own age key, never touch the Enclave.
-# `--require any` is required on machines with no hardware store (Linux CI).
-sopsy init -y -n ci-bot --require any \
+# `--allow-stores any` is required on machines with no hardware store (Linux CI).
+sopsy init -y -n ci-bot --allow-stores any \
   --age-public-key age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p \
   --no-generate
 ```
@@ -1144,7 +1144,7 @@ ______________________________________________________________________
 
 ## Scope and roadmap
 
-`sopsy` is **macOS-first** for v1 — the fastest path to a polished experience (though `sopsy check` and CI decryption via `recipient ci` already work on Linux runners). Members can keep their key in the Secure Enclave, a YubiKey, the OS keychain (macOS Keychain or Linux Secret Service), or a plaintext file, and a repository restricts which of those it accepts (`key_policy.required`; hardware only by default). Deliberately **out of scope** until requested: TPM, KMS, 1Password/Vault integration, a native-Rust SOPS, and a Ratatui TUI.
+`sopsy` is **macOS-first** for v1 — the fastest path to a polished experience (though `sopsy check` and CI decryption via `recipient ci` already work on Linux runners). Members can keep their key in the Secure Enclave, a YubiKey, the OS keychain (macOS Keychain or Linux Secret Service), or a plaintext file, and a repository restricts which of those it accepts (`key_policy.allowed`; hardware only by default). Deliberately **out of scope** until requested: TPM, KMS, 1Password/Vault integration, a native-Rust SOPS, and a Ratatui TUI.
 
 ## Further reading
 

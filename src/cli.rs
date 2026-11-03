@@ -152,20 +152,20 @@ Examples:
   sopsy init --store yubikey
 
   # Your key on a YubiKey, and every member must use a YubiKey too
-  sopsy init --store yubikey --require yubikey
+  sopsy init --store yubikey --allow-stores yubikey
 
   # Allow software keys (keychain / file) as well as hardware
-  sopsy init --require onchip,exthardware,software
+  sopsy init --allow-stores onchip,exthardware,software
 
   # No store restriction at all
-  sopsy init --require any
+  sopsy init --allow-stores any
 
   # Register an existing public key instead of generating one
   sopsy init --age-public-key age1… --recipient-name \"Alan Turing\"
 
   # Scripted, on your laptop (no prompts): Secure Enclave key,
   # hardware-only policy, no emergency key
-  sopsy init -y --store enclave --require onchip,exthardware --no-emergency-keys
+  sopsy init -y --store enclave --allow-stores onchip,exthardware --no-emergency-keys
 
   # CI never runs `init`: runners have no Enclave or YubiKey. After init,
   # give CI its own portable key, stored as the `SOPS_AGE_KEY` CI secret
@@ -178,7 +178,7 @@ Examples:
 #[derive(Debug, Args)]
 #[command(mut_arg("store", |a| {
     let help = "Where the admin's (your) private key lives. Applies to the admin only: other \
-                members pick their own store with `sopsy join --store`, limited by `--require`. \
+                members pick their own store with `sopsy join --store`, limited by `--allow-stores`. \
                 `auto` picks the most secure store this machine supports, in the order of \
                 `SOPSY_PRIVATE_KEY_STORE_PRIORITY` (default: enclave, yubikey, keychain, file)";
     a.help(help).long_help(help)
@@ -186,7 +186,7 @@ Examples:
 // `--help` separates flags recorded for everyone using the repository from
 // flags that only shape the admin's own key; within each, most used first.
 #[command(
-    mut_arg("require", |a| a.help_heading(INIT_REPO_HEADING).display_order(1)),
+    mut_arg("allow_stores", |a| a.help_heading(INIT_REPO_HEADING).display_order(1)),
     mut_arg("break_glass", |a| a.help_heading(INIT_REPO_HEADING).display_order(2)),
     mut_arg("no_break_glass", |a| a.help_heading(INIT_REPO_HEADING).display_order(3)),
     mut_arg("store", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(4)),
@@ -225,13 +225,18 @@ pub struct InitArgs {
     pub no_generate: bool,
 
     /// Key stores (or groups) members of this repository may use, recorded as
-    /// `key_policy.required` in `.sopsy.yml`. Comma-separated or repeated:
+    /// `key_policy.allowed` in `.sopsy.yml`. Comma-separated or repeated:
     /// `enclave`, `yubikey`, `keychain`, `file`, or the groups `onchip`,
     /// `exthardware`, `software`. `any` or `all` records no restriction.
     /// Non-interactive default: hardware only (`onchip,exthardware`). Interactive
     /// runs ask, with the hardware stores pre-selected.
-    #[arg(long, short = 'r', value_name = "STORES", value_delimiter = ',')]
-    pub require: Vec<String>,
+    #[arg(
+        long = "allow-stores",
+        short = 'A',
+        value_name = "STORES",
+        value_delimiter = ','
+    )]
+    pub allow_stores: Vec<String>,
 
     /// Where to generate the admin's key.
     #[command(flatten)]
@@ -651,7 +656,7 @@ mod tests {
             "Options:",
             "--force",
             "Repository options",
-            "--require",
+            "--allow-stores",
             "--generate-emergency-keys",
             "--no-emergency-keys",
             "Personal options",
@@ -691,7 +696,7 @@ mod tests {
             "sam",
             "-p",
             "age1sam",
-            "-r",
+            "-A",
             "yubikey,keychain",
             "-s",
             "yubikey",
@@ -710,7 +715,7 @@ mod tests {
         assert_eq!(args.recipient_name.as_deref(), Some("admin"));
         assert_eq!(args.username.as_deref(), Some("sam"));
         assert_eq!(args.public_key.as_deref(), Some("age1sam"));
-        assert_eq!(args.require, ["yubikey", "keychain"]);
+        assert_eq!(args.allow_stores, ["yubikey", "keychain"]);
         assert_eq!(args.key.store, StoreChoice::Yubikey);
         assert!(args.key.new_slot && args.break_glass);
         assert_eq!(args.key.pin_policy, Some(PinPolicy::Once));
@@ -718,13 +723,13 @@ mod tests {
     }
 
     #[test]
-    fn init_accepts_require_any_and_all() {
+    fn init_accepts_allow_stores_any_and_all() {
         for token in ["any", "all", "ANY"] {
-            let cli = Cli::try_parse_from(["sopsy", "init", "--require", token]).unwrap();
+            let cli = Cli::try_parse_from(["sopsy", "init", "--allow-stores", token]).unwrap();
             let Command::Init(args) = cli.command else {
                 panic!("expected init");
             };
-            assert_eq!(args.require, [token]);
+            assert_eq!(args.allow_stores, [token]);
         }
     }
 

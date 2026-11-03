@@ -186,7 +186,7 @@ mod tests {
                     username: None,
                     public_key: None,
                     no_generate: true,
-                    require: vec![],
+                    allow_stores: vec![],
                     key: Default::default(),
                     break_glass: false,
                     no_break_glass: true,

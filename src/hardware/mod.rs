@@ -15,7 +15,7 @@
 //! | `software`    | `keychain`, `file`   |
 //!
 //! `auto` walks that order (or `SOPSY_PRIVATE_KEY_STORE_PRIORITY`), filtered by
-//! the repository's `key_policy.required` allowed set, and picks the first store
+//! the repository's `key_policy.allowed` allowed set, and picks the first store
 //! this machine can use. See `.plans/001-yubikey-support/plan.md`.
 
 pub mod enclave;
