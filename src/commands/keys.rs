@@ -13,7 +13,7 @@ use clap::ValueEnum;
 /// Printed before `age-plugin-yubikey` takes the terminal: its own prompts
 /// ask for a PUK without saying what one is.
 const YUBIKEY_PROMPTS: [&str; 7] = [
-    "Talking to your YubiKey: enter its PIN, and touch it when it blinks.",
+    "Talking to your YubiKey: enter its PIN when asked.",
     "Nothing is shown while you type a PIN or PUK; the plugin prints [hidden] afterwards.",
     "On a YubiKey still at factory settings (PIN 123456), the plugin makes you choose a",
     "  new PIN: 6 to 8 characters (letters, digits or symbols). It also asks for the PUK",
@@ -21,6 +21,15 @@ const YUBIKEY_PROMPTS: [&str; 7] = [
     "  12345678; if your organization set up the key, ask them. The plugin then sets the",
     "  PUK to your new PIN. 3 wrong PUKs lock it for good (only a PIV reset recovers).",
 ];
+
+/// After the PIN, the YubiKey waits for a touch with no further prompt, which
+/// is easy to miss: say so before the plugin runs.
+const YUBIKEY_TOUCH: &str = "After entering your PIN, you must touch the YubiKey (its light blinks); nothing happens until you do.";
+
+/// How to avoid typing the PIN on every decryption.
+const YUBIKEY_PIN_CACHE_NOTE: &str = "> [!NOTE] You can cache the PIN once per session with \
+     `-c cached` (`--yubikey-pin-policy cached`, the default) when the key is made; \
+     `-c always` asks on every decryption.";
 
 /// Choose a store, generate a key in it and, with `persist`, save the local
 /// identity. `label` names the key (recipient name).
@@ -88,6 +97,10 @@ pub(crate) fn generate(
                 for line in &YUBIKEY_PROMPTS[..shown] {
                     ui.info(line);
                 }
+                if options.yubikey.touch_policy != yubikey::TouchPolicy::Never {
+                    ui.info(YUBIKEY_TOUCH);
+                }
+                ui.info(YUBIKEY_PIN_CACHE_NOTE);
             }
             hardware::generate(store, &options, extra_args)?
         }
@@ -204,11 +217,17 @@ pub(crate) fn prompt_for_yubikey_if_needed(ui: &Ui) -> Result<()> {
         .ok()
         .and_then(|repo| crate::config::Config::load_from_dir(&repo).ok());
     match config {
-        Some(config) if needs_yubikey(&config, &user) => wait_for_yubikey(
-            ui,
-            yubikey::device_present,
-            "set SOPS_AGE_KEY to another key",
-        ),
+        Some(config) if needs_yubikey(&config, &user) => {
+            wait_for_yubikey(
+                ui,
+                yubikey::device_present,
+                "set SOPS_AGE_KEY to another key",
+            )?;
+            ui.info("Decrypting with your YubiKey: enter its PIN if asked.");
+            ui.info(YUBIKEY_TOUCH);
+            ui.info(YUBIKEY_PIN_CACHE_NOTE);
+            Ok(())
+        }
         _ => Ok(()),
     }
 }

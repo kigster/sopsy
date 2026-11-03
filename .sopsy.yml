@@ -1,0 +1,16 @@
+recipients:
+- name: admin
+  public_key: age1yubikey1qtm0c4gl5mlplscqvu4vvymnk44tnsaezmhnyf2cvjegylcjea4mk4kzcv7
+  username: kig
+  break_glass: false
+  store: yubikey
+encrypted_globs:
+- '*.encrypted'
+- .env.encrypted
+- config/*.encrypted.yaml
+sops_version: 3.13.2
+join_request_ttl: 72h
+key_policy:
+  allowed:
+  - exthardware
+  - onchip

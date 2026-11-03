@@ -509,6 +509,7 @@ sequenceDiagram
 
 - `sopsy init -s yubikey`, `join -s yubikey` and `recipient keygen -s yubikey` ask before making the key.
 - `sopsy decrypt`, `edit` and re-keying (`approve`, `recipient add` / `remove`) ask when every active key you have in the repository (matched by `$USER`) is on a YubiKey.
+- Before decrypting it reminds you to touch the key after the PIN, and how to cache the PIN.
 - `sopsy encrypt` never asks: it uses only public keys.
 - Unattended runs (`-y`, no terminal) and `SOPS_AGE_KEY` skip the prompt.
 
@@ -524,8 +525,10 @@ $ sopsy init -A exthardware,software -s yubikey
        Yes, set PUK separately.
        No, it's ok to keep them the same, just not the factory value.
 
-  ℹ Talking to your YubiKey: enter its PIN, and touch it when it blinks.
+  ℹ Talking to your YubiKey: enter its PIN when asked.
   ℹ Nothing is shown while you type a PIN or PUK; the plugin prints [hidden] afterwards.
+  ℹ After entering your PIN, you must touch the YubiKey (its light blinks); nothing happens until you do.
+  ℹ > [!NOTE] You can cache the PIN once per session with `-c cached` (`--yubikey-pin-policy cached`, the default) when the key is made; `-c always` asks on every decryption.
 
 🔐 Enter PIN for YubiKey with serial 12345678 (default is 123456): [hidden]
 👆 Please touch the YubiKey
