@@ -18,7 +18,7 @@ use assert_fs::TempDir;
 use serial_test::serial;
 use sopsy::cli::{
     ApproveArgs, JoinArgs, RecipientAddArgs, RecipientBreakGlassArgs, RecipientCiArgs,
-    RecipientCommand, RecipientRemoveArgs,
+    RecipientCommand, RecipientRemoveArgs, RecipientRotateArgs, StoreArgs, StoreChoice,
 };
 use sopsy::commands::{approve, join, recipient};
 use sopsy::config::{Config, MemberState};
@@ -213,10 +213,13 @@ fn keygen_generates_and_prints_enclave_identity() {
         ),
     );
 
+    let keys = dir.path().join("age-keys.txt");
     let output = assert_cmd::Command::cargo_bin("sopsy")
         .unwrap()
         .env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew")
         .env("SOPSY_AGE_PLUGIN_SE_BIN", &plugin)
+        // keygen persists the identity; never let it reach the real keystore.
+        .env("SOPSY_KEYS_FILE", &keys)
         .current_dir(dir.path())
         .args([
             "recipient",
@@ -233,6 +236,8 @@ fn keygen_generates_and_prints_enclave_identity() {
         stdout.contains(fake_pubkey),
         "keygen should print the public key; got:\n{stdout}"
     );
+    let stored = std::fs::read_to_string(&keys).expect("identity persisted");
+    assert!(stored.contains("AGE-PLUGIN-SE-1QFAKEIDENTITY"), "{stored}");
     // The trailing `--` args are forwarded verbatim to age-plugin-se keygen.
     let logged = std::fs::read_to_string(&record).unwrap();
     assert!(
@@ -453,7 +458,7 @@ fn join_empty_name_rejected() {
                 username: None,
                 sopsy_file: None,
                 public_key: Some("age1x".into()),
-                without_touch_id: false,
+                presence: Default::default(),
                 key: Default::default(),
                 age_args: vec![],
             },
@@ -479,7 +484,7 @@ fn join_rejects_duplicate_pending_request() {
                 username: None,
                 sopsy_file: None,
                 public_key: Some("age1bobnew".into()),
-                without_touch_id: false,
+                presence: Default::default(),
                 key: Default::default(),
                 age_args: vec![],
             },
@@ -502,7 +507,7 @@ fn join_rejects_duplicate_public_key() {
                 username: None,
                 sopsy_file: None,
                 public_key: Some("age1alice".into()),
-                without_touch_id: false,
+                presence: Default::default(),
                 key: Default::default(),
                 age_args: vec![],
             },
@@ -530,7 +535,7 @@ fn join_with_sopsy_file_targets_custom_path() {
             username: None,
             sopsy_file: Some(file.clone()),
             public_key: Some("age1bobkey".into()),
-            without_touch_id: false,
+            presence: Default::default(),
             key: Default::default(),
             age_args: vec![],
         },
@@ -552,7 +557,7 @@ fn join_with_missing_sopsy_file_errors() {
             username: None,
             sopsy_file: Some("/nonexistent/dir/custom.yml".into()),
             public_key: Some("age1bobkey".into()),
-            without_touch_id: false,
+            presence: Default::default(),
             key: Default::default(),
             age_args: vec![],
         },
@@ -996,7 +1001,7 @@ fn join_records_pending_member_without_granting_access() {
             username: Some("bob".into()),
             sopsy_file: None,
             public_key: Some(key_b.public.clone()),
-            without_touch_id: false,
+            presence: Default::default(),
             key: Default::default(),
             age_args: vec![],
         },
@@ -1037,7 +1042,7 @@ fn join_rejects_existing_member() {
                 username: None,
                 sopsy_file: None,
                 public_key: Some("age1x".into()),
-                without_touch_id: false,
+                presence: Default::default(),
                 key: Default::default(),
                 age_args: vec![],
             },
@@ -1062,7 +1067,7 @@ fn approve_activates_pending_member_and_rekeys() {
             username: None,
             sopsy_file: None,
             public_key: Some(key_b.public.clone()),
-            without_touch_id: false,
+            presence: Default::default(),
             key: Default::default(),
             age_args: vec![],
         },
@@ -1292,7 +1297,7 @@ fn join_then_batch_approve_handles_multiword_names() {
                     username: None,
                     sopsy_file: None,
                     public_key: Some(key.into()),
-                    without_touch_id: false,
+                    presence: Default::default(),
                     key: Default::default(),
                     age_args: vec![],
                 },
@@ -1342,7 +1347,7 @@ fn join_defaults_username_to_system_user() {
                 username: None,
                 sopsy_file: None,
                 public_key: Some("age1konstantin".into()),
-                without_touch_id: false,
+                presence: Default::default(),
                 key: Default::default(),
                 age_args: vec![],
             },
@@ -2351,4 +2356,141 @@ fn updatekeys_failure_surfaces_process_error() {
         std::env::remove_var("SOPSY_SOPS_BIN");
     }
     restore_cwd(&original);
+}
+
+// ---------------------------------------------------------------------------
+// `recipient rotate` — replace a key under the same name, against real sops.
+// ---------------------------------------------------------------------------
+
+/// The fixture's members have no recorded `username`, so these runs skip the
+/// owner check unless a test says otherwise.
+fn rotate_args(name: &str) -> RecipientRotateArgs {
+    RecipientRotateArgs {
+        name: Some(name.to_string()),
+        key: StoreArgs {
+            store: StoreChoice::File,
+            ..StoreArgs::default()
+        },
+        presence: Default::default(),
+        new_data_key: false,
+        skip_owner_check: true,
+        age_args: vec![],
+    }
+}
+
+fn rotate_command(name: &str) -> RecipientCommand {
+    RecipientCommand::Rotate(rotate_args(name))
+}
+
+/// The encrypted value line for `key` in a dotenv sops file.
+fn ciphertext_of(file: &Path, key: &str) -> String {
+    std::fs::read_to_string(file)
+        .unwrap()
+        .lines()
+        .find(|l| l.starts_with(&format!("{key}=")))
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+#[serial]
+fn rotate_swaps_the_key_and_rekeys_the_secrets() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let (repo, key_a, _key_b) = setup_repo(dir.path());
+
+    // The member's keys file starts with only the old key.
+    let keys = repo.join("member-keys.txt");
+    std::fs::copy(&key_a.file, &keys).unwrap();
+    set_age_key_file(None);
+    set_env("SOPSY_KEYS_FILE", Some(&keys));
+
+    let before = ciphertext_of(&repo.join(".env.encrypted"), "FOO");
+    let result = recipient::run(&test_ui(), &rotate_command("original"));
+
+    let after = ciphertext_of(&repo.join(".env.encrypted"), "FOO");
+    let config = Config::load_from_dir(&repo).unwrap();
+    let member = config.recipient("original").unwrap().clone();
+    let sops_yaml = std::fs::read_to_string(repo.join(".sops.yaml")).unwrap();
+    let with_new = sops::decrypt(&repo.join(".env.encrypted"), FileType::Dotenv);
+    set_env("SOPSY_KEYS_FILE", Some(&key_a.file));
+    let with_old = sops::decrypt(&repo.join(".env.encrypted"), FileType::Dotenv);
+    set_env("SOPSY_KEYS_FILE", None);
+    restore_cwd(&original);
+
+    result.unwrap();
+    assert_ne!(member.public_key, key_a.public, "the key must change");
+    assert_eq!(config.recipients.len(), 1, "same member, no new entry");
+    assert!(sops_yaml.contains(&member.public_key), "{sops_yaml}");
+    assert!(!sops_yaml.contains(&key_a.public), "{sops_yaml}");
+    assert!(with_new.unwrap().contains("FOO=bar"));
+    assert!(with_old.is_err(), "the old key must no longer decrypt");
+    assert_eq!(before, after, "without --new-data-key the data key is kept");
+}
+
+#[test]
+#[serial]
+fn rotate_with_new_data_key_reencrypts_the_values() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let (repo, key_a, _key_b) = setup_repo(dir.path());
+    let keys = repo.join("member-keys.txt");
+    std::fs::copy(&key_a.file, &keys).unwrap();
+    set_age_key_file(None);
+    set_env("SOPSY_KEYS_FILE", Some(&keys));
+
+    let before = ciphertext_of(&repo.join(".env.encrypted"), "FOO");
+    let args = RecipientRotateArgs {
+        new_data_key: true,
+        ..rotate_args("original")
+    };
+    let result = recipient::run(&test_ui(), &RecipientCommand::Rotate(args));
+    let after = ciphertext_of(&repo.join(".env.encrypted"), "FOO");
+    let decrypted = sops::decrypt(&repo.join(".env.encrypted"), FileType::Dotenv);
+    set_env("SOPSY_KEYS_FILE", None);
+    restore_cwd(&original);
+
+    result.unwrap();
+    assert_ne!(before, after, "a new data key re-encrypts every value");
+    assert!(decrypted.unwrap().contains("FOO=bar"));
+}
+
+#[test]
+#[serial]
+fn rotate_refuses_a_key_with_no_recorded_owner() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let (repo, _key_a, _key_b) = setup_repo(dir.path());
+    let before = Config::load_from_dir(&repo).unwrap();
+    let args = RecipientRotateArgs {
+        skip_owner_check: false,
+        ..rotate_args("original")
+    };
+    let result = recipient::run(&test_ui(), &RecipientCommand::Rotate(args));
+    let after = Config::load_from_dir(&repo).unwrap();
+    restore_cwd(&original);
+
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("no recorded owner"), "{err}");
+    assert_eq!(
+        before.recipient("original").unwrap().public_key,
+        after.recipient("original").unwrap().public_key
+    );
+}
+
+#[test]
+#[serial]
+fn rotate_refuses_the_break_glass_key() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let (repo, _key_a, key_b) = setup_repo(dir.path());
+    let add = recipient::run(&test_ui(), &add_command("vault", &key_b.public, true, true));
+    let result = recipient::run(&test_ui(), &rotate_command("vault"));
+    let config = Config::load_from_dir(&repo).unwrap();
+    restore_cwd(&original);
+
+    add.unwrap();
+    let err = result.unwrap_err();
+    assert!(err.to_string().contains("break-glass"), "{err}");
+    assert_eq!(config.recipient("vault").unwrap().public_key, key_b.public);
 }

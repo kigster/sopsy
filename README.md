@@ -26,6 +26,7 @@ ______________________________________________________________________
 - [Architecture](#architecture)
 - [How encryption flows](#how-encryption-flows)
 - [How sopsy picks a key store](#how-sopsy-picks-a-key-store)
+- [Team scenarios](#team-scenarios)
 - [The Secure Enclave security model](#the-secure-enclave-security-model)
   - [Where your identity lives](#where-your-identity-lives)
   - [Console session, Touch ID, and one-laptop testing](#console-session-touch-id-and-one-laptop-testing)
@@ -428,6 +429,109 @@ The allow list is a soft guardrail: it lives in `.sopsy.yml` like everything els
 
 ______________________________________________________________________
 
+## Team scenarios
+
+One team, four people:
+
+- **Ada**, the VP of Engineering, sets the policy.
+- **Alan** prefers a YubiKey.
+- **Grace** prefers the Secure Enclave on her MacBook.
+- **Dennis** works on Linux and does not want hardware keys.
+
+Ada's `--allow-stores` choice is the one that decides whether Dennis can join at all, and with what.
+
+### 1. Ada initializes the repository and stores the break-glass key
+
+```bash
+sopsy init -A onchip,exthardware     # hardware only: Enclave or YubiKey (unattended runs default to it; interactive runs ask)
+```
+
+- Ada's own key goes in the best store her Mac has (`-s yubikey` to choose hers).
+- Interactive `init` also creates the **break-glass** key. Ada saves it in the team vault (for example 1Password) and presses ENTER; sopsy deletes the local copy.
+- CI never runs `init`. It gets its own portable key, stored as the `SOPS_AGE_KEY` CI secret: `sopsy recipient ci`.
+- She commits `.sops.yaml`, `.sopsy.yml`, `.sopsy.sha` and `.env.encrypted`.
+
+The policy is now committed: every member's key must live in one of the allowed stores, and their `auto` choice follows Ada's order within each tier.
+
+### 2. Alan joins with a YubiKey
+
+```bash
+sopsy join "Alan Turing" -s yubikey -c cached -b cached
+```
+
+- `-c cached`: the PIN is asked once per session, until the YubiKey is unplugged.
+- `-b cached`: after the PIN, a touch is needed, then not again for 15 seconds.
+- He pushes the pending entry; any active member (Ada) runs `sopsy approve "Alan Turing"`.
+
+### 3. Grace joins with the Secure Enclave
+
+```bash
+sopsy join "Grace Hopper" -s enclave
+```
+
+Every decryption asks for Touch ID. That is fine for an occasional `sopsy edit`, and a problem once tools decrypt on their own: see [scenario 5](#5-caching-many-worktrees-many-prompts).
+
+### 4. Dennis joins from Linux: Ada's policy decides
+
+| Ada ran `init` with | Dennis runs | Result |
+| --- | --- | --- |
+| `-A onchip,exthardware` (default) | `sopsy join "Dennis Ritchie"` | Refused: no allowed store works on his machine. He needs a YubiKey, or Ada widens the policy. |
+| `-A onchip,exthardware,keychain` | `sopsy join "Dennis Ritchie" -s keychain` | His key is kept in the Secret Service keyring (GNOME Keyring, KWallet), encrypted at rest. No plaintext key on disk. |
+| `-A any` (or adding `file`) | `sopsy join "Dennis Ritchie" -s file` | His key is a plaintext file in `keys.txt`. Anyone who can read his home directory can decrypt every secret. |
+
+The repository order never puts a weaker store first: even under `-A any`, Grace's and Alan's `auto` still picks hardware. Changing the policy later means editing `key_policy.allowed` in `.sopsy.yml` through a reviewed pull request (`sopsy doctor` then refreshes the checksum).
+
+### 5. Caching: many worktrees, many prompts
+
+Grace's team works in git worktrees, and each worktree's `.envrc` runs `sopsy decrypt`. Every new worktree, every `direnv reload` and every new shell means another Touch ID, which is not workable. What each key asks for on every decryption:
+
+| Key | Asks for | Fix |
+| --- | --- | --- |
+| Enclave (default) | Touch ID, every time. `age-plugin-se` has no cache. | `sopsy recipient rotate -s enclave -t`, or the worktree script below. |
+| Enclave, made with `-t` | Nothing. The key still never leaves the chip, but any program running as Grace can decrypt silently. | |
+| YubiKey `-c cached -b cached` | PIN once per session; a touch when 15 seconds have passed since the last one. | `-b never` to drop the touch. |
+| YubiKey `-c cached -b never` (or `-t`) | PIN once per session, then nothing until it is unplugged. | |
+
+PIN and touch policies are fixed when a key is generated. To change them, swap the key in place; the secrets are re-encrypted for the new key:
+
+```bash
+sopsy recipient rotate -s enclave -t                # Grace: Enclave key without Touch ID
+sopsy recipient rotate -s yubikey -c cached -b never   # Alan: PIN once per session, no touch
+```
+
+#### A worktree script that decrypts once
+
+If you keep Touch ID, decrypt once per worktree instead of once per shell. This script creates the worktree and gives it a plaintext `.env` (gitignored, mode 0600): copied from the main checkout when that copy is current, so there is no prompt at all, or decrypted once otherwise.
+
+```bash
+#!/usr/bin/env bash
+# bin/worktree-create <branch> [path]: a new worktree with its secrets, at most one decryption.
+set -euo pipefail
+branch="${1:?usage: worktree-create <branch> [path]}"
+main="$(git rev-parse --show-toplevel)"
+path="${2:-$main/../$(basename "$main")-${branch//\//-}}"
+
+git worktree add -b "$branch" "$path"
+if [[ -f "$main/.env" && ! "$main/.env.encrypted" -nt "$main/.env" ]]; then
+  install -m 600 "$main/.env" "$path/.env"        # current copy: no prompt
+else
+  (cd "$path" && umask 077 && sopsy decrypt .env.encrypted -o .env)   # one Touch ID / PIN
+fi
+direnv allow "$path" 2>/dev/null || true
+```
+
+Pair it with an `.envrc` that uses the local `.env` while it is current, and decrypts only when `.env.encrypted` is newer:
+
+```bash
+if [[ -f .env && ! .env.encrypted -nt .env ]]; then
+  dotenv .env
+elif [[ -f .env.encrypted ]]; then
+  eval "$(sopsy decrypt .env.encrypted | sed '/^#.*/d; /^$/d; s/^/export /g')"
+fi
+```
+
+The trade-off: each worktree holds a plaintext `.env` until it is removed. That is the price of keeping Touch ID; without the plaintext copies, use a key without a presence gate, as above.
+
 ## The Secure Enclave security model
 
 Each developer owns an individual key pair. On macOS Apple Silicon the private key is generated *inside* the Secure Enclave and is bound to that hardware — it cannot be read, copied, or exported by anyone or anything. Only the **public recipient** is ever shared or committed.
@@ -508,6 +612,7 @@ sequenceDiagram
 **Forgot to plug it in?** At a terminal, sopsy asks you to insert the YubiKey and waits, instead of failing:
 
 - `sopsy init -s yubikey`, `join -s yubikey` and `recipient keygen -s yubikey` ask before making the key.
+- With `--store auto` and the YubiKey first in your order, sopsy asks you to insert it **or press `e`** to use the Secure Enclave hardware chip instead (`k` for the keychain, `f` for a key file, whichever comes next and works). Someone without their YubiKey is not stuck.
 - `sopsy decrypt`, `edit` and re-keying (`approve`, `recipient add` / `remove`) ask when every active key you have in the repository (matched by `$USER`) is on a YubiKey.
 - Before decrypting it reminds you to touch the key after the PIN, and how to cache the PIN.
 - `sopsy encrypt` never asks: it uses only public keys.
@@ -528,7 +633,7 @@ $ sopsy init -A exthardware,software -s yubikey
   ℹ Talking to your YubiKey: enter its PIN when asked.
   ℹ Nothing is shown while you type a PIN or PUK; the plugin prints [hidden] afterwards.
   ℹ After entering your PIN, you must touch the YubiKey (its light blinks); nothing happens until you do.
-  ℹ > [!NOTE] To be asked for the PIN only once per session, generate your YubiKey key with `-c cached` (`--yubikey-pin-policy cached`, the default) on `sopsy init`, `join` or `recipient keygen`. The policy is fixed in the key; changing it means generating a new one.
+  ℹ > [!NOTE] To be asked for the PIN only once per session, generate your YubiKey key with `-c cached` (`--yubikey-pin-policy cached`, the default) on `sopsy init`, `join` or `recipient keygen`. The policy is fixed in the key; to change it, `sopsy recipient rotate -s yubikey -c cached` swaps in a new key.
 
 🔐 Enter PIN for YubiKey with serial 12345678 (default is 123456): [hidden]
 👆 Please touch the YubiKey
@@ -571,6 +676,18 @@ API_KEY=…
 ```
 
 To have every member's `auto` prefer a plugged-in YubiKey over the Secure Enclave, list it first when you create the repository: `sopsy init --allow-stores yubikey,enclave`. For just yourself, set your own order: `export SOPSY_PRIVATE_KEY_STORE_PRIORITY=yubikey,enclave`.
+
+### Several keys on one YubiKey
+
+A YubiKey holds up to 20 age keys, one per PIV slot, each with its own PIN and touch policy. Which one decrypts a repository depends on which public key the repository lists, so switching keys means switching the recipient:
+
+```bash
+sopsy yubikey --list                              # every key on the YubiKey: slot, PIN and touch policy
+sopsy recipient rotate -s yubikey -c cached       # pick an existing key or make a new one; re-keys the secrets
+sopsy recipient rotate -s yubikey --yubikey-slot 3   # scripted: use the key in slot 3
+```
+
+`rotate` keeps your name, username and approval, swaps the public key in `.sopsy.yml` and `.sops.yaml`, and re-wraps every secret's data key for the new key. The old key is no longer a recipient; its line in `keys.txt` is harmless. Switching keys is all this is for: see [`recipient rotate`](#recipient-rotate) when a key was lost or stolen.
 
 ### PIN, PUK and touch
 
@@ -732,6 +849,7 @@ Before anything else, `init` installs missing supporting tools (the `sopsy deps`
 | `-c`, `--yubikey-pin-policy <POLICY>` | `always`, `cached` (once per session, until the key is unplugged; default) or `never`. |
 | `-b`, `--yubikey-touch-policy <POLICY>` | `always`, `cached` (15 seconds, fixed by the YubiKey; default) or `never`. |
 | `-a`, `--always-new-slot` | Generate a new YubiKey key even if a reusable one exists. Interactive runs list the existing keys (and the YubiKeys, when several are plugged in). |
+| `--yubikey-slot <SLOT>` | Use the existing key in this slot (1–20) instead of asking. `sopsy yubikey --list` shows the slots. |
 
 **Other options:**
 
@@ -907,12 +1025,37 @@ sopsy recipient list
 
 #### `recipient keygen`
 
-Generate a fresh Secure Enclave identity and print its public key + identity **without** touching any config (use the printed key with `recipient add`). Trailing args after `--` are forwarded to `age-plugin-se keygen`.
+Generate a fresh identity in any store (`-s enclave|yubikey|keychain|file`) and print its public key, without changing the repository (register the key with `recipient add`, or use `recipient rotate` to swap it in). The identity is saved to your `keys.txt`, so `sops` finds it: for the Enclave and YubiKey that is a non-secret handle to the device. Trailing args after `--` are forwarded to the store's plugin.
 
 ```bash
 sopsy recipient keygen
+sopsy recipient keygen -s yubikey -c cached -a
 sopsy recipient keygen -- --access-control=any-biometry-or-passcode
 ```
+
+#### `recipient rotate`
+
+Replace your key with a new one under the same name, and re-wrap every secret's data key for it. Use it to move to another store or YubiKey slot, or to change a YubiKey's PIN or touch policy. Takes the same key options as `keygen`; with a YubiKey, interactive runs offer the keys already on it.
+
+| Argument / Flag | Description |
+| --- | --- |
+| `[NAME]` | The recipient to rotate. Defaults to your own key (matched by `$USER`); with several, interactive runs ask. |
+| `--new-data-key` | Also re-encrypt every secret under a new data key (`sops rotate`). Use it when the old key was lost or stolen. |
+| `--skip-owner-check` | Rotate a key whose owner is unknown: no `username` in `.sopsy.yml` (older configs), or `$USER` unset. |
+
+> [!CAUTION]
+>
+> On its own, `rotate` only changes **who can unwrap** the data key; the data key stays the same. Whoever holds the old key can still read the current files and every version in git history. After a lost or stolen key:
+>
+> 1. `sopsy recipient rotate --new-data-key`, so the current files use a data key the old one never saw.
+> 2. Change the secret values themselves: the old ciphertext in git history still opens with the old key.
+
+```bash
+sopsy recipient rotate -s yubikey -c cached   # a YubiKey key that asks for the PIN once per session
+sopsy recipient rotate -s enclave             # move from a YubiKey to the Secure Enclave
+```
+
+Only your own key can be rotated (`username` must match `$USER`; when either is unknown sopsy refuses unless `--skip-owner-check` is passed), and not the break-glass key: make a new one with `recipient break-glass`, then remove the old one. A failed re-encryption rolls the configuration back.
 
 #### `recipient break-glass`
 
@@ -1049,6 +1192,16 @@ sopsy check && echo "secrets hygiene: OK"
 > If `.sopsy.yml` is absent, the repository is not sopsy-managed, so `check` prints a notice and exits **0** rather than failing unrelated repositories.
 
 ______________________________________________________________________
+
+### `sopsy yubikey` / `sopsy enclave`
+
+Run `age-plugin-yubikey` or `age-plugin-se` with your arguments, passed through unchanged, so you never need the plugin's own name. `--help` shows the plugin's help.
+
+```bash
+sopsy yubikey --list        # the age keys on your YubiKey: slot, name, PIN and touch policy
+sopsy yubikey --identity    # print the identity lines (non-secret handles)
+sopsy enclave --help        # age-plugin-se's own help
+```
 
 ### `sopsy deps`
 

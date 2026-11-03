@@ -245,10 +245,10 @@ fn truncate(row: &str, width: usize) -> String {
 }
 
 /// Leaves raw mode and shows the cursor again, even on an early return.
-struct RawMode;
+pub(crate) struct RawMode;
 
 impl RawMode {
-    fn enter() -> io::Result<Self> {
+    pub(crate) fn enter() -> io::Result<Self> {
         terminal::enable_raw_mode()?;
         queue!(io::stderr(), cursor::Hide)?;
         Ok(Self)

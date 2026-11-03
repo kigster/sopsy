@@ -16,6 +16,8 @@ All commands are implemented:
 - `init`, `doctor`, `edit`, `join`, `approve`
 - `recipient` (`add` / `remove` / `list` / `keygen` / `break-glass` / `ci`)
 - `encrypt` / `decrypt`, which write to stdout by default for direnv and wrappers. `secrets encrypt|decrypt` is a hidden alias for both.
+- `recipient rotate`: swap your key for a new one under the same name and re-key
+- `yubikey` / `enclave`: pass arguments straight to `age-plugin-yubikey` / `age-plugin-se`
 - `types` (`list-supported-types` is a hidden alias), `check`, `deps`, `completion`
 
 `recipient break-glass` and `recipient ci` share one portable-key ceremony, `portable_key_ceremony` in `commands/recipient.rs`:
@@ -129,6 +131,7 @@ When changing membership or rotation:
 ## Product principles
 
 - **sopsy does not replace SOPS.** It orchestrates and enhances it; SOPS stays the encryption engine. That keeps the scope crisp and the maintenance burden low.
+- **sopsy is the UX for every tool it wraps** (`sops`, `age`, `age-plugin-se`, `age-plugin-yubikey`, `ykman`). Messages, help and docs point to `sopsy …` commands, not the underlying binaries; where a user needs a tool directly, sopsy exposes it (`sopsy yubikey`, `sopsy enclave`).
 - **Opinionated, safe defaults.** The right thing is the easy thing: plaintext `.env` is gitignored automatically, and `sopsy check` is the CI gate.
 - **Fully scriptable.** Every interactive prompt has an equivalent flag, so one tool serves a human at a terminal and an unattended CI job.
 - **Great diagnostics.** `sopsy doctor` output should be something people paste straight into a GitHub issue.

@@ -430,6 +430,12 @@ fn run_interactive(args: &[String]) -> Result<Output> {
     Ok(output)
 }
 
+/// Run the plugin with `args` on the user's terminal, for `sopsy yubikey`.
+pub fn passthrough(args: &[String]) -> Result<()> {
+    ensure_available()?;
+    super::passthrough(PLUGIN_BIN, plugin_bin(), args)
+}
+
 fn plugin_command(args: &[String]) -> Command {
     let mut command = Command::new(plugin_bin());
     command.args(args).env("LC_ALL", "C").env("LANG", "C");

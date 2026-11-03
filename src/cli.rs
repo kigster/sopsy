@@ -133,6 +133,29 @@ pub enum Command {
 
     /// Generate a shell completion script (bash, zsh, fish, …).
     Completion(CompletionArgs),
+
+    /// Run `age-plugin-yubikey` with the given arguments, passed through
+    /// unchanged: `sopsy yubikey --list`, `sopsy yubikey --identity`.
+    #[command(disable_help_flag = true)]
+    Yubikey(PluginArgs),
+
+    /// Run `age-plugin-se` (Secure Enclave) with the given arguments, passed
+    /// through unchanged: `sopsy enclave --help`, `sopsy enclave keygen`.
+    #[command(disable_help_flag = true)]
+    Enclave(PluginArgs),
+}
+
+/// Arguments for `sopsy yubikey` and `sopsy enclave`.
+#[derive(Debug, Args)]
+pub struct PluginArgs {
+    /// Arguments for the plugin, passed through unchanged (`--help` shows the
+    /// plugin's own help).
+    #[arg(
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        value_name = "ARGS"
+    )]
+    pub args: Vec<String>,
 }
 
 /// Heading for where a key is generated (`--store`, `--age-public-key`, …).
@@ -203,6 +226,7 @@ Examples:
     mut_arg("pin_policy", |a| a.display_order(9)),
     mut_arg("touch_policy", |a| a.display_order(10)),
     mut_arg("new_slot", |a| a.display_order(11)),
+    mut_arg("yubikey_slot", |a| a.display_order(11)),
     mut_arg("skip_deps", |a| a.display_order(98)),
     mut_arg("force", |a| a.display_order(12)),
 )]
@@ -308,12 +332,9 @@ pub struct JoinArgs {
     )]
     pub public_key: Option<String>,
 
-    /// Generate the key without a presence gate: for the Secure Enclave,
-    /// `--access-control none` (no Touch ID / passcode); for a YubiKey, touch
-    /// policy `never` (the PIN is kept). The private key still never leaves the
-    /// device. Rejected for software stores. Ignored with `--age-public-key`.
-    #[arg(short = 't', long = "without-touch-id", help_heading = KEY_HEADING)]
-    pub without_touch_id: bool,
+    /// Whether the new key asks for presence (Touch ID or a YubiKey touch).
+    #[command(flatten)]
+    pub presence: PresenceArgs,
 
     /// Where to generate your key.
     #[command(flatten)]
@@ -367,11 +388,6 @@ pub struct StoreArgs {
     #[arg(long, value_name = "SERIAL", hide = true)]
     pub yubikey_serial: Option<u32>,
 
-    /// YubiKey PIV slot (1-20), for scripts; interactive runs offer the keys
-    /// already on the YubiKey.
-    #[arg(long, value_name = "SLOT", hide = true, value_parser = clap::value_parser!(u8).range(1..=20))]
-    pub yubikey_slot: Option<u8>,
-
     /// Always generate a new YubiKey key instead of reusing an existing one.
     #[arg(long = "always-new-slot", short = 'a', alias = "new-slot", help_heading = YUBIKEY_HEADING,
         display_order = 22)]
@@ -400,6 +416,13 @@ pub struct StoreArgs {
         display_order = 21,
     )]
     pub touch_policy: Option<TouchPolicy>,
+
+    /// Use the existing key in this YubiKey slot (1-20) instead of asking;
+    /// `sopsy yubikey --list` shows the slots. Interactive runs offer the keys
+    /// already on the YubiKey.
+    #[arg(long, value_name = "SLOT", help_heading = YUBIKEY_HEADING, display_order = 23,
+        value_parser = clap::value_parser!(u8).range(1..=20))]
+    pub yubikey_slot: Option<u8>,
 }
 
 /// Arguments for `sopsy approve`.
@@ -498,12 +521,29 @@ pub enum RecipientCommand {
     /// print its public key.
     Keygen(RecipientKeygenArgs),
 
+    /// Replace your key with a new one under the same name, and re-encrypt
+    /// secrets. Use it to move to a new store or YubiKey slot, or to change a
+    /// YubiKey's PIN or touch policy.
+    Rotate(RecipientRotateArgs),
+
     /// Generate a portable break-glass emergency key for offline storage.
     BreakGlass(RecipientBreakGlassArgs),
 
     /// Generate a portable CI decryption key and register it as a recipient
     /// (store the private half as a CI secret named `SOPS_AGE_KEY`).
     Ci(RecipientCiArgs),
+}
+
+/// The presence-gate flag shared by every command that generates a hardware key
+/// (`join`, `recipient keygen`, `recipient rotate`).
+#[derive(Debug, Default, Args)]
+pub struct PresenceArgs {
+    /// Generate the key without a presence gate: for the Secure Enclave,
+    /// `--access-control none` (no Touch ID / passcode); for a YubiKey, touch
+    /// policy `never` (the PIN is kept). The private key still never leaves the
+    /// device. Rejected for software stores, and ignored with `--age-public-key`.
+    #[arg(short = 't', long = "without-touch-id", help_heading = KEY_HEADING)]
+    pub without_touch_id: bool,
 }
 
 /// Arguments for `sopsy recipient keygen`.
@@ -513,8 +553,44 @@ pub struct RecipientKeygenArgs {
     #[command(flatten)]
     pub key: StoreArgs,
 
+    /// Whether the new key asks for presence (Touch ID or a YubiKey touch).
+    #[command(flatten)]
+    pub presence: PresenceArgs,
+
     /// Extra arguments forwarded verbatim to the store's plugin after `--`
     /// (e.g. `--access-control=any-biometry-or-passcode` for `age-plugin-se`).
+    #[arg(last = true)]
+    pub age_args: Vec<String>,
+}
+
+/// Arguments for `sopsy recipient rotate`.
+#[derive(Debug, Args)]
+pub struct RecipientRotateArgs {
+    /// The recipient to rotate. Defaults to your own key (matched by `$USER`);
+    /// with several, interactive runs ask which one.
+    pub name: Option<String>,
+
+    /// Where to generate the new key. With a YubiKey, interactive runs offer
+    /// the keys already on it, so you can switch to one of them.
+    #[command(flatten)]
+    pub key: StoreArgs,
+
+    /// Whether the new key asks for presence (Touch ID or a YubiKey touch).
+    #[command(flatten)]
+    pub presence: PresenceArgs,
+
+    /// Also re-encrypt every secret under a new data key (`sops rotate`).
+    /// Without it only the recipient changes, and the old key can still read
+    /// the files. Use it when the old key was lost or stolen.
+    #[arg(long)]
+    pub new_data_key: bool,
+
+    /// Rotate even when the key's owner is unknown (no `username` recorded in
+    /// `.sopsy.yml`, or `$USER` unset). Only for a key you know is yours.
+    #[arg(long)]
+    pub skip_owner_check: bool,
+
+    /// Extra arguments forwarded verbatim to the store's plugin after `--`.
     #[arg(last = true)]
     pub age_args: Vec<String>,
 }
@@ -831,10 +907,10 @@ mod tests {
             vec!["sopsy", "join", "annie", "-t"],
         ] {
             let cli = Cli::try_parse_from(argv).unwrap();
-            assert!(matches!(cli.command, Command::Join(a) if a.without_touch_id));
+            assert!(matches!(cli.command, Command::Join(a) if a.presence.without_touch_id));
         }
         let cli = Cli::try_parse_from(["sopsy", "join", "annie"]).unwrap();
-        assert!(matches!(cli.command, Command::Join(a) if !a.without_touch_id));
+        assert!(matches!(cli.command, Command::Join(a) if !a.presence.without_touch_id));
     }
 
     #[test]

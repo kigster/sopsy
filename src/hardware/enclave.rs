@@ -33,6 +33,12 @@ fn plugin_bin() -> OsString {
     std::env::var_os(PLUGIN_BIN_ENV).unwrap_or_else(|| OsString::from(PLUGIN_BIN))
 }
 
+/// Run the plugin with `args` on the user's terminal, for `sopsy enclave`.
+pub fn passthrough(args: &[String]) -> Result<()> {
+    ensure_available()?;
+    super::passthrough(PLUGIN_BIN, plugin_bin(), args)
+}
+
 /// Verify the `age-plugin-se` binary is available on `PATH` (or via
 /// [`PLUGIN_BIN_ENV`]), returning a friendly error otherwise.
 pub fn ensure_available() -> Result<()> {
