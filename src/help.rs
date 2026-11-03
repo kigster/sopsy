@@ -11,6 +11,8 @@
 //!   other entries, in bold bright yellow;
 //! - command names render in bold blue;
 //! - option flags and argument placeholders render in bold magenta;
+//! - custom option groups (e.g. `Personal options (affect only you):`) are
+//!   treated like `Options:`; only the part before ` (` is upper-cased;
 //! - in an `Examples:` section (e.g. `sopsy init --help`), `#` comments render
 //!   in magenta and commands in bold yellow.
 //!
@@ -75,6 +77,16 @@ pub fn render(help: &str, color: bool) -> String {
         } else if line == "Examples:" {
             section = Section::Examples;
             out.push_str(&paint("EXAMPLES:", heading, color));
+        } else if section != Section::None && is_custom_heading(line) {
+            section = Section::Options;
+            let (name, note) = line
+                .split_once(" (")
+                .map_or((line, ""), |(n, _)| (n, &line[n.len()..]));
+            out.push_str(&paint(
+                &format!("{}{note}", name.to_uppercase()),
+                heading,
+                color,
+            ));
         } else if section == Section::Examples && !line.trim().is_empty() {
             let indent_len = line.len() - line.trim_start().len();
             let (indent, body) = line.split_at(indent_len);
@@ -97,6 +109,11 @@ pub fn render(help: &str, color: bool) -> String {
         out.push('\n');
     }
     out
+}
+
+/// A column-zero `Some heading:` line naming a clap `help_heading` group.
+fn is_custom_heading(line: &str) -> bool {
+    !line.starts_with(' ') && line.ends_with(':')
 }
 
 /// Colorize one indented line according to the section it belongs to.
@@ -248,6 +265,19 @@ Options:
             no_color.contains("35m") || no_color.contains("35;"),
             "{no_color}"
         );
+    }
+
+    #[test]
+    fn custom_option_groups_are_recased_and_their_flags_styled() {
+        let sample = "Usage: sopsy init\n\nOptions:\n  -h, --help  Print help\n\nPersonal options (affect only you):\n  -s, --store <STORE>  Where\n";
+        let plain = render(sample, false);
+        assert!(
+            plain.contains("PERSONAL OPTIONS (affect only you):"),
+            "{plain}"
+        );
+        let colored = render(sample, true);
+        let flag = colored.lines().find(|l| l.contains("--store")).unwrap();
+        assert!(flag.contains("35"), "group flags should be magenta: {flag}");
     }
 
     #[test]

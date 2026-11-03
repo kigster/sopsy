@@ -40,6 +40,7 @@ pub struct Cli {
 
 /// Flags available on every subcommand.
 #[derive(Debug, Args, Clone)]
+#[command(next_help_heading = "Global options")]
 pub struct GlobalArgs {
     /// Disable all interactive prompts; fail instead of asking. Also enabled
     /// automatically when stdout is not a TTY. Aliased as `--yes`/`-y`.
@@ -134,6 +135,12 @@ pub enum Command {
     Completion(CompletionArgs),
 }
 
+/// `sopsy init` heading for flags recorded in the repository for every member.
+const INIT_REPO_HEADING: &str = "Repository options (affect everyone using this repository)";
+
+/// `sopsy init` heading for flags that only shape the admin's own key.
+const INIT_PERSONAL_HEADING: &str = "Personal options (affect only you)";
+
 /// Shown at the end of `sopsy init --help`.
 const INIT_EXAMPLES: &str = "\
 Examples:
@@ -176,19 +183,20 @@ Examples:
                 `SOPSY_PRIVATE_KEY_STORE_PRIORITY` (default: enclave, yubikey, keychain, file)";
     a.help(help).long_help(help)
 }))]
-// `--help` lists flags by how often people reach for them, most common first.
+// `--help` separates flags recorded for everyone using the repository from
+// flags that only shape the admin's own key; within each, most used first.
 #[command(
-    mut_arg("store", |a| a.display_order(1)),
-    mut_arg("require", |a| a.display_order(2)),
-    mut_arg("break_glass", |a| a.display_order(3)),
-    mut_arg("no_break_glass", |a| a.display_order(4)),
-    mut_arg("recipient_name", |a| a.display_order(5)),
-    mut_arg("username", |a| a.display_order(6)),
-    mut_arg("public_key", |a| a.display_order(7)),
-    mut_arg("no_generate", |a| a.display_order(8)),
-    mut_arg("pin_policy", |a| a.display_order(9)),
-    mut_arg("touch_policy", |a| a.display_order(10)),
-    mut_arg("new_slot", |a| a.display_order(11)),
+    mut_arg("require", |a| a.help_heading(INIT_REPO_HEADING).display_order(1)),
+    mut_arg("break_glass", |a| a.help_heading(INIT_REPO_HEADING).display_order(2)),
+    mut_arg("no_break_glass", |a| a.help_heading(INIT_REPO_HEADING).display_order(3)),
+    mut_arg("store", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(4)),
+    mut_arg("recipient_name", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(5)),
+    mut_arg("username", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(6)),
+    mut_arg("public_key", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(7)),
+    mut_arg("no_generate", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(8)),
+    mut_arg("pin_policy", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(9)),
+    mut_arg("touch_policy", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(10)),
+    mut_arg("new_slot", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(11)),
     mut_arg("force", |a| a.display_order(12)),
 )]
 #[command(after_long_help = INIT_EXAMPLES)]
@@ -622,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn init_help_lists_flags_most_used_first() {
+    fn init_help_groups_repository_and_personal_flags() {
         let mut cmd = Cli::command();
         cmd.build(); // propagate the global flags into subcommands
         let help = cmd
@@ -633,14 +641,21 @@ mod tests {
         // Index of the flag's own entry line, ignoring mentions in help prose.
         let pos = |flag: &str| {
             help.lines()
-                .position(|l| l.trim_start().starts_with('-') && l.contains(flag))
+                .position(|l| {
+                    (l.starts_with(flag) || l.trim_start().starts_with('-')) && l.contains(flag)
+                })
                 .unwrap_or_else(|| panic!("{flag} missing from init help"))
         };
+        // clap always lists its default `Options:` group first.
         let order = [
-            "--store",
+            "Options:",
+            "--force",
+            "Repository options",
             "--require",
             "--generate-emergency-keys",
             "--no-emergency-keys",
+            "Personal options",
+            "--store",
             "--recipient-name",
             "--username",
             "--age-public-key",
@@ -648,7 +663,7 @@ mod tests {
             "--yubikey-pin-policy",
             "--yubikey-touch-policy",
             "--always-new-slot",
-            "--force",
+            "Global options",
             "--non-interactive",
             "--git",
             "--verbose",
