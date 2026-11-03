@@ -910,6 +910,11 @@ mod tests {
                 .expect_err("press_enter should refuse without a terminal"),
             Error::NonInteractive { .. }
         ));
+        assert!(matches!(
+            ui.secret("Secret?", "VALUE")
+                .expect_err("secret should refuse to prompt"),
+            Error::NonInteractive { .. }
+        ));
     }
 
     #[test]
@@ -1059,6 +1064,7 @@ mod tests {
             Answer::Text("typed".into()),
             Answer::Text(String::new()),
             Answer::Enter,
+            Answer::Text("hidden".into()),
         ]);
         assert_eq!(ui.select("pick one", "--x", opts()).unwrap(), "b");
         assert_eq!(ui.multi_select("pick", "--x", opts()).unwrap(), ["a", "c"]);
@@ -1086,6 +1092,7 @@ mod tests {
         );
         ui.press_enter("press ENTER").unwrap();
         ui.pause(Duration::from_millis(1));
+        assert_eq!(ui.secret("Secret?", "--value").unwrap(), "hidden");
     }
 
     #[test]

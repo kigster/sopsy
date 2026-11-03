@@ -297,14 +297,15 @@ fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
     ))
 }
 
-/// Decrypt `file` and return it as dotenv (`KEY=value` lines), whatever its
-/// own format: what `sopsy run` puts into a command's environment.
-pub fn decrypt_as_dotenv(file: &Path, file_type: FileType) -> Result<String> {
+/// Decrypt `file` and return it as JSON, whatever its own format: what
+/// `sopsy run` reads its variables from. (sops's dotenv output writes a newline
+/// and a literal backslash-n the same way, so it cannot be decoded losslessly.)
+pub fn decrypt_as_json(file: &Path, file_type: FileType) -> Result<String> {
     let mut command = Command::new(sops_bin());
     crate::keystore::configure_sops_env(&mut command);
     let output = command
         .args(["--decrypt", "--input-type", file_type.as_sops_type()])
-        .args(["--output-type", "dotenv"])
+        .args(["--output-type", "json"])
         .arg(file)
         .output()?;
     check_status(&output)?;

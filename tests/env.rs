@@ -11,6 +11,11 @@ use predicates::prelude::*;
 /// A temp dir with an age key, a `.sops.yaml` and `.env.encrypted` holding
 /// `FOO=bar`.
 fn fixture() -> TempDir {
+    fixture_with("FOO=bar\n")
+}
+
+/// Like [`fixture`], with `.env.encrypted` holding `dotenv`.
+fn fixture_with(dotenv: &str) -> TempDir {
     let dir = TempDir::new().unwrap();
     let key = dir.path().join("key.txt");
     let out = StdCommand::new("age-keygen")
@@ -27,7 +32,7 @@ fn fixture() -> TempDir {
         format!("creation_rules:\n  - path_regex: \\.encrypted$\n    age: {public}\n"),
     )
     .unwrap();
-    std::fs::write(dir.path().join(".env"), "FOO=bar\n").unwrap();
+    std::fs::write(dir.path().join(".env"), dotenv).unwrap();
     let enc = StdCommand::new("sops")
         .current_dir(dir.path())
         .args([
@@ -164,4 +169,168 @@ fn set_refuses_a_sops_without_value_stdin() {
         .failure()
         .stderr(predicate::str::contains("needs sops 3.11.0 or newer"))
         .stderr(predicate::str::contains("3.9.4 is installed"));
+}
+
+/// A fake `sops` that reports a recent version and fails everything else, to
+/// drive sopsy's handling of sops errors.
+fn failing_sops(dir: &Path) -> std::path::PathBuf {
+    let fake = dir.join("fake-sops");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n[ \"$1\" = --version ] && { echo 'sops 3.13.2'; exit 0; }\n\
+         echo 'sops: simulated failure' >&2\nexit 3\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    fake
+}
+
+fn git_init(dir: &Path) {
+    let ok = StdCommand::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok);
+}
+
+#[test]
+fn sops_failures_are_reported_for_every_command() {
+    let dir = fixture();
+    let fake = failing_sops(dir.path());
+    for args in [
+        vec!["run", "true"],
+        vec!["set", "K", "v"],
+        vec!["unset", "FOO"],
+        vec!["rotate-data-key", ".env.encrypted"],
+    ] {
+        sopsy(dir.path())
+            .env("SOPSY_SOPS_BIN", &fake)
+            .args(&args)
+            .assert()
+            .failure()
+            .stderr(
+                predicate::str::contains("simulated failure")
+                    .or(predicate::str::contains("not rotated")),
+            );
+    }
+}
+
+#[test]
+fn run_reports_a_missing_file_and_a_missing_program() {
+    let dir = fixture();
+    sopsy(dir.path())
+        .args(["run", "-f", "nope.encrypted", "true"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("nope.encrypted"));
+    sopsy(dir.path())
+        .args(["run", "sopsy-test-no-such-program"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("sopsy-test-no-such-program"));
+}
+
+#[test]
+fn run_keeps_a_literal_backslash_n() {
+    let dir = fixture();
+    sopsy(dir.path())
+        .args(["set", "WIN", r"C:\new\dir"])
+        .assert()
+        .success();
+    assert_eq!(run_echo(dir.path(), "$WIN"), r"C:\new\dir");
+}
+
+#[test]
+fn run_refuses_loader_variables_and_warns_about_path() {
+    let dir = fixture_with("LD_PRELOAD=/tmp/evil.so\n");
+    sopsy(dir.path())
+        .args(["run", "true"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("LD_PRELOAD"));
+
+    let dir = fixture_with(&format!("PATH={}\n", std::env::var("PATH").unwrap()));
+    sopsy(dir.path())
+        .args(["run", "true"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("sets PATH"));
+}
+
+#[test]
+fn set_from_stdin_drops_a_crlf_line_ending() {
+    let dir = fixture();
+    sopsy(dir.path())
+        .args(["set", "TOKEN"])
+        .write_stdin("windows\r\n")
+        .assert()
+        .success();
+    assert_eq!(run_echo(dir.path(), "[$TOKEN]"), "[windows]");
+}
+
+#[test]
+fn rotate_data_key_without_files_uses_the_repository() {
+    let dir = fixture();
+    git_init(dir.path());
+    std::fs::write(dir.path().join(".sopsy.yml"), "recipients: []\n").unwrap();
+    let before = std::fs::read_to_string(dir.path().join(".env.encrypted")).unwrap();
+    sopsy(dir.path())
+        .arg("rotate-data-key")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("new data key for"));
+    let after = std::fs::read_to_string(dir.path().join(".env.encrypted")).unwrap();
+    assert_ne!(before, after);
+}
+
+#[test]
+fn rotate_data_key_with_nothing_to_rotate_says_so() {
+    let dir = TempDir::new().unwrap();
+    git_init(dir.path());
+    std::fs::write(dir.path().join(".sopsy.yml"), "recipients: []\n").unwrap();
+    sopsy(dir.path())
+        .arg("rotate-data-key")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nothing to rotate"));
+}
+
+#[test]
+fn rotate_data_key_keeps_going_and_names_the_failures() {
+    let dir = fixture();
+    std::fs::write(dir.path().join("broken.env.encrypted"), "NOT=sops\n").unwrap();
+    let before = std::fs::read_to_string(dir.path().join(".env.encrypted")).unwrap();
+    sopsy(dir.path())
+        .args(["rotate-data-key", "broken.env.encrypted", ".env.encrypted"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("1 of 2 files were not rotated"))
+        .stderr(predicate::str::contains("broken.env.encrypted"));
+    let after = std::fs::read_to_string(dir.path().join(".env.encrypted")).unwrap();
+    assert_ne!(before, after, "the good file is still rotated");
+}
+
+#[test]
+fn set_reports_an_unreadable_sops_version() {
+    let dir = TempDir::new().unwrap();
+    let fake = dir.path().join("sops");
+    std::fs::write(&fake, "#!/bin/sh\necho 'sops nightly'\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(dir.path().join(".env.encrypted"), "").unwrap();
+    sopsy(dir.path())
+        .env("SOPSY_SOPS_BIN", &fake)
+        .args(["set", "K", "v"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("could not read the sops version"));
 }
