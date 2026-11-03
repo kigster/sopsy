@@ -10,7 +10,9 @@
 //! - the usage line moves onto its own line, indented two spaces to match the
 //!   other entries, in bold bright yellow;
 //! - command names render in bold blue;
-//! - option flags and argument placeholders render in bold magenta.
+//! - option flags and argument placeholders render in bold magenta;
+//! - in an `Examples:` section (e.g. `sopsy init --help`), `#` comments render
+//!   in magenta and commands in bold yellow.
 //!
 //! Headings are re-cased even when color is disabled; ANSI codes are only
 //! emitted when `color` is `true` (see [`color_wanted`]).
@@ -27,6 +29,7 @@ enum Section {
     Commands,
     Options,
     Arguments,
+    Examples,
 }
 
 /// Whether help output should be colorized: stdout must be a terminal, the
@@ -44,6 +47,8 @@ pub fn render(help: &str, color: bool) -> String {
     let usage = Style::new().bright_yellow().bold();
     let command = Style::new().blue().bold();
     let option = Style::new().magenta().bold();
+    let comment = Style::new().magenta();
+    let example = Style::new().yellow().bold();
 
     let mut out = String::new();
     let mut section = Section::None;
@@ -67,6 +72,19 @@ pub fn render(help: &str, color: bool) -> String {
         } else if line == "Arguments:" {
             section = Section::Arguments;
             out.push_str(&paint("ARGUMENTS:", heading, color));
+        } else if line == "Examples:" {
+            section = Section::Examples;
+            out.push_str(&paint("EXAMPLES:", heading, color));
+        } else if section == Section::Examples && !line.trim().is_empty() {
+            let indent_len = line.len() - line.trim_start().len();
+            let (indent, body) = line.split_at(indent_len);
+            let style = if body.starts_with('#') {
+                comment
+            } else {
+                example
+            };
+            out.push_str(indent);
+            out.push_str(&paint(body, style, color));
         } else if line.trim().is_empty() {
             // A blank line ends the (indentation-driven) usage block.
             if section == Section::Usage {
@@ -229,6 +247,35 @@ Options:
         assert!(
             no_color.contains("35m") || no_color.contains("35;"),
             "{no_color}"
+        );
+    }
+
+    #[test]
+    fn examples_heading_comments_and_commands_are_styled() {
+        let sample =
+            "Options:\n  -h, --help  Print help\n\nExamples:\n  # Interactive\n  sopsy init\n";
+        let plain = render(sample, false);
+        assert!(plain.contains("EXAMPLES:\n  # Interactive\n  sopsy init"));
+        assert!(!plain.contains('\u{1b}'));
+
+        let colored = render(sample, true);
+        let line = |needle: &str| colored.lines().find(|l| l.contains(needle)).unwrap();
+        // owo_colors: green 32, magenta 35, yellow 33; bold is SGR 1.
+        let heading = line("EXAMPLES:");
+        assert!(
+            heading.contains("32") && heading.contains("1m"),
+            "{heading}"
+        );
+        let comment = line("# Interactive");
+        assert!(
+            comment.contains("35m") && !comment.contains("1;"),
+            "{comment}"
+        );
+        let command = line("sopsy init");
+        assert!(command.contains("33") && command.contains("1"), "{command}");
+        assert!(
+            command.starts_with("  \u{1b}"),
+            "indent stays unstyled: {command:?}"
         );
     }
 
