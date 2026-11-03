@@ -21,7 +21,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   # Pinned tool versions for reproducible integration tests.
-  SOPS_VERSION: v3.9.4
+  SOPS_VERSION: v3.13.2  # `sopsy set` needs 3.11+ (--value-stdin)
   AGE_VERSION: v1.2.1
 
 jobs:
