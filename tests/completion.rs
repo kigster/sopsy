@@ -4,7 +4,9 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn sopsy() -> Command {
-    Command::cargo_bin("sopsy").unwrap()
+    let mut cmd = Command::cargo_bin("sopsy").unwrap();
+    cmd.env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew"); // never run a real `brew` from tests
+    cmd
 }
 
 #[test]

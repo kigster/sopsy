@@ -91,7 +91,45 @@ pub fn run(ui: &Ui, args: &DepsArgs) -> Result<()> {
     // `deps` is an explicit install command, and `--dry-run` / `--check` already
     // cover previewing, so we install directly rather than prompting again.
     ui.info(format!("running: {command}"));
-    install(&missing)?;
+    install_tools(&missing)?;
+    ui.success(format!("installed: {}", missing.join(", ")));
+    Ok(())
+}
+
+/// Make sure the supporting tools are installed before `sopsy init` uses them.
+///
+/// Missing tools are installed with Homebrew: interactive runs ask first,
+/// non-interactive runs (`-y`) install without asking. Without Homebrew this
+/// only warns, so `init` can still carry on with whatever is already there.
+pub fn offer_install(ui: &Ui) -> Result<()> {
+    let missing: Vec<&str> = dependencies()
+        .into_iter()
+        .filter(|tool| which::which(tool).is_err())
+        .collect();
+    if missing.is_empty() {
+        ui.success("All supporting tools are installed.");
+        return Ok(());
+    }
+    let command = format!("{BREW_BIN} install {}", missing.join(" "));
+    if ensure_brew_available().is_err() {
+        ui.warn(format!(
+            "Missing: {}. Homebrew was not found; install them yourself (`{command}`).",
+            missing.join(", ")
+        ));
+        return Ok(());
+    }
+    let install = !ui.is_interactive()
+        || ui.confirm(
+            &format!("Install the missing tools now? ({command})"),
+            "--non-interactive",
+            true,
+        )?;
+    if !install {
+        ui.warn("Skipped; run `sopsy deps` to install them later.");
+        return Ok(());
+    }
+    ui.info(format!("running: {command}"));
+    install_tools(&missing)?;
     ui.success(format!("installed: {}", missing.join(", ")));
     Ok(())
 }
@@ -124,7 +162,7 @@ fn ensure_brew_available() -> Result<()> {
 }
 
 /// Run `brew install <tools…>`, streaming Homebrew's output to the terminal.
-fn install(tools: &[&str]) -> Result<()> {
+fn install_tools(tools: &[&str]) -> Result<()> {
     let status = Command::new(brew_bin())
         .arg("install")
         .args(tools)

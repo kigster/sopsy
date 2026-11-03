@@ -215,6 +215,7 @@ fn keygen_generates_and_prints_enclave_identity() {
 
     let output = assert_cmd::Command::cargo_bin("sopsy")
         .unwrap()
+        .env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew")
         .env("SOPSY_AGE_PLUGIN_SE_BIN", &plugin)
         .current_dir(dir.path())
         .args([
@@ -582,6 +583,7 @@ fn join_generates_enclave_identity_with_fake_plugin() {
 
     let output = assert_cmd::Command::cargo_bin("sopsy")
         .unwrap()
+        .env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew")
         .env("SOPSY_AGE_PLUGIN_SE_BIN", &plugin)
         // Keep the generated (fake) identity out of the real per-user keystore.
         .env("SOPSY_KEYS_FILE", dir.path().join("age-keys.txt"))
@@ -618,6 +620,7 @@ fn join_with_git_flag_stages_the_sopsy_files() {
     // the "Staged for you" narrative is observable on stdout.
     let output = assert_cmd::Command::cargo_bin("sopsy")
         .unwrap()
+        .env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew")
         .current_dir(dir.path())
         .args([
             "--non-interactive",
@@ -690,6 +693,7 @@ fn join_without_touch_id_passes_access_control_none() {
 
     let output = assert_cmd::Command::cargo_bin("sopsy")
         .unwrap()
+        .env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew")
         .env("SOPSY_AGE_PLUGIN_SE_BIN", &plugin)
         // Keep the generated (fake) identity out of the real per-user keystore.
         .env("SOPSY_KEYS_FILE", dir.path().join("age-keys.txt"))
@@ -740,6 +744,7 @@ fn approve_with_git_flag_stages_the_membership_files() {
 
     let output = assert_cmd::Command::cargo_bin("sopsy")
         .unwrap()
+        .env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew")
         .env("SOPSY_SOPS_BIN", &fake)
         .env("SOPSY_ASSUME_YES", "1")
         .current_dir(dir.path())
@@ -1420,6 +1425,7 @@ fn list_shows_username_and_approval_provenance() {
 
     let output = assert_cmd::Command::cargo_bin("sopsy")
         .unwrap()
+        .env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew")
         .args(["recipient", "list"])
         .current_dir(dir.path())
         .output()
@@ -1675,6 +1681,7 @@ fn list_prints_recipient_names() {
     // Drive `list` as the real binary so we can capture stdout.
     let output = assert_cmd::Command::cargo_bin("sopsy")
         .unwrap()
+        .env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew")
         .args(["recipient", "list"])
         .current_dir(&repo)
         .output()

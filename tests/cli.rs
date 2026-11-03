@@ -9,7 +9,9 @@ use predicates::prelude::*;
 
 /// Build a `Command` for the compiled `sopsy` binary.
 fn sopsy() -> Command {
-    Command::cargo_bin("sopsy").expect("binary `sopsy` should build")
+    let mut cmd = Command::cargo_bin("sopsy").expect("binary `sopsy` should build");
+    cmd.env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew"); // never run a real `brew` from tests
+    cmd
 }
 
 #[test]

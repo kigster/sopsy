@@ -84,6 +84,7 @@ impl Sandbox {
 
     fn sopsy(&self) -> Command {
         let mut cmd = Command::cargo_bin("sopsy").unwrap();
+        cmd.env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew"); // never run a real `brew` from tests
         cmd.current_dir(self.path())
             .env("SOPSY_KEYS_FILE", self.keys_file())
             .env("SOPSY_KEYCHAIN_BIN", self.path().join("fake-keyring"))

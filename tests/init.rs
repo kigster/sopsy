@@ -65,6 +65,7 @@ fn generate_age_key(dir: &Path) -> (String, PathBuf) {
 /// Build a `Command` for the compiled `sopsy` binary rooted at `dir`.
 fn sopsy_in(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("sopsy").expect("binary `sopsy` should build");
+    cmd.env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew"); // never run a real `brew` from tests
     cmd.current_dir(dir);
     cmd
 }
@@ -805,4 +806,62 @@ fn init_without_hardware_fails_naming_allow_stores() {
         !dir.path().join(".sopsy.yml").exists(),
         "init must not write a weakened policy"
     );
+}
+
+// ----------------------------------------------------------------------------
+// `init` installs missing supporting tools (as `sopsy deps` would)
+// ----------------------------------------------------------------------------
+
+/// A repo plus a bin directory holding only `git`, so every supporting tool
+/// probes as missing.
+#[cfg(unix)]
+fn repo_with_bare_path() -> (TempDir, PathBuf) {
+    let dir = TempDir::new().unwrap();
+    init_git_repo(dir.path());
+    let bin = dir.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let git = which::which("git").expect("git should be installed");
+    std::os::unix::fs::symlink(git, bin.join("git")).unwrap();
+    (dir, bin)
+}
+
+#[cfg(unix)]
+#[test]
+fn init_non_interactive_installs_missing_tools_with_brew() {
+    let (dir, bin) = repo_with_bare_path();
+    let log = dir.path().join("brew.log");
+    write_script(
+        &bin.join("brew"),
+        &format!("echo \"$@\" >> '{}'\n", log.display()),
+    );
+
+    // The fake brew installs nothing, so init then stops at the `sops` check.
+    sopsy_in(dir.path())
+        .env("PATH", &bin)
+        .env("SOPSY_BREW_BIN", bin.join("brew"))
+        .args(["--non-interactive", "init", "--allow-stores", "any"])
+        .assert()
+        .failure();
+
+    let recorded = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        recorded.contains(&format!(
+            "install {}",
+            sopsy::commands::deps::dependencies().join(" ")
+        )),
+        "init should brew-install every missing tool; got: {recorded}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn init_without_brew_warns_and_carries_on() {
+    let (dir, bin) = repo_with_bare_path();
+    sopsy_in(dir.path())
+        .env("PATH", &bin)
+        .args(["--non-interactive", "init", "--allow-stores", "any"])
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("Homebrew was not found"))
+        .stderr(predicate::str::contains("sops"));
 }

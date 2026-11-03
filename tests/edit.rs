@@ -84,7 +84,9 @@ fn init_git_repo(dir: &Path) {
 
 /// Build a `Command` for the compiled `sopsy` binary.
 fn sopsy() -> AssertCommand {
-    AssertCommand::cargo_bin("sopsy").expect("binary `sopsy` should build")
+    let mut cmd = AssertCommand::cargo_bin("sopsy").expect("binary `sopsy` should build");
+    cmd.env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew"); // never run a real `brew` from tests
+    cmd
 }
 
 /// Mark `path` executable (no-op on non-unix).

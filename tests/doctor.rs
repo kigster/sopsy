@@ -18,6 +18,7 @@ use predicates::prelude::*;
 /// in `dir`.
 fn sopsy_in(dir: &Path) -> Command {
     let mut cmd = Command::cargo_bin("sopsy").expect("binary `sopsy` should build");
+    cmd.env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew"); // never run a real `brew` from tests
     cmd.current_dir(dir).args(["--non-interactive", "doctor"]);
     cmd
 }
