@@ -215,12 +215,53 @@ pub fn expand_selectors<S: AsRef<str>>(entries: &[S]) -> Result<Vec<Store>> {
     Ok(stores)
 }
 
-/// The member's `auto` order: [`PRIORITY_ENV`] when set, else [`Store::ALL`].
-pub fn priority() -> Result<Vec<Store>> {
-    match std::env::var(PRIORITY_ENV) {
-        Ok(value) if !value.trim().is_empty() => expand_selectors(&[value])
+/// Where the `auto` order came from (see [`priority`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrioritySource {
+    /// The member's [`PRIORITY_ENV`].
+    Env,
+    /// The repository's `key_policy.allowed`, in the order `init` was given.
+    Repository,
+    /// [`Store::ALL`]: no env var and no repository restriction.
+    Default,
+}
+
+impl PrioritySource {
+    /// Short label for diagnostics.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PrioritySource::Env => PRIORITY_ENV,
+            PrioritySource::Repository => "repository allow list",
+            PrioritySource::Default => "default",
+        }
+    }
+}
+
+/// The member's `auto` order, first match wins:
+///
+/// 1. [`PRIORITY_ENV`], a personal override;
+/// 2. the repository's `allowed` stores, in the order they were listed;
+/// 3. [`Store::ALL`].
+///
+/// [`candidates`] still filters the result by `allowed`, so the env var can
+/// reorder or narrow the repository's list but never widen it.
+pub fn priority(allowed: Option<&[Store]>) -> Result<(Vec<Store>, PrioritySource)> {
+    priority_from(std::env::var(PRIORITY_ENV).ok(), allowed)
+}
+
+/// [`priority`] with the env var's value passed in, so tests need no env.
+fn priority_from(
+    env: Option<String>,
+    allowed: Option<&[Store]>,
+) -> Result<(Vec<Store>, PrioritySource)> {
+    match env {
+        Some(value) if !value.trim().is_empty() => expand_selectors(&[value])
+            .map(|order| (order, PrioritySource::Env))
             .map_err(|err| Error::Validation(format!("{PRIORITY_ENV}: {err}"))),
-        _ => Ok(Store::ALL.to_vec()),
+        _ => Ok(match allowed {
+            Some(stores) if !stores.is_empty() => (stores.to_vec(), PrioritySource::Repository),
+            _ => (Store::ALL.to_vec(), PrioritySource::Default),
+        }),
     }
 }
 
@@ -246,7 +287,7 @@ pub enum Availability {
 /// - `requested` is an explicit `--store` (`None` = `auto`).
 /// - `allowed` is the repository's allowed set (`None` = no restriction). It
 ///   filters everything, `--store` included.
-/// - `priority` is the member's `auto` order.
+/// - `priority` is the member's `auto` order (see [`priority`]).
 ///
 /// An explicit store must be allowed and ready. `auto` returns every ready
 /// allowed store in priority order, but never skips past a store whose hardware
@@ -434,6 +475,40 @@ pub fn persist(label: &str, identity: &GeneratedIdentity) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn priority_follows_the_repository_allow_list_order() {
+        let allowed = [Store::YubiKey, Store::Enclave];
+        let (order, source) = priority_from(None, Some(&allowed)).unwrap();
+        assert_eq!(order, allowed);
+        assert_eq!(source, PrioritySource::Repository);
+    }
+
+    #[test]
+    fn priority_env_overrides_the_repository_order() {
+        let allowed = [Store::YubiKey, Store::Enclave];
+        let (order, source) =
+            priority_from(Some("enclave,yubikey".into()), Some(&allowed)).unwrap();
+        assert_eq!(order, [Store::Enclave, Store::YubiKey]);
+        assert_eq!(source, PrioritySource::Env);
+    }
+
+    #[test]
+    fn priority_defaults_without_env_or_restriction() {
+        for env in [None, Some("  ".to_string())] {
+            let (order, source) = priority_from(env, None).unwrap();
+            assert_eq!(order, Store::ALL);
+            assert_eq!(source, PrioritySource::Default);
+        }
+    }
+
+    #[test]
+    fn env_can_narrow_but_never_widen_the_allow_list() {
+        let allowed = [Store::YubiKey];
+        let (order, _) = priority_from(Some("enclave,yubikey".into()), Some(&allowed)).unwrap();
+        let got = candidates(None, Some(&allowed), &order, |_| Availability::Ready).unwrap();
+        assert_eq!(got, [Store::YubiKey]);
+    }
 
     #[test]
     fn stores_rank_by_kind() {

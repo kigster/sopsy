@@ -594,3 +594,46 @@ fn recipient_add_honors_the_allowed_set() {
         .assert()
         .stderr(predicate::str::contains("allows only").not());
 }
+
+/// The repository's allow list is also the default `auto` order: with both a
+/// YubiKey and the Secure Enclave ready, `yubikey,enclave` picks the YubiKey.
+#[test]
+fn allow_stores_order_is_the_default_auto_order() {
+    let sb = Sandbox::new();
+    let p = sb.path();
+    write_script(&p.join("usb"), "echo '+-o YubiKey OTP+FIDO+CCID@1'\n");
+    // Present on PATH-equivalent, so the Enclave probes as ready.
+    write_script(&p.join("age-plugin-se"), "exit 0\n");
+    write_script(
+        &p.join("age-plugin-yubikey"),
+        "case \"$*\" in *--list*) exit 0;; esac\n\
+         cat <<'EOF'\n\
+         #       Serial: 12345678, Slot: 1\n\
+         #    Recipient: age1tag1qfake\n\
+         # Legacy recipient: age1yubikey1qfakelegacy\n\
+         AGE-PLUGIN-YUBIKEY-1QFAKESTUB\n\
+         EOF\n",
+    );
+    write_script(
+        &p.join("sops"),
+        "case \"$1\" in --version) echo 'sops 9.9.9';; *) echo 'ENC[fake]';; esac\n",
+    );
+
+    sb.sopsy()
+        .env("SOPSY_USB_LIST_BIN", p.join("usb"))
+        .env("SOPSY_AGE_PLUGIN_SE_BIN", p.join("age-plugin-se"))
+        .env("SOPSY_AGE_PLUGIN_YUBIKEY_BIN", p.join("age-plugin-yubikey"))
+        .env("SOPSY_SOPS_BIN", p.join("sops"))
+        .args([
+            "init",
+            "--allow-stores",
+            "yubikey,enclave",
+            "--no-emergency-keys",
+        ])
+        .assert()
+        .success();
+
+    let config = sb.read(".sopsy.yml");
+    assert!(config.contains("store: yubikey"), "{config}");
+    assert!(config.contains("allowed:") && config.contains("- yubikey"));
+}

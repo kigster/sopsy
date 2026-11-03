@@ -138,7 +138,7 @@ pub(crate) fn generate(
 /// Resolve the store: explicit `--store`, else the ready stores in priority
 /// order (prompting when interactive and there is a real choice).
 fn choose_store(ui: &Ui, key: &StoreArgs, allowed: Option<&[Store]>) -> Result<Store> {
-    let priority = hardware::priority()?;
+    let (priority, _) = hardware::priority(allowed)?;
     let ready = hardware::candidates(key.store.store(), allowed, &priority, Store::probe)?;
     if ready.len() == 1 || !ui.is_interactive() {
         return Ok(ready[0]);
