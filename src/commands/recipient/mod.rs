@@ -19,10 +19,7 @@ use std::process::Command;
 use owo_colors::OwoColorize;
 use serde_yaml_ng::Value;
 
-use crate::cli::{
-    RecipientAddArgs, RecipientBreakGlassArgs, RecipientCiArgs, RecipientCommand,
-    RecipientKeygenArgs, RecipientRemoveArgs, RecipientRotateArgs,
-};
+use crate::cli::{RecipientAddArgs, RecipientCommand, RecipientKeygenArgs, RecipientRemoveArgs};
 use crate::commands::keys;
 use crate::config::{CONFIG_FILE_NAME, Config, MemberState, Recipient};
 use crate::error::{Error, Result};
@@ -31,6 +28,9 @@ use crate::ui::Ui;
 use crate::{age, git, sops};
 
 /// Conventional name of the `sops` configuration file.
+mod ceremony;
+mod rotate;
+
 pub(crate) const SOPS_CONFIG_FILE_NAME: &str = ".sops.yaml";
 
 /// When set, interactive confirmations (`break-glass`'s press-ENTER, `approve`'s
@@ -66,9 +66,9 @@ pub fn run(ui: &Ui, command: &RecipientCommand) -> Result<()> {
         RecipientCommand::Remove(args) => remove(ui, args),
         RecipientCommand::List => list(ui),
         RecipientCommand::Keygen(args) => keygen(ui, args),
-        RecipientCommand::Rotate(args) => rotate(ui, args),
-        RecipientCommand::BreakGlass(args) => break_glass(ui, args),
-        RecipientCommand::Ci(args) => ci(ui, args),
+        RecipientCommand::Rotate(args) => rotate::rotate(ui, args),
+        RecipientCommand::BreakGlass(args) => ceremony::break_glass(ui, args),
+        RecipientCommand::Ci(args) => ceremony::ci(ui, args),
     }
 }
 
@@ -218,9 +218,7 @@ fn add(ui: &Ui, args: &RecipientAddArgs) -> Result<()> {
     }
 
     if let Err(err) = run_updatekeys(ui, &repo, args.no_updatekeys) {
-        snapshot.restore()?;
-        ui.warn("rolled back configuration changes — no recipient was added");
-        return Err(rewrap_error(err));
+        return Err(snapshot.roll_back(ui, err, "no recipient was added"));
     }
 
     ui.success(format!("recipient `{name}` added"));
@@ -288,9 +286,7 @@ fn remove(ui: &Ui, args: &RecipientRemoveArgs) -> Result<()> {
     }
 
     if let Err(err) = run_updatekeys(ui, &repo, args.no_updatekeys) {
-        snapshot.restore()?;
-        ui.warn("rolled back configuration changes — no recipient was removed");
-        return Err(rewrap_error(err));
+        return Err(snapshot.roll_back(ui, err, "no recipient was removed"));
     }
 
     ui.success(format!("recipient `{name}` removed"));
@@ -346,6 +342,25 @@ impl ConfigSnapshot {
                 (sops_config.to_path_buf(), std::fs::read(sops_config).ok()),
             ],
             encrypted,
+        }
+    }
+
+    /// Undo a failed re-key and return the error to report. When the restore
+    /// fails too, the error carries both causes, so neither is lost.
+    pub(crate) fn roll_back(&self, ui: &Ui, cause: Error, what_was_undone: &str) -> Error {
+        let cause = rewrap_error(cause);
+        match self.restore() {
+            Ok(()) => {
+                ui.warn(format!(
+                    "rolled back configuration changes — {what_was_undone}"
+                ));
+                cause
+            }
+            Err(restore) => Error::Validation(format!(
+                "{cause}\n\nRolling back also failed ({restore}), so {CONFIG_FILE_NAME}, \
+                 {SOPS_CONFIG_FILE_NAME} or the encrypted files may be half-updated. \
+                 Inspect them with `git status` and restore them with `git checkout`."
+            )),
         }
     }
 
@@ -526,7 +541,7 @@ fn keygen(ui: &Ui, args: &RecipientKeygenArgs) -> Result<()> {
         &args.key,
         &label,
         allowed.as_deref(),
-        args.without_touch_id,
+        args.presence.without_touch_id,
         &args.age_args,
         false,
     )?;
@@ -548,445 +563,6 @@ fn keygen(ui: &Ui, args: &RecipientKeygenArgs) -> Result<()> {
     }
 
     Ok(())
-}
-
-/// Replace a member's key with a freshly generated (or reused YubiKey) key
-/// under the same name, then re-wrap every secret for the new key.
-///
-/// The old key still decrypts during `updatekeys` (it is in `keys.txt`), and
-/// is no longer a recipient afterwards. A failed re-key rolls the config back.
-fn rotate(ui: &Ui, args: &RecipientRotateArgs) -> Result<()> {
-    ui.header("sopsy recipient rotate");
-
-    let repo = current_repo_root()?;
-    let mut config = load_config(&repo)?;
-    let sops_config = sops_config_path(&repo)?;
-    let user = system_username();
-
-    let name = rotate_target(ui, &config, args.name.as_deref(), user.as_deref())?;
-    let old = config
-        .recipient(&name)
-        .cloned()
-        .ok_or_else(|| Error::Validation(format!("no recipient named `{name}`")))?;
-    if old.break_glass {
-        return Err(Error::Validation(format!(
-            "`{name}` is the break-glass key; make a new one with `sopsy recipient break-glass`, \
-             then remove this one with `sopsy recipient remove {name}`"
-        )));
-    }
-    if old.state != MemberState::Active {
-        return Err(Error::Validation(format!(
-            "`{name}` is not active yet; a pending member runs `sopsy join` again instead"
-        )));
-    }
-    if let (Some(owner), Some(me)) = (old.username.as_deref(), user.as_deref())
-        && owner != me
-    {
-        return Err(Error::Validation(format!(
-            "`{name}` belongs to `{owner}`; only they can rotate it, on their own machine"
-        )));
-    }
-
-    let allowed = config.allowed_stores()?;
-    let identity = keys::generate(
-        ui,
-        &args.key,
-        &name,
-        allowed.as_deref(),
-        args.without_touch_id,
-        &args.age_args,
-        true,
-    )?;
-    if identity.public_key == old.public_key {
-        ui.info(format!("that is already `{name}`'s key; nothing to rotate"));
-        return Ok(());
-    }
-    if let Some(other) = config
-        .recipients
-        .iter()
-        .find(|r| r.public_key == identity.public_key)
-    {
-        return Err(Error::Validation(format!(
-            "that key is already registered as `{}`",
-            other.name
-        )));
-    }
-
-    let snapshot = ConfigSnapshot::capture(&repo, &sops_config);
-    if let Some(member) = config.recipients.iter_mut().find(|r| r.name == name) {
-        member.public_key = identity.public_key.clone();
-        member.store = Some(identity.store);
-    }
-    config.save_to_dir(&repo)?;
-    add_key_to_sops_yaml(&sops_config, &identity.public_key)?;
-    remove_key_from_sops_yaml(&sops_config, &old.public_key)?;
-    ui.success(format!(
-        "replaced `{name}`'s key in {CONFIG_FILE_NAME} and {SOPS_CONFIG_FILE_NAME}"
-    ));
-
-    if let Err(err) = run_updatekeys(ui, &repo, false) {
-        snapshot.restore()?;
-        ui.warn("rolled back configuration changes; the old key is still in use");
-        return Err(rewrap_error(err));
-    }
-
-    ui.success(format!(
-        "rotated `{name}` to a {} key",
-        identity.store.display_name()
-    ));
-    ui.info("The old key no longer opens these secrets; its line in keys.txt is harmless.");
-    maybe_stage(ui, &repo, &format!("Rotate sopsy key for {name}"))?;
-    Ok(())
-}
-
-/// Which recipient `rotate` replaces: the named one, else the caller's own
-/// active key (asking when there are several).
-fn rotate_target(
-    ui: &Ui,
-    config: &Config,
-    name: Option<&str>,
-    user: Option<&str>,
-) -> Result<String> {
-    if let Some(name) = name {
-        return Ok(name.trim().to_string());
-    }
-    let mine: Vec<String> = config
-        .recipients
-        .iter()
-        .filter(|r| !r.break_glass && r.state == MemberState::Active)
-        .filter(|r| user.is_some() && r.username.as_deref() == user)
-        .map(|r| r.name.clone())
-        .collect();
-    match mine.len() {
-        0 => Err(Error::Validation(format!(
-            "no active key of yours (`{}`) in {CONFIG_FILE_NAME}; pass the recipient name",
-            user.unwrap_or("unknown user")
-        ))),
-        1 => Ok(mine[0].clone()),
-        _ => ui.select("Which of your keys should be rotated?", "NAME", mine),
-    }
-}
-
-/// The two portable-key ceremonies. Both generate an *exportable* age keypair
-/// (not a Secure Enclave identity), hand it to the operator for out-of-band
-/// storage, delete the local copies, and register the public key as a
-/// recipient — they differ only in where the private key is meant to live and
-/// how the recipient is marked.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PortableKeyKind {
-    /// Offline emergency key (e.g. 1Password); marked `break_glass`.
-    BreakGlass,
-    /// CI decryption key, stored in the CI provider's secret store and read by
-    /// `sops` via the `SOPS_AGE_KEY` environment variable.
-    Ci,
-}
-
-impl PortableKeyKind {
-    /// The recipient name used when `--name` is not given.
-    fn default_name(self) -> &'static str {
-        match self {
-            PortableKeyKind::BreakGlass => "break-glass",
-            PortableKeyKind::Ci => "ci",
-        }
-    }
-
-    /// Short human label used in progress and success messages.
-    fn label(self) -> &'static str {
-        match self {
-            PortableKeyKind::BreakGlass => "break-glass",
-            PortableKeyKind::Ci => "CI",
-        }
-    }
-}
-
-/// Generate a portable break-glass emergency key, hand it to the operator for
-/// offline storage, then delete it locally and register it as a recipient.
-///
-/// The break-glass key is an ordinary (exportable) age key — *not* a Secure
-/// Enclave identity — precisely because it must survive the loss of any single
-/// device.
-fn break_glass(ui: &Ui, args: &RecipientBreakGlassArgs) -> Result<()> {
-    portable_key_ceremony(
-        ui,
-        PortableKeyKind::BreakGlass,
-        &args.output,
-        args.name.as_deref(),
-        args.force,
-        args.no_updatekeys,
-    )
-}
-
-/// Generate a portable CI decryption key, hand it to the operator to store as
-/// a CI secret (`SOPS_AGE_KEY`), then delete it locally and register it as a
-/// recipient.
-///
-/// CI runners have no Secure Enclave, so this is how automation decrypts:
-/// `sops` reads the identity from `SOPS_AGE_KEY`, which sopsy never overrides
-/// (see [`crate::keystore::configure_sops_env`]).
-fn ci(ui: &Ui, args: &RecipientCiArgs) -> Result<()> {
-    portable_key_ceremony(
-        ui,
-        PortableKeyKind::Ci,
-        &args.output,
-        args.name.as_deref(),
-        args.force,
-        args.no_updatekeys,
-    )
-}
-
-/// Paths to shred if the process is terminated by a signal mid-ceremony. A
-/// portable key's private half must never survive the ceremony, so it is
-/// registered here the moment it touches disk (see [`KeyFileGuard`]).
-static CEREMONY_CLEANUP: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
-
-/// Install a one-shot SIGINT/SIGTERM/SIGHUP handler that shreds every path
-/// registered in [`CEREMONY_CLEANUP`], then exits. Idempotent: installed at most
-/// once per process, so repeated ceremonies (e.g. in tests) reuse the handler.
-///
-/// `ctrlc` runs the handler on its own thread rather than in raw async-signal
-/// context, so file I/O and locking here are safe.
-fn arm_ceremony_signal_cleanup() {
-    static INSTALLED: std::sync::Once = std::sync::Once::new();
-    INSTALLED.call_once(|| {
-        // Best-effort: if a handler is somehow already installed, the
-        // `KeyFileGuard` Drop still covers every non-signal exit path.
-        let _ = ctrlc::set_handler(|| {
-            if let Ok(paths) = CEREMONY_CLEANUP.lock() {
-                for path in paths.iter() {
-                    let _ = std::fs::remove_file(path);
-                }
-            }
-            // 128 + SIGINT(2): conventional "terminated by Ctrl-C" exit status.
-            std::process::exit(130);
-        });
-    });
-}
-
-/// RAII guard ensuring the on-disk halves of a portable key never outlive the
-/// ceremony — the Rust equivalent of a shell `trap … EXIT` over the key files.
-///
-/// `Drop` shreds both halves on every normal return, error (`?`), and panic;
-/// the signal handler armed by [`arm_ceremony_signal_cleanup`] covers
-/// SIGINT/SIGTERM/SIGHUP, which terminate the process without running `Drop`.
-struct KeyFileGuard {
-    paths: [PathBuf; 2],
-}
-
-impl KeyFileGuard {
-    /// Register the two key-file paths for signal cleanup and arm the handler.
-    fn arm(private: &Path, public: &Path) -> Self {
-        arm_ceremony_signal_cleanup();
-        let paths = [private.to_path_buf(), public.to_path_buf()];
-        if let Ok(mut registry) = CEREMONY_CLEANUP.lock() {
-            registry.extend(paths.iter().cloned());
-        }
-        KeyFileGuard { paths }
-    }
-}
-
-impl Drop for KeyFileGuard {
-    fn drop(&mut self) {
-        for path in &self.paths {
-            let _ = std::fs::remove_file(path);
-        }
-        if let Ok(mut registry) = CEREMONY_CLEANUP.lock() {
-            registry.retain(|p| !self.paths.contains(p));
-        }
-    }
-}
-
-/// The shared portable-key ceremony: generate → write to disk → operator
-/// stores it out-of-band → press ENTER → delete local copies → register the
-/// recipient and re-wrap secrets (rolling back atomically on failure).
-///
-/// The flow is deliberately interactive: the local files exist only for the
-/// operator to copy from, and are removed the moment storage is confirmed.
-fn portable_key_ceremony(
-    ui: &Ui,
-    kind: PortableKeyKind,
-    output: &Path,
-    name: Option<&str>,
-    force: bool,
-    no_updatekeys: bool,
-) -> Result<()> {
-    let label = kind.label();
-    ui.header(format!("sopsy recipient {}", kind.default_name()));
-
-    let repo = current_repo_root()?;
-    let mut config = load_config(&repo)?;
-    let sops_config = sops_config_path(&repo)?;
-
-    let name = name.unwrap_or(kind.default_name()).trim().to_string();
-    if name.is_empty() {
-        return Err(Error::Validation("recipient name must not be empty".into()));
-    }
-    if config.recipient(&name).is_some() {
-        return Err(Error::Validation(format!(
-            "a recipient named `{name}` already exists"
-        )));
-    }
-
-    // This flow blocks on an interactive confirmation. Fail fast — before any
-    // key material touches disk — when we cannot prompt (and automation has not
-    // opted in via SOPSY_ASSUME_YES).
-    let assume_yes = assume_yes();
-    if !ui.is_interactive() && !assume_yes {
-        return Err(Error::NonInteractive {
-            prompt: format!("press ENTER to confirm the {label} key is stored safely"),
-            flag: format!("an interactive terminal (or set {ASSUME_YES_ENV} for automation)"),
-        });
-    }
-
-    // Resolve the two output paths and refuse to clobber existing files.
-    let private_path = with_suffix(output, "private");
-    let public_path = with_suffix(output, "public");
-    for path in [&private_path, &public_path] {
-        if path.exists() && !force {
-            return Err(Error::Validation(format!(
-                "{} already exists (pass --force to overwrite)",
-                path.display()
-            )));
-        }
-    }
-
-    // Generate a portable age key pair.
-    age::ensure_available()?;
-    let spinner = ui.spinner(format!("Generating a portable age key pair for {label}…"));
-    let keypair = age::generate_keypair();
-    spinner.finish_and_clear();
-    let keypair = keypair?;
-
-    // Write both halves to disk (private key locked down on unix).
-    std::fs::write(&private_path, &keypair.identity)?;
-    std::fs::write(&public_path, format!("{}\n", keypair.public_key))?;
-    restrict_permissions(&private_path);
-
-    // The private key now exists on disk. Guarantee it never survives the
-    // ceremony: this guard shreds both halves on any normal/error return or
-    // panic, and the signal handler it arms shreds them on SIGINT/SIGTERM/SIGHUP
-    // (e.g. Ctrl-C at the prompt below), which bypass `Drop`.
-    let _cleanup = KeyFileGuard::arm(&private_path, &public_path);
-
-    ui.success(format!("wrote private key to {}", private_path.display()));
-    ui.success(format!("wrote public key to {}", public_path.display()));
-
-    // Hand off to the operator and block until they confirm safe storage.
-    let press_enter_prompt = match kind {
-        PortableKeyKind::BreakGlass => {
-            ui.banner_warn("ACTION REQUIRED — store the break-glass key offline");
-            ui.warn(
-                "Please copy these files and place them in 1Password (or another secure, offline store):",
-            );
-            ui.info(format!("  • {}", private_path.display()));
-            ui.info(format!("  • {}", public_path.display()));
-            "Please press ENTER when you copied the keys to a secure storage (eg 1Password):"
-        }
-        PortableKeyKind::Ci => {
-            ui.banner_warn("ACTION REQUIRED — add the CI key to your CI provider's secret store");
-            ui.warn("Go to your CI settings and add ONE secret:");
-            ui.info(format!(
-                "  • SOPS_AGE_KEY — the contents of {} (the name `sops` reads identities from)",
-                private_path.display()
-            ));
-            ui.info(format!(
-                "    GitHub CLI:  gh secret set SOPS_AGE_KEY < {}",
-                private_path.display()
-            ));
-            ui.info(
-                "    GitHub UI:   Settings → Secrets and variables → Actions → New repository secret",
-            );
-            ui.info(format!(
-                "The public half needs no CI secret: it is not sensitive and is being \
-                 committed to {CONFIG_FILE_NAME} and {SOPS_CONFIG_FILE_NAME} as the recipient."
-            ));
-            ui.warn(
-                "This key can decrypt ALL sopsy-managed secrets — treat a compromised runner \
-                 like a lost laptop: remove the recipient and rotate the secret values.",
-            );
-            "Please press ENTER once SOPS_AGE_KEY is stored in your CI secrets:"
-        }
-    };
-    ui.warn("Both files will be DELETED from this machine as soon as you continue.");
-    if assume_yes {
-        ui.info(format!(
-            "{ASSUME_YES_ENV} set — assuming the keys are stored; continuing."
-        ));
-    } else {
-        ui.press_enter(press_enter_prompt)?;
-    }
-
-    // Remove the local copies; the only surviving private key now lives in the
-    // out-of-band store (vault or CI secrets).
-    std::fs::remove_file(&private_path)?;
-    std::fs::remove_file(&public_path)?;
-    ui.success("removed the local key files");
-
-    // Register the recipient in both config files and re-wrap secrets, rolling
-    // back atomically if the re-encryption fails (see `add`).
-    let snapshot = ConfigSnapshot::capture(&repo, &sops_config);
-    config.recipients.push(Recipient {
-        break_glass: kind == PortableKeyKind::BreakGlass,
-        ..Recipient::new(&name, &keypair.public_key)
-    });
-    config.save_to_dir(&repo)?;
-    ui.success(format!("recorded `{name}` ({label}) in {CONFIG_FILE_NAME}"));
-
-    let modified = add_key_to_sops_yaml(&sops_config, &keypair.public_key)?;
-    if modified == 0 {
-        ui.warn(format!(
-            "no `age:` creation_rules matched in {SOPS_CONFIG_FILE_NAME}; left unchanged"
-        ));
-    } else {
-        ui.success(format!(
-            "added the key to {modified} creation rule(s) in {SOPS_CONFIG_FILE_NAME}"
-        ));
-    }
-
-    if let Err(err) = run_updatekeys(ui, &repo, no_updatekeys) {
-        snapshot.restore()?;
-        ui.warn(format!(
-            "rolled back configuration changes — {label} recipient was not added"
-        ));
-        return Err(rewrap_error(err));
-    }
-
-    ui.success(format!("{label} recipient `{name}` added"));
-    if kind == PortableKeyKind::Ci {
-        ui.info("Expose the secret to the jobs that decrypt, e.g. in GitHub Actions:");
-        ui.info("    env:");
-        ui.info("      SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}");
-        ui.info("Then decrypt with: sopsy secrets decrypt .env.encrypted");
-    }
-
-    let subject = match kind {
-        PortableKeyKind::BreakGlass => "Add sopsy break-glass recipient",
-        PortableKeyKind::Ci => "Add sopsy CI recipient",
-    };
-    maybe_stage(ui, &repo, subject)?;
-    Ok(())
-}
-
-/// Return `path` with `.<suffix>` appended (e.g. `key` + `private` → `key.private`).
-fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(".");
-    name.push(suffix);
-    PathBuf::from(name)
-}
-
-/// Best-effort tighten of a private-key file to owner read/write only (unix).
-fn restrict_permissions(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(metadata) = std::fs::metadata(path) {
-            let mut perms = metadata.permissions();
-            perms.set_mode(0o600);
-            let _ = std::fs::set_permissions(path, perms);
-        }
-    }
-    #[cfg(not(unix))]
-    let _ = path;
 }
 
 /// Re-wrap every encrypted file in `repo` for the current recipient set, unless
@@ -1282,23 +858,6 @@ fn age_keys_to_value(keys: &[String]) -> Value {
 mod tests {
     use super::*;
     use assert_fs::TempDir;
-
-    #[test]
-    fn with_suffix_appends_dotted_extension() {
-        assert_eq!(
-            with_suffix(Path::new("key"), "private"),
-            PathBuf::from("key.private")
-        );
-        assert_eq!(
-            with_suffix(Path::new("/tmp/bg"), "public"),
-            PathBuf::from("/tmp/bg.public")
-        );
-        // An existing extension is preserved, not replaced.
-        assert_eq!(
-            with_suffix(Path::new("bg.key"), "private"),
-            PathBuf::from("bg.key.private")
-        );
-    }
 
     #[test]
     fn truncate_shortens_only_long_values() {

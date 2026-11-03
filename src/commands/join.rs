@@ -144,7 +144,7 @@ fn acquire_public_key(
         &args.key,
         args.name.trim(),
         allowed,
-        args.without_touch_id,
+        args.presence.without_touch_id,
         &args.age_args,
         true,
     )?;

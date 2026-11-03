@@ -246,6 +246,26 @@ pub fn decrypt(file: &Path, file_type: FileType) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Re-encrypt `file` in place under a brand-new data key, for the same
+/// recipients (`sops rotate -i`).
+pub fn rotate_in_place(file: &Path, file_type: FileType) -> Result<()> {
+    let ty = file_type.as_sops_type();
+    let mut command = Command::new(sops_bin());
+    crate::keystore::configure_sops_env(&mut command);
+    let output = command
+        .args([
+            "rotate",
+            "--in-place",
+            "--input-type",
+            ty,
+            "--output-type",
+            ty,
+        ])
+        .arg(file)
+        .output()?;
+    check_status(&output)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

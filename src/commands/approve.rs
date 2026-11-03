@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime};
 use crate::cli::ApproveArgs;
 use crate::commands::recipient::{
     ConfigSnapshot, SOPS_CONFIG_FILE_NAME, add_key_to_sops_yaml, assume_yes, current_repo_root,
-    load_config, membership_paths, rewrap_error, run_updatekeys, sops_config_path,
+    load_config, membership_paths, run_updatekeys, sops_config_path,
 };
 use crate::config::{CONFIG_FILE_NAME, Config, MemberState, Recipient};
 use crate::error::{Error, Result};
@@ -132,9 +132,7 @@ pub fn run(ui: &Ui, args: &ApproveArgs) -> Result<()> {
 
     // A single re-wrap for the whole batch; roll the whole thing back on failure.
     if let Err(err) = run_updatekeys(ui, &repo, args.no_updatekeys) {
-        snapshot.restore()?;
-        ui.warn(format!("rolled back — {names} were not approved"));
-        return Err(rewrap_error(err));
+        return Err(snapshot.roll_back(ui, err, &format!("{names} were not approved")));
     }
 
     ui.banner_success(format!("{names} approved and added to all encrypted files"));

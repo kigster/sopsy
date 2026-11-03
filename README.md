@@ -687,7 +687,7 @@ sopsy recipient rotate -s yubikey -c cached       # pick an existing key or make
 sopsy recipient rotate -s yubikey --yubikey-slot 3   # scripted: use the key in slot 3
 ```
 
-`rotate` keeps your name, username and approval, swaps the public key in `.sopsy.yml` and `.sops.yaml`, and re-encrypts every secret for the new key. The old key stops working for this repository; its line in `keys.txt` is harmless.
+`rotate` keeps your name, username and approval, swaps the public key in `.sopsy.yml` and `.sops.yaml`, and re-wraps every secret's data key for the new key. The old key is no longer a recipient; its line in `keys.txt` is harmless. Switching keys is all this is for: see [`recipient rotate`](#recipient-rotate) when a key was lost or stolen.
 
 ### PIN, PUK and touch
 
@@ -1035,18 +1035,27 @@ sopsy recipient keygen -- --access-control=any-biometry-or-passcode
 
 #### `recipient rotate`
 
-Replace your key with a new one under the same name, and re-encrypt every secret for it. Use it to move to another store or YubiKey slot, or to change a YubiKey's PIN or touch policy. Takes the same key options as `keygen`; with a YubiKey, interactive runs offer the keys already on it.
+Replace your key with a new one under the same name, and re-wrap every secret's data key for it. Use it to move to another store or YubiKey slot, or to change a YubiKey's PIN or touch policy. Takes the same key options as `keygen`; with a YubiKey, interactive runs offer the keys already on it.
 
 | Argument / Flag | Description |
 | --- | --- |
 | `[NAME]` | The recipient to rotate. Defaults to your own key (matched by `$USER`); with several, interactive runs ask. |
+| `--new-data-key` | Also re-encrypt every secret under a new data key (`sops rotate`). Use it when the old key was lost or stolen. |
+| `--skip-owner-check` | Rotate a key whose owner is unknown: no `username` in `.sopsy.yml` (older configs), or `$USER` unset. |
+
+> [!CAUTION]
+>
+> On its own, `rotate` only changes **who can unwrap** the data key; the data key stays the same. Whoever holds the old key can still read the current files and every version in git history. After a lost or stolen key:
+>
+> 1. `sopsy recipient rotate --new-data-key`, so the current files use a data key the old one never saw.
+> 2. Change the secret values themselves: the old ciphertext in git history still opens with the old key.
 
 ```bash
 sopsy recipient rotate -s yubikey -c cached   # a YubiKey key that asks for the PIN once per session
 sopsy recipient rotate -s enclave             # move from a YubiKey to the Secure Enclave
 ```
 
-Only your own key can be rotated (`username` must match `$USER`), and not the break-glass key: make a new one with `recipient break-glass`, then remove the old one. A failed re-encryption rolls the configuration back.
+Only your own key can be rotated (`username` must match `$USER`; when either is unknown sopsy refuses unless `--skip-owner-check` is passed), and not the break-glass key: make a new one with `recipient break-glass`, then remove the old one. A failed re-encryption rolls the configuration back.
 
 #### `recipient break-glass`
 

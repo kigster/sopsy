@@ -332,12 +332,9 @@ pub struct JoinArgs {
     )]
     pub public_key: Option<String>,
 
-    /// Generate the key without a presence gate: for the Secure Enclave,
-    /// `--access-control none` (no Touch ID / passcode); for a YubiKey, touch
-    /// policy `never` (the PIN is kept). The private key still never leaves the
-    /// device. Rejected for software stores. Ignored with `--age-public-key`.
-    #[arg(short = 't', long = "without-touch-id", help_heading = KEY_HEADING)]
-    pub without_touch_id: bool,
+    /// Whether the new key asks for presence (Touch ID or a YubiKey touch).
+    #[command(flatten)]
+    pub presence: PresenceArgs,
 
     /// Where to generate your key.
     #[command(flatten)]
@@ -537,6 +534,18 @@ pub enum RecipientCommand {
     Ci(RecipientCiArgs),
 }
 
+/// The presence-gate flag shared by every command that generates a hardware key
+/// (`join`, `recipient keygen`, `recipient rotate`).
+#[derive(Debug, Default, Args)]
+pub struct PresenceArgs {
+    /// Generate the key without a presence gate: for the Secure Enclave,
+    /// `--access-control none` (no Touch ID / passcode); for a YubiKey, touch
+    /// policy `never` (the PIN is kept). The private key still never leaves the
+    /// device. Rejected for software stores, and ignored with `--age-public-key`.
+    #[arg(short = 't', long = "without-touch-id", help_heading = KEY_HEADING)]
+    pub without_touch_id: bool,
+}
+
 /// Arguments for `sopsy recipient keygen`.
 #[derive(Debug, Args)]
 pub struct RecipientKeygenArgs {
@@ -544,11 +553,9 @@ pub struct RecipientKeygenArgs {
     #[command(flatten)]
     pub key: StoreArgs,
 
-    /// Generate the key without a presence gate (no Touch ID for the Secure
-    /// Enclave, touch policy `never` for a YubiKey). The key still never leaves
-    /// the device. Rejected for software stores.
-    #[arg(short = 't', long = "without-touch-id", help_heading = KEY_HEADING)]
-    pub without_touch_id: bool,
+    /// Whether the new key asks for presence (Touch ID or a YubiKey touch).
+    #[command(flatten)]
+    pub presence: PresenceArgs,
 
     /// Extra arguments forwarded verbatim to the store's plugin after `--`
     /// (e.g. `--access-control=any-biometry-or-passcode` for `age-plugin-se`).
@@ -568,11 +575,20 @@ pub struct RecipientRotateArgs {
     #[command(flatten)]
     pub key: StoreArgs,
 
-    /// Generate the key without a presence gate (no Touch ID for the Secure
-    /// Enclave, touch policy `never` for a YubiKey). The key still never leaves
-    /// the device. Rejected for software stores.
-    #[arg(short = 't', long = "without-touch-id", help_heading = KEY_HEADING)]
-    pub without_touch_id: bool,
+    /// Whether the new key asks for presence (Touch ID or a YubiKey touch).
+    #[command(flatten)]
+    pub presence: PresenceArgs,
+
+    /// Also re-encrypt every secret under a new data key (`sops rotate`).
+    /// Without it only the recipient changes, and the old key can still read
+    /// the files. Use it when the old key was lost or stolen.
+    #[arg(long)]
+    pub new_data_key: bool,
+
+    /// Rotate even when the key's owner is unknown (no `username` recorded in
+    /// `.sopsy.yml`, or `$USER` unset). Only for a key you know is yours.
+    #[arg(long)]
+    pub skip_owner_check: bool,
 
     /// Extra arguments forwarded verbatim to the store's plugin after `--`.
     #[arg(last = true)]
@@ -891,10 +907,10 @@ mod tests {
             vec!["sopsy", "join", "annie", "-t"],
         ] {
             let cli = Cli::try_parse_from(argv).unwrap();
-            assert!(matches!(cli.command, Command::Join(a) if a.without_touch_id));
+            assert!(matches!(cli.command, Command::Join(a) if a.presence.without_touch_id));
         }
         let cli = Cli::try_parse_from(["sopsy", "join", "annie"]).unwrap();
-        assert!(matches!(cli.command, Command::Join(a) if !a.without_touch_id));
+        assert!(matches!(cli.command, Command::Join(a) if !a.presence.without_touch_id));
     }
 
     #[test]
