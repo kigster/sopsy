@@ -1214,9 +1214,18 @@ Run a command with the decrypted values in its environment. Nothing is written t
 | Flag | Description |
 | --- | --- |
 | `-f, --file <FILE>` | Encrypted file to load; repeat for several, later ones win. Default `.env.encrypted`. |
-| `--pristine` | Pass only the decrypted values: no inherited environment, not even `PATH`. |
+| `--pristine` | Pass only the decrypted values: no inherited environment, not even `PATH`. sopsy prints, on stderr, which common variables (`PATH`, `HOME`, `LANG`, …) it dropped. |
 
-Values reach the command exactly as stored, including backslashes and newlines. Only top-level names are loaded; a nested value is an error. `run` refuses `LD_*` and `DYLD_*` variables, which would change the code a program loads, and warns on stderr when a file sets `PATH`.
+Values reach the command exactly as stored, including backslashes and newlines. Only top-level names are loaded; a nested value is an error.
+
+sopsy finds the command with your own `PATH`, before any decrypted value applies, and searches only absolute directories: an empty or `.` entry never starts a program from the repository. `run` refuses a file that sets a variable which changes the code a program loads, since anyone who can edit the file would otherwise run code on every member's machine:
+
+| Refused | Why |
+| --- | --- |
+| `LD_*`, `DYLD_*` | Inject libraries through the dynamic loader. |
+| `PATH` | Picks the programs a command starts, including `#!/usr/bin/env` interpreters. |
+| `RUBYOPT`, `RUBYLIB`, `NODE_OPTIONS`, `PYTHONPATH`, `PYTHONSTARTUP`, `PERL5OPT`, `PERL5LIB`, `JAVA_TOOL_OPTIONS` | Make an interpreter load extra code. |
+| `BASH_ENV`, `ENV` | Name a startup file a shell runs. |
 
 ```bash
 sopsy run -- npm test

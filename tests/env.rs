@@ -103,6 +103,58 @@ fn run_pristine_passes_only_the_secrets() {
 }
 
 #[test]
+fn run_pristine_says_what_it_dropped() {
+    let dir = fixture();
+    sopsy(dir.path())
+        .env("HOME", "/home/test")
+        .args(["run", "--pristine", "--", "env"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "--pristine: starting env with only the 1 decrypted value; dropped PATH, HOME",
+        ));
+}
+
+/// Every refused variable, set in a real encrypted file: `run` must refuse it
+/// by name and never start the command. Reads the same table `run` enforces,
+/// so an entry cannot be dropped from the rule without failing here.
+#[test]
+fn run_refuses_every_blocked_variable_from_the_file() {
+    for entry in sopsy::commands::env::BLOCKED_VARIABLES {
+        let name = entry.replace('*', "PRELOAD");
+        let dir = fixture_with(&format!("FOO=bar\n{name}=/tmp/sopsy-test-planted\n"));
+        sopsy(dir.path())
+            .args(["run", "--", "sh", "-c", "touch ran"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(format!(
+                "the encrypted file sets `{name}`, which changes the code a program loads"
+            )));
+        assert!(!dir.path().join("ran").exists(), "{name}: the command ran");
+    }
+}
+
+/// A program planted in the repository is not found through an empty or `.`
+/// PATH entry: `run` searches absolute directories only.
+#[cfg(unix)]
+#[test]
+fn run_never_starts_a_program_from_the_current_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = fixture();
+    let planted = dir.path().join("planted-tool");
+    std::fs::write(&planted, "#!/bin/sh\ntouch ran\n").unwrap();
+    std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!(".::{}", std::env::var("PATH").unwrap());
+    sopsy(dir.path())
+        .env("PATH", path)
+        .args(["run", "--", "planted-tool"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("planted-tool"));
+    assert!(!dir.path().join("ran").exists(), "the planted program ran");
+}
+
+#[test]
 fn set_and_unset_change_one_value() {
     let dir = fixture();
     sopsy(dir.path())
@@ -244,23 +296,6 @@ fn run_keeps_a_literal_backslash_n() {
         .assert()
         .success();
     assert_eq!(run_echo(dir.path(), "$WIN"), r"C:\new\dir");
-}
-
-#[test]
-fn run_refuses_loader_variables_and_warns_about_path() {
-    let dir = fixture_with("LD_PRELOAD=/tmp/evil.so\n");
-    sopsy(dir.path())
-        .args(["run", "true"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("LD_PRELOAD"));
-
-    let dir = fixture_with(&format!("PATH={}\n", std::env::var("PATH").unwrap()));
-    sopsy(dir.path())
-        .args(["run", "true"])
-        .assert()
-        .success()
-        .stderr(predicate::str::contains("sets PATH"));
 }
 
 #[test]

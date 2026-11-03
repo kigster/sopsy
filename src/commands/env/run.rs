@@ -4,11 +4,14 @@
 //! command. `sops exec-env` is not used because it cannot be told the type of a
 //! `.env.encrypted` file.
 
+use std::ffi::OsString;
+use std::path::PathBuf;
 use std::process::Command;
 
 use serde_yaml_ng::Value;
 
-use super::encrypted_file_type;
+use super::blocked::check_variables;
+use super::{encrypted_file_type, program};
 use crate::cli::RunArgs;
 use crate::commands::keys::prompt_for_yubikey_if_needed;
 use crate::error::{Error, Result};
@@ -19,6 +22,15 @@ use crate::ui::Ui;
 /// environment. On Unix sopsy replaces itself with the command, so its exit
 /// status and signals are the command's own.
 pub fn run(ui: &Ui, args: &RunArgs) -> Result<()> {
+    // Find the program first, with sopsy's own PATH: nothing decrypted may
+    // change which program starts.
+    let (name, rest) = args
+        .command
+        .split_first()
+        .ok_or_else(|| Error::Validation("no command given".into()))?;
+    let path = program::resolve(name, std::env::var_os("PATH").as_deref())
+        .ok_or_else(|| Error::ToolNotFound(name.clone()))?;
+
     sops::ensure_available()?;
     prompt_for_yubikey_if_needed(ui)?;
 
@@ -32,49 +44,99 @@ pub fn run(ui: &Ui, args: &RunArgs) -> Result<()> {
         }
     }
     check_variables(&vars)?;
-    if vars.iter().any(|(k, _)| k == "PATH") {
-        // stdout belongs to the command, so this goes to stderr.
-        eprintln!("sopsy: warning: the encrypted file sets PATH for this command");
-    }
 
-    let (program, command) = build_command(args, vars)?;
+    if args.pristine {
+        // stdout belongs to the command, so this goes to stderr. sopsy is
+        // replaced by the command, so this is the last chance to explain a
+        // failure that the cleared environment causes later.
+        eprintln!(
+            "sopsy: {}",
+            pristine_notice(name, vars.len(), &dropped_basics())
+        );
+    }
+    let command = build_command(path, name, rest, args.pristine, vars);
     ui.flush();
-    exec(command, &program)
+    exec(command, name, args.pristine)
 }
 
-/// The command to start: `args.command` with `vars` added to its environment
-/// (or as its whole environment with `--pristine`).
-fn build_command(args: &RunArgs, vars: Vec<(String, String)>) -> Result<(String, Command)> {
-    let (program, rest) = args
-        .command
-        .split_first()
-        .ok_or_else(|| Error::Validation("no command given".into()))?;
-    let mut command = Command::new(program);
+/// The command to start: the resolved `path`, shown to itself as `name`, with
+/// `vars` added to its environment (or as its whole environment when
+/// `pristine`).
+fn build_command(
+    path: PathBuf,
+    name: &str,
+    rest: &[String],
+    pristine: bool,
+    vars: Vec<(String, String)>,
+) -> Command {
+    let mut command = Command::new(path);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.arg0(name);
+    }
+    #[cfg(not(unix))]
+    let _ = name;
     command.args(rest);
-    if args.pristine {
+    if pristine {
         command.env_clear();
     }
     command.envs(vars);
-    Ok((program.clone(), command))
+    command
+}
+
+/// Inherited variables most programs expect, which `--pristine` drops.
+const BASICS: &[&str] = &["PATH", "HOME", "USER", "TMPDIR", "TERM", "LANG"];
+
+/// The [`BASICS`] (and `LC_*`) set in sopsy's own environment.
+fn dropped_basics() -> Vec<String> {
+    let mut names: Vec<String> = BASICS
+        .iter()
+        .filter(|n| std::env::var_os(n).is_some())
+        .map(|n| n.to_string())
+        .collect();
+    let mut locale: Vec<String> = std::env::vars_os()
+        .filter_map(|(k, _): (OsString, OsString)| k.into_string().ok())
+        .filter(|k| k.starts_with("LC_"))
+        .collect();
+    locale.sort();
+    names.extend(locale);
+    names
+}
+
+fn pristine_notice(name: &str, count: usize, dropped: &[String]) -> String {
+    let values = if count == 1 { "value" } else { "values" };
+    let mut line = format!("--pristine: starting {name} with only the {count} decrypted {values}");
+    if !dropped.is_empty() {
+        line.push_str(&format!("; dropped {}", dropped.join(", ")));
+    }
+    line
 }
 
 #[cfg(unix)]
-fn exec(mut command: Command, program: &str) -> Result<()> {
+fn exec(mut command: Command, name: &str, pristine: bool) -> Result<()> {
     use std::os::unix::process::CommandExt;
     // Only returns on failure to start the program.
     let err = command.exec();
-    Err(start_error(program, err))
+    Err(start_error(name, err, pristine))
 }
 
 #[cfg(not(unix))]
-fn exec(mut command: Command, program: &str) -> Result<()> {
-    let status = command.status().map_err(|e| start_error(program, e))?;
+fn exec(mut command: Command, name: &str, pristine: bool) -> Result<()> {
+    let status = command
+        .status()
+        .map_err(|e| start_error(name, e, pristine))?;
     std::process::exit(status.code().unwrap_or(1));
 }
 
-fn start_error(program: &str, err: std::io::Error) -> Error {
+fn start_error(name: &str, err: std::io::Error, pristine: bool) -> Error {
+    if pristine {
+        return Error::Validation(format!(
+            "could not start `{name}`: {err}; the environment was cleared by --pristine"
+        ));
+    }
     if err.kind() == std::io::ErrorKind::NotFound {
-        Error::ToolNotFound(program.to_string())
+        Error::ToolNotFound(name.to_string())
     } else {
         Error::Io(err)
     }
@@ -119,23 +181,6 @@ fn scalar(value: &Value) -> Option<String> {
     }
 }
 
-/// Refuse variables that change which code the command loads. Anyone who can
-/// edit the encrypted file could otherwise run code on every machine that
-/// runs `sopsy run`.
-fn check_variables(vars: &[(String, String)]) -> Result<()> {
-    let loader = vars
-        .iter()
-        .map(|(k, _)| k.as_str())
-        .find(|k| k.starts_with("LD_") || k.starts_with("DYLD_"));
-    match loader {
-        Some(name) => Err(Error::Validation(format!(
-            "the encrypted file sets `{name}`, which changes the code a program loads; \
-             sopsy run refuses it"
-        ))),
-        None => Ok(()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,29 +218,54 @@ mod tests {
     }
 
     #[test]
-    fn loader_variables_are_refused() {
-        assert!(check_variables(&pairs(&[("PATH", "/bin"), ("A", "1")])).is_ok());
-        for name in ["LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES"] {
-            let err = check_variables(&pairs(&[(name, "x")])).unwrap_err();
-            assert!(err.to_string().contains(name), "{err}");
-        }
-    }
-
-    #[test]
     fn an_empty_command_is_an_error() {
         let args = RunArgs {
             files: vec![],
             pristine: false,
             command: vec![],
         };
-        assert!(build_command(&args, vec![]).is_err());
+        let ui = Ui::new(false, false, false);
+        assert!(run(&ui, &args).is_err());
     }
 
     #[test]
-    fn a_missing_program_is_reported_by_name() {
+    fn the_command_runs_by_full_path_and_keeps_its_name() {
+        let rest = vec!["-c".to_string()];
+        let cmd = build_command("/bin/sh".into(), "sh", &rest, true, pairs(&[("A", "1")]));
+        assert_eq!(cmd.get_program(), "/bin/sh");
+        let envs: Vec<_> = cmd.get_envs().collect();
+        assert!(
+            envs.iter()
+                .any(|(k, v)| *k == "A" && *v == Some("1".as_ref()))
+        );
+    }
+
+    #[test]
+    fn start_errors_name_the_program_and_pristine() {
         let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
-        assert!(matches!(start_error("nope", missing), Error::ToolNotFound(p) if p == "nope"));
+        assert!(
+            matches!(start_error("nope", missing, false), Error::ToolNotFound(p) if p == "nope")
+        );
         let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
-        assert!(matches!(start_error("nope", denied), Error::Io(_)));
+        assert!(matches!(start_error("nope", denied, false), Error::Io(_)));
+        let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let err = start_error("rails", missing, true).to_string();
+        assert!(
+            err.contains("`rails`") && err.contains("cleared by --pristine"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_pristine_notice_counts_values_and_names_what_was_dropped() {
+        let dropped = vec!["PATH".to_string(), "HOME".to_string()];
+        assert_eq!(
+            pristine_notice("rails", 3, &dropped),
+            "--pristine: starting rails with only the 3 decrypted values; dropped PATH, HOME"
+        );
+        assert_eq!(
+            pristine_notice("env", 1, &[]),
+            "--pristine: starting env with only the 1 decrypted value"
+        );
     }
 }

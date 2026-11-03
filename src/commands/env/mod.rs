@@ -10,10 +10,13 @@ use std::path::Path;
 use crate::error::{Error, Result};
 use crate::sops::FileType;
 
+mod blocked;
+mod program;
 mod rotate;
 mod run;
 mod values;
 
+pub use blocked::{BLOCKED_VARIABLES, is_blocked};
 pub use rotate::rotate_data_key;
 pub use run::run;
 pub use values::{set, unset};

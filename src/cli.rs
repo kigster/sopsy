@@ -174,7 +174,7 @@ pub struct RunArgs {
     pub files: Vec<PathBuf>,
 
     /// Pass only the decrypted values (no inherited environment, not even
-    /// `PATH`) to the command.
+    /// `PATH`) to the command; the dropped variables are listed on stderr.
     #[arg(long)]
     pub pristine: bool,
 
