@@ -403,9 +403,11 @@ Three settings decide where a new key goes (`init`, `join`, `recipient keygen`).
 | --- | --- | --- | --- |
 | `--store <STORE>` | the command line | this run | Uses exactly that store. It must be allowed and work on this machine, or the command fails. |
 | `SOPSY_PRIVATE_KEY_STORE_PRIORITY` | your shell | you | Your own order for `--store auto`, e.g. `yubikey,enclave`. It can reorder or narrow the repository's list, never widen it. |
-| `--allow-stores` (`key_policy.allowed`) | `sopsy init`, committed in `.sopsy.yml` | everyone | Which stores members may use, **and** the default order for `auto`. |
+| `--allow-stores` (`key_policy.allowed`) | `sopsy init`, committed in `.sopsy.yml` | everyone | Which stores members may use, **and** the default order for `auto` within each tier: hardware stores always come before software, software before plaintext. |
 
 With none of them set (`--allow-stores any`, no env var), `auto` tries `enclave, yubikey, keychain, file`.
+
+The tier rule keeps a committed list from steering members onto a weaker key: `--allow-stores file,keychain,enclave` still tries `enclave` first. Only you can rank a weaker store first, with the env var or `--store`.
 
 `auto` walks the resulting list and takes the first store that works here. Stores this machine cannot support are skipped:
 
@@ -700,7 +702,7 @@ Before anything else, `init` installs missing supporting tools (the `sopsy deps`
 
 | Flag | Description |
 | --- | --- |
-| `-A`, `--allow-stores <STORES>` | Key stores members may use, in order of preference, comma-separated: `enclave`, `yubikey`, `keychain`, `file`, or the groups `onchip`, `exthardware`, `software`. The order is also the default order `auto` tries ([details](#how-sopsy-picks-a-key-store)). `any` or `all` records no restriction. Non-interactive default: hardware only (`onchip,exthardware`). Interactive runs ask, with hardware stores pre-selected. On a machine with no hardware store, init fails rather than weakening the policy: pass `--allow-stores software` or `--allow-stores any`. |
+| `-A`, `--allow-stores <STORES>` | Key stores members may use, in order of preference within each tier (hardware, then software, then plaintext), comma-separated: `enclave`, `yubikey`, `keychain`, `file`, or the groups `onchip`, `exthardware`, `software`. The order is also the default order `auto` tries ([details](#how-sopsy-picks-a-key-store)). `any` or `all` records no restriction. Non-interactive default: hardware only (`onchip,exthardware`). Interactive runs ask, with hardware stores pre-selected. On a machine with no hardware store, init fails rather than weakening the policy: pass `--allow-stores software` or `--allow-stores any`. |
 | `--no-emergency-keys` | Skip the break-glass emergency key that interactive runs create. Unattended runs (`-y`) always skip it; run `sopsy recipient break-glass` later. |
 
 **Personal options** only shape the admin's (your) own key:

@@ -15,7 +15,7 @@ Decided 2026-11-03, PR #25.
 
 1. `--store <STORE>` on the command line (still checked against the allow list).
 2. `SOPSY_PRIVATE_KEY_STORE_PRIORITY`, a per-developer override. It is filtered by the allow list, so it can reorder or narrow it, never widen it.
-3. The repository's `key_policy.allowed`, in the order given to `init`.
+3. The repository's `key_policy.allowed`, in the order given to `init` **within each tier**: hardware stores always come before software, software before plaintext. Added after the security review: a committed list must not steer members onto a weaker store while a stronger one is allowed.
 4. Without a restriction: `enclave, yubikey, keychain, file`.
 
 Stores the machine cannot support (no Enclave on Linux or Intel Macs, no YubiKey plugged in) are skipped at run time; the committed list is never rewritten per machine.

@@ -234,7 +234,8 @@ pub struct InitArgs {
     /// preference, recorded as `key_policy.allowed` in `.sopsy.yml`.
     /// Comma-separated or repeated: `enclave`, `yubikey`, `keychain`, `file`,
     /// or the groups `onchip`, `exthardware`, `software`. The order is also the
-    /// default order `--store auto` tries; each developer can override it with
+    /// default order `--store auto` tries, within each tier (hardware stores
+    /// always come first); each developer can override it with
     /// `SOPSY_PRIVATE_KEY_STORE_PRIORITY`. `any` or `all` records no restriction.
     /// Non-interactive default: hardware only (`onchip,exthardware`). Interactive
     /// runs ask, with the hardware stores pre-selected.

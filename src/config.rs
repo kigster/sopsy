@@ -152,7 +152,8 @@ impl Recipient {
 pub struct KeyPolicy {
     /// The allowed set: member keys must live in any one of these stores or
     /// groups (`onchip`, `exthardware`, `software`, or a store name). It filters
-    /// stores, it does not order them (`SOPSY_PRIVATE_KEY_STORE_PRIORITY` does).
+    /// stores, and its order is the default `--store auto` order within each
+    /// tier (hardware first); `SOPSY_PRIVATE_KEY_STORE_PRIORITY` overrides it.
     /// Empty means no restriction (`sopsy init --allow-stores any`); without
     /// `--allow-stores`, `sopsy init` records hardware only (`onchip`,
     /// `exthardware`). Break-glass and CI keys are exempt. A soft guardrail like

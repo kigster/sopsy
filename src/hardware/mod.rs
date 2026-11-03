@@ -240,7 +240,8 @@ impl PrioritySource {
 /// The member's `auto` order, first match wins:
 ///
 /// 1. [`PRIORITY_ENV`], a personal override;
-/// 2. the repository's `allowed` stores, in the order they were listed;
+/// 2. the repository's `allowed` stores, hardware before software before
+///    plaintext, and in the order they were listed within each tier;
 /// 3. [`Store::ALL`].
 ///
 /// [`candidates`] still filters the result by `allowed`, so the env var can
@@ -259,7 +260,15 @@ fn priority_from(
             .map(|order| (order, PrioritySource::Env))
             .map_err(|err| Error::Validation(format!("{PRIORITY_ENV}: {err}"))),
         _ => Ok(match allowed {
-            Some(stores) if !stores.is_empty() => (stores.to_vec(), PrioritySource::Repository),
+            Some(stores) if !stores.is_empty() => {
+                // The repository orders stores within a tier, never across
+                // them: a committed list must not steer members onto a weaker
+                // store while a stronger one is allowed. Stable, so the
+                // admin's order survives inside each tier.
+                let mut order = stores.to_vec();
+                order.sort_by_key(|s| s.kind());
+                (order, PrioritySource::Repository)
+            }
             _ => (Store::ALL.to_vec(), PrioritySource::Default),
         }),
     }
@@ -482,6 +491,16 @@ mod tests {
         let (order, source) = priority_from(None, Some(&allowed)).unwrap();
         assert_eq!(order, allowed);
         assert_eq!(source, PrioritySource::Repository);
+    }
+
+    #[test]
+    fn repository_order_never_ranks_a_weaker_store_first() {
+        let allowed = [Store::File, Store::Keychain, Store::YubiKey, Store::Enclave];
+        let (order, _) = priority_from(None, Some(&allowed)).unwrap();
+        assert_eq!(
+            order,
+            [Store::YubiKey, Store::Enclave, Store::Keychain, Store::File]
+        );
     }
 
     #[test]
