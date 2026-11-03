@@ -27,9 +27,10 @@ const YUBIKEY_PROMPTS: [&str; 7] = [
 const YUBIKEY_TOUCH: &str = "After entering your PIN, you must touch the YubiKey (its light blinks); nothing happens until you do.";
 
 /// How to avoid typing the PIN on every decryption.
-const YUBIKEY_PIN_CACHE_NOTE: &str = "> [!NOTE] You can cache the PIN once per session with \
-     `-c cached` (`--yubikey-pin-policy cached`, the default) when the key is made; \
-     `-c always` asks on every decryption.";
+const YUBIKEY_PIN_CACHE_NOTE: &str = "> [!NOTE] To be asked for the PIN only once per session, \
+     generate your YubiKey key with `-c cached` (`--yubikey-pin-policy cached`, the default) \
+     on `sopsy init`, `join` or `recipient keygen`. The policy is fixed in the key; changing it \
+     means generating a new one.";
 
 /// Choose a store, generate a key in it and, with `persist`, save the local
 /// identity. `label` names the key (recipient name).

@@ -287,7 +287,9 @@ fn init_without_allow_stores_defaults_to_hardware_only() {
         .stdout(predicate::str::contains("hardware-only"))
         .stdout(predicate::str::contains("--allow-stores any"))
         .stdout(predicate::str::contains("you must touch the YubiKey"))
-        .stdout(predicate::str::contains("[!NOTE] You can cache the PIN"));
+        .stdout(predicate::str::contains(
+            "[!NOTE] To be asked for the PIN only once per session",
+        ));
 
     let config = sb.read(".sopsy.yml");
     assert!(

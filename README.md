@@ -528,7 +528,7 @@ $ sopsy init -A exthardware,software -s yubikey
   ℹ Talking to your YubiKey: enter its PIN when asked.
   ℹ Nothing is shown while you type a PIN or PUK; the plugin prints [hidden] afterwards.
   ℹ After entering your PIN, you must touch the YubiKey (its light blinks); nothing happens until you do.
-  ℹ > [!NOTE] You can cache the PIN once per session with `-c cached` (`--yubikey-pin-policy cached`, the default) when the key is made; `-c always` asks on every decryption.
+  ℹ > [!NOTE] To be asked for the PIN only once per session, generate your YubiKey key with `-c cached` (`--yubikey-pin-policy cached`, the default) on `sopsy init`, `join` or `recipient keygen`. The policy is fixed in the key; changing it means generating a new one.
 
 🔐 Enter PIN for YubiKey with serial 12345678 (default is 123456): [hidden]
 👆 Please touch the YubiKey
