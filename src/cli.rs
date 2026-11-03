@@ -150,9 +150,13 @@ Examples:
   # Register an existing public key instead of generating one
   sopsy init --age-public-key age1… --recipient-name \"Alan Turing\"
 
-  # Unattended (CI / scripts): Secure Enclave key, hardware-only policy,
-  # no emergency key
+  # Scripted, on your laptop (no prompts): Secure Enclave key,
+  # hardware-only policy, no emergency key
   sopsy init -y --store enclave --require onchip,exthardware --no-emergency-keys
+
+  # CI never runs `init`: runners have no Enclave or YubiKey. After init,
+  # give CI its own portable key, stored as the `SOPS_AGE_KEY` CI secret
+  sopsy recipient ci
 
   # Also create the offline break-glass emergency key
   sopsy init --generate-emergency-keys";
