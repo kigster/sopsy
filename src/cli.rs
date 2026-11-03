@@ -128,8 +128,45 @@ pub enum Command {
     Completion(CompletionArgs),
 }
 
+/// Shown at the end of `sopsy init --help`.
+const INIT_EXAMPLES: &str = "\
+Examples:
+  # Interactive: asks for the store policy, your key store and an emergency key
+  sopsy init
+
+  # Your key on a YubiKey (even on a Mac with a Secure Enclave);
+  # members may use any hardware store (the default policy)
+  sopsy init --store yubikey
+
+  # Your key on a YubiKey, and every member must use a YubiKey too
+  sopsy init --store yubikey --require yubikey
+
+  # Allow software keys (keychain / file) as well as hardware
+  sopsy init --require onchip,exthardware,software
+
+  # No store restriction at all
+  sopsy init --require any
+
+  # Register an existing public key instead of generating one
+  sopsy init --age-public-key age1… --recipient-name \"Alan Turing\"
+
+  # Unattended (CI / scripts): Secure Enclave key, hardware-only policy,
+  # no emergency key
+  sopsy init -y --store enclave --require onchip,exthardware --no-emergency-keys
+
+  # Also create the offline break-glass emergency key
+  sopsy init --generate-emergency-keys";
+
 /// Arguments for `sopsy init`.
 #[derive(Debug, Args)]
+#[command(mut_arg("store", |a| {
+    let help = "Where the admin's (your) private key lives. Applies to the admin only: other \
+                members pick their own store with `sopsy join --store`, limited by `--require`. \
+                `auto` picks the most secure store this machine supports, in the order of \
+                `SOPSY_PRIVATE_KEY_STORE_PRIORITY` (default: enclave, yubikey, keychain, file)";
+    a.help(help).long_help(help)
+}))]
+#[command(after_long_help = INIT_EXAMPLES)]
 pub struct InitArgs {
     /// Name to record for the recipient created/registered during init.
     #[arg(long, short = 'n')]
@@ -544,6 +581,19 @@ mod tests {
     fn cli_definition_is_valid() {
         // clap's debug assertions catch malformed derive definitions.
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn init_store_help_says_admin_only() {
+        let help = |sub: &str| {
+            let mut cmd = Cli::command();
+            cmd.find_subcommand_mut(sub)
+                .unwrap()
+                .render_long_help()
+                .to_string()
+        };
+        assert!(help("init").contains("Applies to the admin only"));
+        assert!(!help("join").contains("admin only"));
     }
 
     #[test]
