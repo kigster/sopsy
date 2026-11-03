@@ -1144,7 +1144,7 @@ checksum = "d0d5d4b1981b8bbbb7aed204cae5726d683d5d6ac7e74ec54122ea28f315e7c8"
 
 [[package]]
 name = "sopsy"
-version = "1.4.0"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
