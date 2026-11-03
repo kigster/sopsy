@@ -44,6 +44,7 @@ Type "# Bootstrap a repo — one command mints your Enclave key and writes the c
 Enter
 Type "git init -q app && cd app"
 Enter
+# -y records a hardware-only key policy (Secure Enclave + YubiKey) by default.
 Type "sopsy init -y --recipient-name 'me' --no-break-glass"
 Enter
 Sleep 2500ms

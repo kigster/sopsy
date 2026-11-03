@@ -152,8 +152,10 @@ impl Recipient {
 pub struct KeyPolicy {
     /// The allowed set: member keys must live in one of these stores or groups
     /// (`onchip`, `exthardware`, `software`, or a store name). Empty means no
-    /// restriction. Break-glass and CI keys are exempt. A soft guardrail like
-    /// the rest of `.sopsy.yml`: crypto cannot enforce it.
+    /// restriction (`sopsy init --require any`). `sopsy init` without `--require`
+    /// records hardware only (`onchip`, `exthardware`). Break-glass and CI keys
+    /// are exempt. A soft guardrail like the rest of `.sopsy.yml`: crypto cannot
+    /// enforce it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required: Vec<String>,
 }

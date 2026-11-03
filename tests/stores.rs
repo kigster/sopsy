@@ -109,11 +109,37 @@ impl Sandbox {
     }
 }
 
+/// Sandbox machines have no Enclave plugin and no YubiKey. On Linux that makes
+/// both hardware stores Unavailable, so the implicit default must refuse to
+/// weaken the policy. Apple Silicon reports the Enclave as MissingTool instead.
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+#[test]
+fn init_without_require_fails_when_no_hardware_store_is_available() {
+    let sb = Sandbox::new();
+    sb.sopsy()
+        .args(["init", "--no-emergency-keys"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--require any"))
+        .stderr(predicate::str::contains("--require software"));
+    assert!(
+        !sb.path().join(".sopsy.yml").exists(),
+        "must not write an unrestricted policy just because hardware is missing"
+    );
+}
+
 #[test]
 fn file_store_round_trips_and_warns() {
     let sb = Sandbox::new();
     sb.sopsy()
-        .args(["init", "--store", "file", "--no-emergency-keys"])
+        .args([
+            "init",
+            "--require",
+            "any",
+            "--store",
+            "file",
+            "--no-emergency-keys",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains("PLAINTEXT"));
@@ -128,7 +154,14 @@ fn file_store_round_trips_and_warns() {
 fn keychain_store_keeps_the_secret_off_disk_and_out_of_argv() {
     let sb = Sandbox::new();
     sb.sopsy()
-        .args(["init", "--store", "keychain", "--no-emergency-keys"])
+        .args([
+            "init",
+            "--require",
+            "software",
+            "--store",
+            "keychain",
+            "--no-emergency-keys",
+        ])
         .assert()
         .success();
 
@@ -151,7 +184,7 @@ fn auto_falls_back_through_the_priority_list() {
     // No enclave and no YubiKey here; keychain is next.
     sb.sopsy()
         .env("SOPSY_PRIVATE_KEY_STORE_PRIORITY", "exthardware,software")
-        .args(["init", "--no-emergency-keys"])
+        .args(["init", "--require", "any", "--no-emergency-keys"])
         .assert()
         .success();
     assert!(sb.read(".sopsy.yml").contains("store: keychain"));
@@ -159,7 +192,7 @@ fn auto_falls_back_through_the_priority_list() {
     let sb = Sandbox::new();
     sb.sopsy()
         .env("SOPSY_PRIVATE_KEY_STORE_PRIORITY", "exthardware")
-        .args(["init", "--no-emergency-keys"])
+        .args(["init", "--require", "any", "--no-emergency-keys"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("no usable key store"));
@@ -223,6 +256,44 @@ fn yubikey_store_records_stub_and_recipient() {
 }
 
 #[test]
+fn init_without_require_defaults_to_hardware_only() {
+    let sb = Sandbox::new();
+    let p = sb.path();
+    write_script(&p.join("usb"), "echo '+-o YubiKey OTP+FIDO+CCID@1'\n");
+    write_script(
+        &p.join("age-plugin-yubikey"),
+        "case \"$*\" in *--list*) exit 0;; esac\n\
+         printf '%s\\n' '#       Serial: 12345678, Slot: 1' \
+         '#    Recipient: age1tag1qfake' \
+         '# Legacy recipient: age1yubikey1qfakelegacy' \
+         'AGE-PLUGIN-YUBIKEY-1QFAKESTUB'\n",
+    );
+    write_script(
+        &p.join("sops"),
+        "case \"$1\" in --version) echo 'sops 9.9.9';; *) echo 'ENC[fake]';; esac\n",
+    );
+
+    sb.sopsy()
+        .env("SOPSY_USB_LIST_BIN", p.join("usb"))
+        .env("SOPSY_AGE_PLUGIN_YUBIKEY_BIN", p.join("age-plugin-yubikey"))
+        .env("SOPSY_SOPS_BIN", p.join("sops"))
+        .args(["init", "--no-emergency-keys"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hardware-only"))
+        .stdout(predicate::str::contains("--require any"));
+
+    let config = sb.read(".sopsy.yml");
+    assert!(
+        config.contains("key_policy:")
+            && config.contains("- onchip")
+            && config.contains("- exthardware"),
+        "non-interactive default must record hardware only:\n{config}"
+    );
+    assert!(config.contains("store: yubikey"), "{config}");
+}
+
+#[test]
 fn several_yubikeys_need_a_serial_when_not_interactive() {
     let sb = Sandbox::new();
     let p = sb.path();
@@ -238,6 +309,16 @@ fn several_yubikeys_need_a_serial_when_not_interactive() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("2 YubiKeys are plugged in"));
+}
+
+#[test]
+fn init_require_any_cannot_mix_with_stores() {
+    let sb = Sandbox::new();
+    sb.sopsy()
+        .args(["init", "--require", "any,file", "--no-emergency-keys"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot be combined"));
 }
 
 #[test]
@@ -266,7 +347,14 @@ fn init_refuses_a_broken_sops_yaml_before_generating_a_key() {
     )
     .unwrap();
     sb.sopsy()
-        .args(["init", "-s", "file", "--no-emergency-keys"])
+        .args([
+            "init",
+            "--require",
+            "any",
+            "-s",
+            "file",
+            "--no-emergency-keys",
+        ])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -285,7 +373,14 @@ fn init_adds_its_key_to_an_existing_sops_yaml() {
     )
     .unwrap();
     sb.sopsy()
-        .args(["init", "-s", "file", "--no-emergency-keys"])
+        .args([
+            "init",
+            "--require",
+            "any",
+            "-s",
+            "file",
+            "--no-emergency-keys",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -305,7 +400,7 @@ fn init_adds_its_key_to_an_existing_sops_yaml() {
 fn init_rejects_a_pasted_non_key() {
     let sb = Sandbox::new();
     sb.sopsy()
-        .args(["init", "--age-public-key", "n"])
+        .args(["init", "--require", "any", "--age-public-key", "n"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("not an age public key"));
@@ -411,7 +506,14 @@ fn a_declared_hardware_store_cannot_launder_a_plain_key() {
 fn without_touch_id_is_rejected_for_software_stores() {
     let sb = Sandbox::new();
     sb.sopsy()
-        .args(["init", "--store", "file", "--no-emergency-keys"])
+        .args([
+            "init",
+            "--require",
+            "any",
+            "--store",
+            "file",
+            "--no-emergency-keys",
+        ])
         .assert()
         .success();
     sb.sopsy()
