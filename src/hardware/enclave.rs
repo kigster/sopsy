@@ -36,15 +36,7 @@ fn plugin_bin() -> OsString {
 /// Run the plugin with `args` on the user's terminal, for `sopsy enclave`.
 pub fn passthrough(args: &[String]) -> Result<()> {
     ensure_available()?;
-    let status = Command::new(plugin_bin()).args(args).status()?;
-    if status.success() {
-        return Ok(());
-    }
-    Err(crate::error::Error::ProcessFailed {
-        tool: PLUGIN_BIN.to_string(),
-        code: status.code().unwrap_or(-1),
-        message: "see the plugin's output above".to_string(),
-    })
+    super::passthrough(PLUGIN_BIN, plugin_bin(), args)
 }
 
 /// Verify the `age-plugin-se` binary is available on `PATH` (or via

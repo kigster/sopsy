@@ -433,15 +433,7 @@ fn run_interactive(args: &[String]) -> Result<Output> {
 /// Run the plugin with `args` on the user's terminal, for `sopsy yubikey`.
 pub fn passthrough(args: &[String]) -> Result<()> {
     ensure_available()?;
-    let status = Command::new(plugin_bin()).args(args).status()?;
-    if status.success() {
-        return Ok(());
-    }
-    Err(Error::ProcessFailed {
-        tool: PLUGIN_BIN.to_string(),
-        code: status.code().unwrap_or(-1),
-        message: "see the plugin's output above".to_string(),
-    })
+    super::passthrough(PLUGIN_BIN, plugin_bin(), args)
 }
 
 fn plugin_command(args: &[String]) -> Command {

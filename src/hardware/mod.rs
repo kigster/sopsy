@@ -481,6 +481,20 @@ pub fn persist(label: &str, identity: &GeneratedIdentity) -> Result<String> {
     }
 }
 
+/// Run a store's plugin with `args` verbatim, inheriting the terminal, for
+/// `sopsy yubikey` / `sopsy enclave`. `tool` names it in the error.
+pub(crate) fn passthrough(tool: &str, bin: std::ffi::OsString, args: &[String]) -> Result<()> {
+    let status = std::process::Command::new(bin).args(args).status()?;
+    if status.success() {
+        return Ok(());
+    }
+    Err(Error::ProcessFailed {
+        tool: tool.to_string(),
+        code: status.code().unwrap_or(-1),
+        message: "see the plugin's output above".to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
