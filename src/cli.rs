@@ -135,6 +135,12 @@ pub enum Command {
     Completion(CompletionArgs),
 }
 
+/// Heading for where a key is generated (`--store`, `--age-public-key`, …).
+const KEY_HEADING: &str = "Key options";
+
+/// Heading for the YubiKey PIV tuning flags.
+const YUBIKEY_HEADING: &str = "YubiKey options";
+
 /// `sopsy init` heading for flags recorded in the repository for every member.
 const INIT_REPO_HEADING: &str = "Repository options (affect everyone using this repository)";
 
@@ -194,9 +200,9 @@ Examples:
     mut_arg("username", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(6)),
     mut_arg("public_key", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(7)),
     mut_arg("no_generate", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(8)),
-    mut_arg("pin_policy", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(9)),
-    mut_arg("touch_policy", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(10)),
-    mut_arg("new_slot", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(11)),
+    mut_arg("pin_policy", |a| a.display_order(9)),
+    mut_arg("touch_policy", |a| a.display_order(10)),
+    mut_arg("new_slot", |a| a.display_order(11)),
     mut_arg("force", |a| a.display_order(12)),
 )]
 #[command(after_long_help = INIT_EXAMPLES)]
@@ -280,7 +286,7 @@ pub struct EditArgs {
 #[derive(Debug, Args)]
 pub struct JoinArgs {
     /// Your name as recorded in `.sopsy.yml` (full name or first name,
-    /// e.g. `"Konstantin Gredeskoul"` or `annie`).
+    /// e.g. `"Alan Turing"` or `alan`).
     pub name: String,
 
     /// System username recorded alongside the name (defaults to `$USER`).
@@ -296,7 +302,8 @@ pub struct JoinArgs {
         long = "age-public-key",
         short = 'p',
         alias = "public-key",
-        value_name = "AGE1…"
+        value_name = "AGE1…",
+        help_heading = KEY_HEADING,
     )]
     pub public_key: Option<String>,
 
@@ -304,7 +311,7 @@ pub struct JoinArgs {
     /// `--access-control none` (no Touch ID / passcode); for a YubiKey, touch
     /// policy `never` (the PIN is kept). The private key still never leaves the
     /// device. Rejected for software stores. Ignored with `--age-public-key`.
-    #[arg(short = 't', long = "without-touch-id")]
+    #[arg(short = 't', long = "without-touch-id", help_heading = KEY_HEADING)]
     pub without_touch_id: bool,
 
     /// Where to generate your key.
@@ -351,7 +358,8 @@ pub struct StoreArgs {
     /// Where the private key lives. `auto` picks the most secure store this
     /// machine supports, in the order of `SOPSY_PRIVATE_KEY_STORE_PRIORITY`
     /// (default: enclave, yubikey, keychain, file).
-    #[arg(long, short = 's', value_enum, default_value_t = StoreChoice::Auto)]
+    #[arg(long, short = 's', value_enum, default_value_t = StoreChoice::Auto, help_heading = KEY_HEADING,
+        display_order = 0)]
     pub store: StoreChoice,
 
     /// YubiKey serial, for scripts; interactive runs list the plugged-in keys.
@@ -364,7 +372,8 @@ pub struct StoreArgs {
     pub yubikey_slot: Option<u8>,
 
     /// Always generate a new YubiKey key instead of reusing an existing one.
-    #[arg(long = "always-new-slot", short = 'a', alias = "new-slot")]
+    #[arg(long = "always-new-slot", short = 'a', alias = "new-slot", help_heading = YUBIKEY_HEADING,
+        display_order = 22)]
     pub new_slot: bool,
 
     /// When the YubiKey asks for its PIN: every decryption, once per session
@@ -373,7 +382,9 @@ pub struct StoreArgs {
         long = "yubikey-pin-policy",
         short = 'c',
         alias = "pin-policy",
-        value_enum
+        value_enum,
+        help_heading = YUBIKEY_HEADING,
+        display_order = 20,
     )]
     pub pin_policy: Option<PinPolicy>,
 
@@ -383,7 +394,9 @@ pub struct StoreArgs {
         long = "yubikey-touch-policy",
         short = 'b',
         alias = "touch-policy",
-        value_enum
+        value_enum,
+        help_heading = YUBIKEY_HEADING,
+        display_order = 21,
     )]
     pub touch_policy: Option<TouchPolicy>,
 }
@@ -665,6 +678,7 @@ mod tests {
             "--username",
             "--age-public-key",
             "--no-generate",
+            "YubiKey options",
             "--yubikey-pin-policy",
             "--yubikey-touch-policy",
             "--always-new-slot",
