@@ -641,7 +641,7 @@ fn updatekeys_file(file: &Path) -> Result<()> {
 /// it. Expansion is bounded (see [`expand_glob`]): `*` never crosses `/`, so a
 /// glob like `*.encrypted` lists one directory, never a recursive walk of (say)
 /// `$HOME`. Each match must also carry the `ENC[` marker to count.
-fn collect_encrypted_files(repo: &Path, globs: &[String]) -> Result<Vec<PathBuf>> {
+pub(crate) fn collect_encrypted_files(repo: &Path, globs: &[String]) -> Result<Vec<PathBuf>> {
     let mut found = Vec::new();
     for pattern in globs {
         for path in expand_glob(repo, pattern) {

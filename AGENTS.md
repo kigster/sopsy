@@ -18,6 +18,7 @@ All commands are implemented:
 - `encrypt` / `decrypt`, which write to stdout by default for direnv and wrappers. `secrets encrypt|decrypt` is a hidden alias for both.
 - `recipient rotate`: swap your key for a new one under the same name and re-key
 - `yubikey` / `enclave`: pass arguments straight to `age-plugin-yubikey` / `age-plugin-se`
+- `run` (secrets into a command's environment, nothing on disk), `set` / `unset` (one value, via `sops set --value-stdin` / `sops unset`), `rotate-data-key` (`sops rotate`). `run` decrypts with `--output-type dotenv` rather than `sops exec-env`, which cannot be told a `.env.encrypted` file's type.
 - `types` (`list-supported-types` is a hidden alias), `check`, `deps`, `completion`
 
 `recipient break-glass` and `recipient ci` share one portable-key ceremony, `portable_key_ceremony` in `commands/recipient.rs`:

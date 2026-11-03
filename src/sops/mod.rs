@@ -246,6 +246,63 @@ pub fn decrypt(file: &Path, file_type: FileType) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Decrypt `file` and return it as dotenv (`KEY=value` lines), whatever its
+/// own format: what `sopsy run` puts into a command's environment.
+pub fn decrypt_as_dotenv(file: &Path, file_type: FileType) -> Result<String> {
+    let mut command = Command::new(sops_bin());
+    crate::keystore::configure_sops_env(&mut command);
+    let output = command
+        .args(["--decrypt", "--input-type", file_type.as_sops_type()])
+        .args(["--output-type", "dotenv"])
+        .arg(file)
+        .output()?;
+    check_status(&output)?;
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Set `path` (a sops tree path such as `["API_KEY"]`) to `json_value` in
+/// `file`, in place. The value goes through stdin (`--value-stdin`), so it
+/// never appears in a process listing.
+pub fn set_value(file: &Path, file_type: FileType, path: &str, json_value: &str) -> Result<()> {
+    use std::io::Write;
+    use std::process::Stdio;
+    let ty = file_type.as_sops_type();
+    let mut command = Command::new(sops_bin());
+    crate::keystore::configure_sops_env(&mut command);
+    let mut child = command
+        .args([
+            "set",
+            "--input-type",
+            ty,
+            "--output-type",
+            ty,
+            "--value-stdin",
+        ])
+        .arg(file)
+        .arg(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(json_value.as_bytes())?;
+    }
+    check_status(&child.wait_with_output()?)
+}
+
+/// Remove `path` from `file`, in place.
+pub fn unset_value(file: &Path, file_type: FileType, path: &str) -> Result<()> {
+    let ty = file_type.as_sops_type();
+    let mut command = Command::new(sops_bin());
+    crate::keystore::configure_sops_env(&mut command);
+    let output = command
+        .args(["unset", "--input-type", ty, "--output-type", ty])
+        .arg(file)
+        .arg(path)
+        .output()?;
+    check_status(&output)
+}
+
 /// Re-encrypt `file` in place under a brand-new data key, for the same
 /// recipients (`sops rotate -i`).
 pub fn rotate_in_place(file: &Path, file_type: FileType) -> Result<()> {

@@ -12,6 +12,7 @@ pub mod completion;
 pub mod deps;
 pub mod doctor;
 pub mod edit;
+pub mod env;
 pub mod init;
 pub mod join;
 pub(crate) mod keys;

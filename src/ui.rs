@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressStyle};
 use inquire::ui::{Color, RenderConfig, StyleSheet};
-use inquire::{Confirm, Text};
+use inquire::{Confirm, Password, PasswordDisplayMode, Text};
 use owo_colors::{OwoColorize, Style};
 
 use crate::error::{Error, Result};
@@ -652,6 +652,25 @@ impl Ui {
                 return Ok(scripted_text(prompt, answer, ""));
             }
             Text::new(prompt)
+                .with_render_config(self.render_config())
+                .prompt()
+                .map_err(into_other)
+        })
+    }
+
+    /// Ask for a secret value without echoing it.
+    ///
+    /// Returns [`Error::NonInteractive`] when prompting is disabled.
+    pub fn secret(&self, prompt: &str, flag: &str) -> Result<String> {
+        self.ensure_interactive(prompt, flag)?;
+        self.spaced(|| {
+            #[cfg(test)]
+            if let Some(answer) = self.scripted_answer(prompt) {
+                return Ok(scripted_text(prompt, answer, ""));
+            }
+            Password::new(prompt)
+                .without_confirmation()
+                .with_display_mode(PasswordDisplayMode::Hidden)
                 .with_render_config(self.render_config())
                 .prompt()
                 .map_err(into_other)

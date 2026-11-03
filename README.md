@@ -532,6 +532,16 @@ fi
 
 The trade-off: each worktree holds a plaintext `.env` until it is removed. That is the price of keeping Touch ID; without the plaintext copies, use a key without a presence gate, as above.
 
+#### Or skip `.env` entirely: `sopsy run`
+
+`sopsy run` decrypts into the environment of one command and writes nothing to disk. One Touch ID per launch, not per shell or per worktree:
+
+```bash
+sopsy run -- bin/rails server
+sopsy run -f .env.encrypted -f config/dev.encrypted.yaml -- bin/dev   # several files; later ones win
+```
+
+
 ## The Secure Enclave security model
 
 Each developer owns an individual key pair. On macOS Apple Silicon the private key is generated *inside* the Secure Enclave and is bound to that hardware — it cannot be read, copied, or exported by anyone or anything. Only the **public recipient** is ever shared or committed.
@@ -1013,7 +1023,11 @@ sopsy recipient remove --name alice   # equivalent
 
 > [!CAUTION]
 >
-> sopsy refuses to remove the **last remaining recipient** (the repo would become undecryptable) or the **sole break-glass recipient**. Removing a person re-encrypts the secrets so the departed key can no longer read *new* commits — but anyone who already cloned old ciphertext still holds it, so **rotate the underlying secret values too** when offboarding.
+> sopsy refuses to remove the **last remaining recipient** (the repo would become undecryptable) or the **sole break-glass recipient**. Removing a person re-wraps the data key for the remaining recipients, but the **data key itself stays the same**, so someone who ever decrypted a file can keep reading new versions of it. When offboarding:
+>
+> 1. `sopsy recipient remove <name>`
+> 2. `sopsy rotate-data-key` to re-encrypt every file under a new data key.
+> 3. Rotate the secret values themselves (`sopsy set API_KEY`): old ciphertext in git history still opens with the old key.
 
 #### `recipient list`
 
@@ -1192,6 +1206,46 @@ sopsy check && echo "secrets hygiene: OK"
 > If `.sopsy.yml` is absent, the repository is not sopsy-managed, so `check` prints a notice and exits **0** rather than failing unrelated repositories.
 
 ______________________________________________________________________
+
+### `sopsy run`
+
+Run a command with the decrypted values in its environment. Nothing is written to disk. sopsy decrypts through `sops` (any file type, converted to `KEY=value`) and then replaces itself with the command, so exit codes and signals are the command's own.
+
+| Flag | Description |
+| --- | --- |
+| `-f, --file <FILE>` | Encrypted file to load; repeat for several, later ones win. Default `.env.encrypted`. |
+| `--pristine` | Pass only the decrypted values: no inherited environment, not even `PATH`. |
+
+```bash
+sopsy run -- npm test
+sopsy run bin/rails console        # `--` is optional when the command comes last
+```
+
+### `sopsy set` / `sopsy unset`
+
+Change one value in an encrypted file without opening an editor. The value reaches `sops` on stdin, never in a process listing.
+
+| Argument / Flag | Description |
+| --- | --- |
+| `KEY` | A top-level name (`API_KEY`), or a sops path for nested files (`'["db"]["password"]'`). |
+| `[VALUE]` | `set` only. Omit it to be asked with hidden input, or, without a terminal, to read it from stdin. A value typed on the command line lands in your shell history. |
+| `-f, --file <FILE>` | The encrypted file. Default `.env.encrypted`. |
+| `--type <TYPE>` | Override the detected file type. |
+
+```bash
+sopsy set API_KEY                          # asks for the value, hidden
+op read op://dev/api/key | sopsy set API_KEY   # from a password manager
+sopsy unset LEGACY_TOKEN
+```
+
+### `sopsy rotate-data-key`
+
+Re-encrypt files under a brand-new data key, for the same recipients (`sops rotate`). With no arguments, every encrypted file the repository's `encrypted_globs` match. Run it after `recipient remove`, then commit the files.
+
+```bash
+sopsy rotate-data-key
+sopsy rotate-data-key .env.encrypted
+```
 
 ### `sopsy yubikey` / `sopsy enclave`
 

@@ -99,6 +99,10 @@ fn dispatch(ui: &Ui, command: Command) -> Result<()> {
         Command::Check => commands::check::run(ui),
         Command::Deps(args) => commands::deps::run(ui, &args),
         Command::Completion(args) => commands::completion::run(&args),
+        Command::Run(args) => commands::env::run(ui, &args),
+        Command::Set(args) => commands::env::set(ui, &args),
+        Command::Unset(args) => commands::env::unset(ui, &args),
+        Command::RotateDataKey(args) => commands::env::rotate_data_key(ui, &args),
         Command::Yubikey(args) => crate::hardware::yubikey::passthrough(&args.args),
         Command::Enclave(args) => crate::hardware::enclave::passthrough(&args.args),
     }

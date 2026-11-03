@@ -134,6 +134,22 @@ pub enum Command {
     /// Generate a shell completion script (bash, zsh, fish, …).
     Completion(CompletionArgs),
 
+    /// Run a command with the decrypted secrets in its environment. Nothing
+    /// is written to disk: `sopsy run -- rails server`.
+    Run(RunArgs),
+
+    /// Set one value in an encrypted file without opening an editor:
+    /// `sopsy set API_KEY` (asks for the value, hidden).
+    Set(SetArgs),
+
+    /// Remove one value from an encrypted file: `sopsy unset API_KEY`.
+    Unset(UnsetArgs),
+
+    /// Re-encrypt every encrypted file under a new data key, for the same
+    /// recipients. Run it after removing someone who may have kept a copy of
+    /// the old data key.
+    RotateDataKey(RotateDataKeyArgs),
+
     /// Run `age-plugin-yubikey` with the given arguments, passed through
     /// unchanged: `sopsy yubikey --list`, `sopsy yubikey --identity`.
     #[command(disable_help_flag = true)]
@@ -143,6 +159,85 @@ pub enum Command {
     /// through unchanged: `sopsy enclave --help`, `sopsy enclave keygen`.
     #[command(disable_help_flag = true)]
     Enclave(PluginArgs),
+}
+
+/// Arguments for `sopsy run`.
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    /// Encrypted file(s) to load, in order; later files win on duplicate keys.
+    #[arg(
+        short = 'f',
+        long = "file",
+        value_name = "FILE",
+        default_value = ".env.encrypted"
+    )]
+    pub files: Vec<PathBuf>,
+
+    /// Pass only the decrypted values (no inherited environment, not even
+    /// `PATH`) to the command.
+    #[arg(long)]
+    pub pristine: bool,
+
+    /// The command and its arguments.
+    #[arg(
+        required = true,
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        value_name = "COMMAND"
+    )]
+    pub command: Vec<String>,
+}
+
+/// Arguments for `sopsy set`.
+#[derive(Debug, Args)]
+pub struct SetArgs {
+    /// The key to set (a top-level name, or a sops path such as `["db"]["password"]`).
+    pub key: String,
+
+    /// The value. Omit it to be asked (hidden) or, without a terminal, to read
+    /// it from stdin; a value typed here lands in your shell history.
+    pub value: Option<String>,
+
+    /// The encrypted file to change.
+    #[arg(
+        short = 'f',
+        long = "file",
+        value_name = "FILE",
+        default_value = ".env.encrypted"
+    )]
+    pub file: PathBuf,
+
+    /// Override the detected file type.
+    #[arg(long = "type", value_enum)]
+    pub file_type: Option<FileType>,
+}
+
+/// Arguments for `sopsy unset`.
+#[derive(Debug, Args)]
+pub struct UnsetArgs {
+    /// The key to remove (a top-level name, or a sops path).
+    pub key: String,
+
+    /// The encrypted file to change.
+    #[arg(
+        short = 'f',
+        long = "file",
+        value_name = "FILE",
+        default_value = ".env.encrypted"
+    )]
+    pub file: PathBuf,
+
+    /// Override the detected file type.
+    #[arg(long = "type", value_enum)]
+    pub file_type: Option<FileType>,
+}
+
+/// Arguments for `sopsy rotate-data-key`.
+#[derive(Debug, Args)]
+pub struct RotateDataKeyArgs {
+    /// Files to rotate. Defaults to every encrypted file in the repository
+    /// (`encrypted_globs` in `.sopsy.yml`).
+    pub files: Vec<PathBuf>,
 }
 
 /// Arguments for `sopsy yubikey` and `sopsy enclave`.
