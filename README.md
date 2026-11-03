@@ -1216,6 +1216,8 @@ Run a command with the decrypted values in its environment. Nothing is written t
 | `-f, --file <FILE>` | Encrypted file to load; repeat for several, later ones win. Default `.env.encrypted`. |
 | `--pristine` | Pass only the decrypted values: no inherited environment, not even `PATH`. |
 
+Values reach the command exactly as stored, including backslashes and newlines. Only top-level names are loaded; a nested value is an error. `run` refuses `LD_*` and `DYLD_*` variables, which would change the code a program loads, and warns on stderr when a file sets `PATH`.
+
 ```bash
 sopsy run -- npm test
 sopsy run bin/rails console        # `--` is optional when the command comes last
@@ -1227,7 +1229,7 @@ Change one value in an encrypted file without opening an editor. The value reach
 
 | Argument / Flag | Description |
 | --- | --- |
-| `KEY` | A top-level name (`API_KEY`), or a sops path for nested files (`'["db"]["password"]'`). |
+| `KEY` | A top-level name (`API_KEY`), or a full sops path for nested files (`'["db"]["password"]'`). A key that starts with `[` is passed to sops as a path, unchecked. |
 | `[VALUE]` | `set` only. Omit it to be asked with hidden input, or, without a terminal, to read it from stdin. A value typed on the command line lands in your shell history. |
 | `-f, --file <FILE>` | The encrypted file. Default `.env.encrypted`. |
 | `--type <TYPE>` | Override the detected file type. |
