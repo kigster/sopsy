@@ -188,7 +188,6 @@ mod tests {
                     no_generate: true,
                     allow_stores: vec![],
                     key: Default::default(),
-                    break_glass: false,
                     no_break_glass: true,
                     force: false,
                 })

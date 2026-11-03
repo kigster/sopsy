@@ -654,17 +654,16 @@ fn init_without_break_glass_prints_guidance() {
 
 #[test]
 #[serial]
-fn init_break_glass_flag_registers_offline_key() {
+fn break_glass_after_unattended_init_registers_offline_key() {
     let dir = TempDir::new().unwrap();
     init_git_repo(dir.path());
     let (public_key, key_file) = generate_age_key(dir.path());
 
-    // `--break-glass` runs the ceremony; SOPS_AGE_KEY_FILE lets the implicit
-    // re-key decrypt with the owner's key, and SOPSY_ASSUME_YES skips the
-    // interactive "copy to 1Password, press ENTER" wait.
+    // An unattended init skips the emergency key; `recipient break-glass` runs
+    // the ceremony afterwards. SOPS_AGE_KEY_FILE lets the re-key decrypt with
+    // the owner's key, and SOPSY_ASSUME_YES skips the "press ENTER" wait.
     sopsy_in(dir.path())
         .env("SOPS_AGE_KEY_FILE", &key_file)
-        .env("SOPSY_ASSUME_YES", "1")
         .args([
             "--non-interactive",
             "init",
@@ -673,7 +672,19 @@ fn init_break_glass_flag_registers_offline_key() {
             "--no-generate",
             "--public-key",
             &public_key,
-            "--break-glass",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sopsy recipient break-glass"));
+    sopsy_in(dir.path())
+        .env("SOPS_AGE_KEY_FILE", &key_file)
+        .env("SOPSY_ASSUME_YES", "1")
+        .args([
+            "--non-interactive",
+            "recipient",
+            "break-glass",
+            "-o",
+            "break-glass",
         ])
         .assert()
         .success();

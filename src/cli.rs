@@ -150,7 +150,8 @@ const INIT_PERSONAL_HEADING: &str = "Personal options (affect only you)";
 /// Shown at the end of `sopsy init --help`.
 const INIT_EXAMPLES: &str = "\
 Examples:
-  # Interactive: asks for the store policy, your key store and an emergency key
+  # Interactive: asks for the store policy and your key store, then creates
+  # the offline break-glass emergency key
   sopsy init
 
   # Your key on a YubiKey (even on a Mac with a Secure Enclave);
@@ -169,16 +170,16 @@ Examples:
   # Register an existing public key instead of generating one
   sopsy init --age-public-key age1… --recipient-name \"Alan Turing\"
 
-  # Scripted, on your laptop (no prompts): Secure Enclave key,
-  # hardware-only policy, no emergency key
-  sopsy init -y --store enclave --allow-stores onchip,exthardware --no-emergency-keys
+  # Scripted, on your laptop (no prompts, so no emergency key):
+  # Secure Enclave key, hardware-only policy
+  sopsy init -y --store enclave --allow-stores onchip,exthardware
 
   # CI never runs `init`: runners have no Enclave or YubiKey. After init,
   # give CI its own portable key, stored as the `SOPS_AGE_KEY` CI secret
   sopsy recipient ci
 
-  # Also create the offline break-glass emergency key
-  sopsy init --generate-emergency-keys";
+  # Emergency key: interactive runs create it; after an unattended run, do it here
+  sopsy recipient break-glass";
 
 /// Arguments for `sopsy init`.
 #[derive(Debug, Args)]
@@ -193,7 +194,6 @@ Examples:
 // flags that only shape the admin's own key; within each, most used first.
 #[command(
     mut_arg("allow_stores", |a| a.help_heading(INIT_REPO_HEADING).display_order(1)),
-    mut_arg("break_glass", |a| a.help_heading(INIT_REPO_HEADING).display_order(2)),
     mut_arg("no_break_glass", |a| a.help_heading(INIT_REPO_HEADING).display_order(3)),
     mut_arg("store", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(4)),
     mut_arg("recipient_name", |a| a.help_heading(INIT_PERSONAL_HEADING).display_order(5)),
@@ -248,17 +248,9 @@ pub struct InitArgs {
     #[command(flatten)]
     pub key: StoreArgs,
 
-    /// Generate the portable "break glass" emergency key as part of init, for
-    /// offline storage (interactive runs ask). Conflicts with `--no-emergency-keys`.
-    #[arg(
-        long = "generate-emergency-keys",
-        short = 'e',
-        alias = "break-glass",
-        conflicts_with = "no_break_glass"
-    )]
-    pub break_glass: bool,
-
-    /// Skip generating the break-glass emergency key during init.
+    /// Skip the break-glass emergency key that interactive runs create.
+    /// Unattended runs (`-y`) always skip it; create it later with
+    /// `sopsy recipient break-glass`.
     #[arg(long = "no-emergency-keys", alias = "no-break-glass")]
     pub no_break_glass: bool,
 
@@ -670,7 +662,6 @@ mod tests {
             "--force",
             "Repository options",
             "--allow-stores",
-            "--generate-emergency-keys",
             "--no-emergency-keys",
             "Personal options",
             "--store",
@@ -719,7 +710,6 @@ mod tests {
             "cached",
             "-b",
             "always",
-            "-e",
         ])
         .unwrap();
         assert!(cli.global.git);
@@ -731,7 +721,7 @@ mod tests {
         assert_eq!(args.public_key.as_deref(), Some("age1sam"));
         assert_eq!(args.allow_stores, ["yubikey", "keychain"]);
         assert_eq!(args.key.store, StoreChoice::Yubikey);
-        assert!(args.key.new_slot && args.break_glass);
+        assert!(args.key.new_slot);
         assert_eq!(args.key.pin_policy, Some(PinPolicy::Once));
         assert_eq!(args.key.touch_policy, Some(TouchPolicy::Always));
     }

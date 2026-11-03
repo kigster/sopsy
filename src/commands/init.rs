@@ -166,8 +166,8 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
     let config_path = config.save_to_dir(&root)?;
     ui.success(format!("Wrote {}.", config_path.display()));
 
-    // 10. Offer to create the break-glass emergency key while we're here — this
-    //     is the moment the owner is most likely to actually do it. Run with
+    // 10. Create the break-glass emergency key while we're here — this is the
+    //     moment the owner is most likely to actually do it. Run with
     //     staging suppressed so init emits a single --git summary at the end
     //     rather than the ceremony advising separately (step 12).
     let has_break_glass = maybe_setup_break_glass(&ui.without_git(), &root, args)?;
@@ -193,26 +193,20 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
     Ok(())
 }
 
-/// Generate the break-glass emergency key during init, if appropriate.
+/// Whether `init` creates the break-glass emergency key: always when a person
+/// is at the terminal (they must store it offline), unless `--no-emergency-keys`.
+/// Unattended runs (`-y`) cannot store it, so they skip it; `sopsy recipient
+/// break-glass` creates it later.
+fn wants_break_glass(ui: &Ui, args: &InitArgs) -> bool {
+    !args.no_break_glass && ui.is_interactive()
+}
+
+/// Generate the break-glass emergency key during init (see [`wants_break_glass`]).
 ///
-/// Resolution: `--no-break-glass` skips; `--break-glass` forces; otherwise we
-/// prompt in interactive mode and skip (with guidance) when non-interactive.
 /// Delegates to `sopsy recipient break-glass` so the ceremony (write → copy to
 /// 1Password → delete → register + re-key) is identical to the standalone path.
 fn maybe_setup_break_glass(ui: &Ui, root: &Path, args: &InitArgs) -> Result<bool> {
-    let want = if args.no_break_glass {
-        false
-    } else if args.break_glass {
-        true
-    } else if ui.is_interactive() {
-        ui.confirm(
-            "Set up a break-glass emergency key now? (strongly recommended)",
-            "--generate-emergency-keys",
-            true,
-        )?
-    } else {
-        false
-    };
+    let want = wants_break_glass(ui, args);
 
     if !want {
         ui.warn("No break-glass key yet. Create one ASAP with:");
@@ -918,9 +912,14 @@ mod tests {
     }
 
     #[test]
-    fn declining_the_emergency_key_prompt_skips_it() {
-        let dir = assert_fs::TempDir::new().unwrap();
-        let ui = Ui::scripted(vec![Answer::Yes(false)]);
-        assert!(!maybe_setup_break_glass(&ui, dir.path(), &init_args(&[])).unwrap());
+    fn emergency_key_is_made_interactively_unless_opted_out() {
+        let interactive = Ui::scripted(vec![]);
+        let unattended = Ui::new(false, false, false);
+        assert!(wants_break_glass(&interactive, &init_args(&[])));
+        assert!(!wants_break_glass(
+            &interactive,
+            &init_args(&["--no-emergency-keys"])
+        ));
+        assert!(!wants_break_glass(&unattended, &init_args(&[])));
     }
 }
