@@ -43,21 +43,27 @@ pub struct Cli {
 pub struct GlobalArgs {
     /// Disable all interactive prompts; fail instead of asking. Also enabled
     /// automatically when stdout is not a TTY. Aliased as `--yes`/`-y`.
-    #[arg(long, short = 'y', visible_alias = "yes", global = true)]
+    #[arg(
+        long,
+        short = 'y',
+        visible_alias = "yes",
+        global = true,
+        display_order = 100
+    )]
     pub non_interactive: bool,
 
     /// Disable colored output (also honors the `NO_COLOR` environment variable).
-    #[arg(long, global = true)]
+    #[arg(long, global = true, display_order = 103)]
     pub no_color: bool,
 
     /// Increase output verbosity (show debug detail).
-    #[arg(long, short = 'v', global = true)]
+    #[arg(long, short = 'v', global = true, display_order = 102)]
     pub verbose: bool,
 
     /// After a command changes files, `git add` exactly those files and print
     /// ready-to-paste commit and pull-request instructions. A no-op for commands
     /// that don't modify committed files.
-    #[arg(long, short = 'g', global = true)]
+    #[arg(long, short = 'g', global = true, display_order = 101)]
     pub git: bool,
 }
 
@@ -170,6 +176,21 @@ Examples:
                 `SOPSY_PRIVATE_KEY_STORE_PRIORITY` (default: enclave, yubikey, keychain, file)";
     a.help(help).long_help(help)
 }))]
+// `--help` lists flags by how often people reach for them, most common first.
+#[command(
+    mut_arg("store", |a| a.display_order(1)),
+    mut_arg("require", |a| a.display_order(2)),
+    mut_arg("break_glass", |a| a.display_order(3)),
+    mut_arg("no_break_glass", |a| a.display_order(4)),
+    mut_arg("recipient_name", |a| a.display_order(5)),
+    mut_arg("username", |a| a.display_order(6)),
+    mut_arg("public_key", |a| a.display_order(7)),
+    mut_arg("no_generate", |a| a.display_order(8)),
+    mut_arg("pin_policy", |a| a.display_order(9)),
+    mut_arg("touch_policy", |a| a.display_order(10)),
+    mut_arg("new_slot", |a| a.display_order(11)),
+    mut_arg("force", |a| a.display_order(12)),
+)]
 #[command(after_long_help = INIT_EXAMPLES)]
 pub struct InitArgs {
     /// Name to record for the recipient created/registered during init.
@@ -598,6 +619,49 @@ mod tests {
         };
         assert!(help("init").contains("Applies to the admin only"));
         assert!(!help("join").contains("admin only"));
+    }
+
+    #[test]
+    fn init_help_lists_flags_most_used_first() {
+        let mut cmd = Cli::command();
+        cmd.build(); // propagate the global flags into subcommands
+        let help = cmd
+            .find_subcommand_mut("init")
+            .unwrap()
+            .render_long_help()
+            .to_string();
+        // Index of the flag's own entry line, ignoring mentions in help prose.
+        let pos = |flag: &str| {
+            help.lines()
+                .position(|l| l.trim_start().starts_with('-') && l.contains(flag))
+                .unwrap_or_else(|| panic!("{flag} missing from init help"))
+        };
+        let order = [
+            "--store",
+            "--require",
+            "--generate-emergency-keys",
+            "--no-emergency-keys",
+            "--recipient-name",
+            "--username",
+            "--age-public-key",
+            "--no-generate",
+            "--yubikey-pin-policy",
+            "--yubikey-touch-policy",
+            "--always-new-slot",
+            "--force",
+            "--non-interactive",
+            "--git",
+            "--verbose",
+            "--no-color",
+        ];
+        for pair in order.windows(2) {
+            assert!(
+                pos(pair[0]) < pos(pair[1]),
+                "{} should precede {}",
+                pair[0],
+                pair[1]
+            );
+        }
     }
 
     #[test]
