@@ -202,6 +202,7 @@ brew install sops age age-plugin-se
 | `age`                | The modern encryption library SOPS uses under the hood.          |
 | `age-plugin-se`      | Secure Enclave-backed `age` identities (Apple Silicon).          |
 | `age-plugin-yubikey` | YubiKey-backed `age` identities (PIV slot, PIN + touch).         |
+| `ykman`              | YubiKey Manager; sets a PUK separate from the PIN.               |
 | `git`                | sopsy is repository-aware (already present on most Macs).        |
 
 > [!IMPORTANT]
@@ -981,7 +982,7 @@ ______________________________________________________________________
 
 ### `sopsy deps`
 
-Install the external tools sopsy needs (`sops`, `age`, `age-plugin-se`) with [Homebrew](https://brew.sh). It probes for each tool first and only installs the ones that are missing, so it is safe to run repeatedly. This is the *remedy* that pairs with `sopsy doctor`'s *diagnosis*.
+Install the external tools sopsy needs (`sops`, `age`, `age-plugin-se` on Apple Silicon, `age-plugin-yubikey` and `ykman`) with [Homebrew](https://brew.sh). It probes for each tool first and only installs the ones that are missing, so it is safe to run repeatedly. This is the *remedy* that pairs with `sopsy doctor`'s *diagnosis*.
 
 | Flag        | Effect                                                        |
 | ----------- | ------------------------------------------------------------- |

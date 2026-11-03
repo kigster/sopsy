@@ -1,7 +1,8 @@
 //! `sopsy deps` — install sopsy's external tool dependencies via Homebrew.
 //!
 //! sopsy orchestrates external tools: `sops`, `age`, `age-plugin-se` (Secure
-//! Enclave) and `age-plugin-yubikey` (YubiKey).
+//! Enclave), `age-plugin-yubikey` (YubiKey) and `ykman` (YubiKey Manager, which
+//! sets a PUK separate from the PIN).
 //! This command probes for each, then `brew install`s the ones that are missing
 //! — the remedy that pairs with [`crate::commands::doctor`]'s diagnosis.
 //!
@@ -22,7 +23,8 @@ use crate::ui::Ui;
 /// External tools sopsy installs via Homebrew on this platform, in probe order.
 ///
 /// `age-plugin-se` is installed on Apple Silicon only: Homebrew has no Intel
-/// build, and Linux has no Secure Enclave.
+/// build, and Linux has no Secure Enclave. The YubiKey tooling
+/// (`age-plugin-yubikey`, `ykman`) is installed everywhere.
 pub fn dependencies() -> Vec<&'static str> {
     dependencies_for(std::env::consts::OS, std::env::consts::ARCH)
 }
@@ -32,7 +34,7 @@ fn dependencies_for(os: &str, arch: &str) -> Vec<&'static str> {
     if (os, arch) == ("macos", "aarch64") {
         tools.push("age-plugin-se");
     }
-    tools.push("age-plugin-yubikey");
+    tools.extend(["age-plugin-yubikey", "ykman"]);
     tools
 }
 
@@ -142,12 +144,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn secure_enclave_plugin_only_on_apple_silicon() {
+    fn dependencies_per_platform() {
         assert!(dependencies_for("macos", "aarch64").contains(&"age-plugin-se"));
         assert!(!dependencies_for("macos", "x86_64").contains(&"age-plugin-se"));
         assert_eq!(
             dependencies_for("linux", "x86_64"),
-            ["sops", "age", "age-plugin-yubikey"]
+            ["sops", "age", "age-plugin-yubikey", "ykman"]
+        );
+        assert_eq!(
+            dependencies_for("macos", "aarch64"),
+            [
+                "sops",
+                "age",
+                "age-plugin-se",
+                "age-plugin-yubikey",
+                "ykman"
+            ]
         );
     }
 }
