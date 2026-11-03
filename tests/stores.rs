@@ -278,6 +278,9 @@ fn init_without_allow_stores_defaults_to_hardware_only() {
         .env("SOPSY_USB_LIST_BIN", p.join("usb"))
         .env("SOPSY_AGE_PLUGIN_YUBIKEY_BIN", p.join("age-plugin-yubikey"))
         .env("SOPSY_SOPS_BIN", p.join("sops"))
+        // Pin the order: on Apple Silicon `enclave` would come first, and its
+        // plugin is deliberately missing in the sandbox.
+        .env("SOPSY_PRIVATE_KEY_STORE_PRIORITY", "yubikey")
         .args(["init", "--no-emergency-keys"])
         .assert()
         .success()
