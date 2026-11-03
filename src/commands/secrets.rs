@@ -67,6 +67,7 @@ fn decrypt(ui: &Ui, args: &SecretsDecryptArgs) -> Result<()> {
     let file_type = args
         .file_type
         .unwrap_or_else(|| FileType::from_path(&args.file));
+    crate::commands::keys::prompt_for_yubikey_if_needed(ui)?;
     let plaintext = sops::decrypt(&args.file, file_type)?;
     write_output(ui, &args.output, plaintext.as_bytes(), "plaintext")
 }

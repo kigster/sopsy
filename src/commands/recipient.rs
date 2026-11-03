@@ -887,6 +887,9 @@ pub(crate) fn run_updatekeys(ui: &Ui, repo: &Path, skip: bool) -> Result<()> {
         .map(|c| c.encrypted_globs)
         .unwrap_or_else(|_| Config::default().encrypted_globs);
     let files = collect_encrypted_files(repo, &globs)?;
+    if !files.is_empty() {
+        crate::commands::keys::prompt_for_yubikey_if_needed(ui)?;
+    }
     if files.is_empty() {
         ui.info("no encrypted files found to re-encrypt");
         return Ok(());

@@ -505,6 +505,13 @@ sequenceDiagram
     Note over U,Y: later: sopsy decrypt → sops → plugin → YubiKey (PIN once per session, touch)
 ```
 
+**Forgot to plug it in?** At a terminal, sopsy asks you to insert the YubiKey and waits, instead of failing:
+
+- `sopsy init -s yubikey`, `join -s yubikey` and `recipient keygen -s yubikey` ask before making the key.
+- `sopsy decrypt`, `edit` and re-keying (`approve`, `recipient add` / `remove`) ask when every active key you have in the repository (matched by `$USER`) is on a YubiKey.
+- `sopsy encrypt` never asks: it uses only public keys.
+- Unattended runs (`-y`, no terminal) and `SOPS_AGE_KEY` skip the prompt.
+
 ### Set up a repository with a YubiKey
 
 The output below is illustrative; prompts are interactive menus (↑↓ moves, Space toggles, Enter confirms).

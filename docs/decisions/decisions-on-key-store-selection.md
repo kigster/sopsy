@@ -30,7 +30,7 @@ Rejected: a special rule that a plugged-in YubiKey always wins. It would silentl
 
 ## `init` installs supporting tools
 
-- `init` runs the `sopsy deps` install step first. Interactive runs ask; `-y` installs without asking; without Homebrew it warns and carries on.
+- `init` runs the `sopsy deps` install step first. Interactive runs ask; `-y` installs without asking; without Homebrew it warns and carries on. `--skip-deps` turns the step off (added after review, for shared or managed machines).
 - `sopsy deps` installs the full set, including `age-plugin-yubikey` and `ykman`, on every platform (`age-plugin-se` on Apple Silicon only).
 
 ## Emergency (break-glass) key
@@ -42,3 +42,8 @@ Rejected: a special rule that a plugged-in YubiKey always wins. It would silentl
 ## Policy edits
 
 `.sopsy.yml` can be edited by hand. The `.sopsy.sha` checksum then fails, every command refuses to run, and `sopsy doctor` accepts the edit. This is tamper evidence, not protection; code review of `.sopsy.yml` is the real gate.
+
+## Waiting for a YubiKey
+
+- Interactive runs ask the user to insert a missing YubiKey and check again, rather than failing: before generating a key with `--store yubikey`, and before decrypt, edit and re-keying when every active key the user (`$USER`) has in the repository lives on a YubiKey.
+- `encrypt` never asks, since it needs only public keys. Unattended runs and `SOPS_AGE_KEY` skip the prompt.

@@ -138,6 +138,13 @@ pub(crate) fn generate(
 /// Resolve the store: explicit `--store`, else the ready stores in priority
 /// order (prompting when interactive and there is a real choice).
 fn choose_store(ui: &Ui, key: &StoreArgs, allowed: Option<&[Store]>) -> Result<Store> {
+    if key.store.store() == Some(Store::YubiKey) && ui.is_interactive() {
+        wait_for_yubikey(
+            ui,
+            yubikey::device_present,
+            "pick another store with --store",
+        )?;
+    }
     let (priority, _) = hardware::priority(allowed)?;
     let ready = hardware::candidates(key.store.store(), allowed, &priority, Store::probe)?;
     if ready.len() == 1 || !ui.is_interactive() {
@@ -150,6 +157,60 @@ fn choose_store(ui: &Ui, key: &StoreArgs, allowed: Option<&[Store]>) -> Result<S
     let picked = ui.select("Where should your private key live?", "--store", options)?;
     let name = picked.split_whitespace().next().unwrap_or_default();
     name.parse()
+}
+
+/// With no YubiKey plugged in, ask the user to insert one and check again
+/// until it shows up or they give up. `hint` ends the error when they do.
+fn wait_for_yubikey(ui: &Ui, present: impl Fn() -> bool, hint: &str) -> Result<()> {
+    while !present() {
+        let retry = ui.confirm(
+            "No YubiKey detected. Insert it (wait for it to blink), then continue?",
+            "--store",
+            true,
+        )?;
+        if !retry {
+            return Err(Error::Validation(format!(
+                "no YubiKey plugged in; insert one, or {hint}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `user` can only decrypt this repository with a YubiKey: they have
+/// at least one active key here, and every one of them lives on a YubiKey.
+pub(crate) fn needs_yubikey(config: &crate::config::Config, user: &str) -> bool {
+    let mut mine = config
+        .recipients
+        .iter()
+        .filter(|r| r.username.as_deref() == Some(user))
+        .filter(|r| r.state == crate::config::MemberState::Active)
+        .peekable();
+    mine.peek().is_some() && mine.all(|r| r.store == Some(Store::YubiKey))
+}
+
+/// Before a command that needs the private key (decrypt, edit, re-keying),
+/// ask the user to insert their YubiKey when it is their only key here and
+/// none is plugged in. Does nothing outside a sopsy repository, without a
+/// terminal, or when `SOPS_AGE_KEY` supplies a key directly.
+pub(crate) fn prompt_for_yubikey_if_needed(ui: &Ui) -> Result<()> {
+    if !ui.is_interactive() || std::env::var_os(crate::keystore::SOPS_AGE_KEY_ENV).is_some() {
+        return Ok(());
+    }
+    let Some(user) = crate::commands::recipient::system_username() else {
+        return Ok(());
+    };
+    let config = crate::commands::recipient::current_repo_root()
+        .ok()
+        .and_then(|repo| crate::config::Config::load_from_dir(&repo).ok());
+    match config {
+        Some(config) if needs_yubikey(&config, &user) => wait_for_yubikey(
+            ui,
+            yubikey::device_present,
+            "set SOPS_AGE_KEY to another key",
+        ),
+        _ => Ok(()),
+    }
 }
 
 /// With several YubiKeys plugged in, ask which one to use. `None` means
@@ -351,6 +412,57 @@ pub(crate) fn validate_public_key(key: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn waits_for_the_yubikey_until_it_is_inserted() {
+        let checks = std::cell::Cell::new(0);
+        let present = || {
+            checks.set(checks.get() + 1);
+            checks.get() > 2 // missing twice, then plugged in
+        };
+        let ui = Ui::scripted(vec![Answer::Yes(true), Answer::Yes(true)]);
+        wait_for_yubikey(&ui, present, "hint").unwrap();
+        assert_eq!(checks.get(), 3);
+    }
+
+    #[test]
+    fn needs_yubikey_only_when_every_active_key_of_mine_is_on_one() {
+        use crate::config::{Config, MemberState, Recipient};
+        let key = |user: &str, store: Option<Store>, state: MemberState| {
+            let mut r = Recipient::new(user, format!("age1{user}"));
+            r.username = Some(user.into());
+            r.store = store;
+            r.state = state;
+            r
+        };
+        let mut config = Config {
+            recipients: vec![
+                key("alan", Some(Store::YubiKey), MemberState::Active),
+                key("grace", Some(Store::Enclave), MemberState::Active),
+            ],
+            ..Config::default()
+        };
+        assert!(needs_yubikey(&config, "alan"));
+        assert!(!needs_yubikey(&config, "grace"));
+        assert!(!needs_yubikey(&config, "nobody"));
+
+        // A second, non-YubiKey key means the YubiKey is not needed.
+        config
+            .recipients
+            .push(key("alan", Some(Store::Enclave), MemberState::Active));
+        assert!(!needs_yubikey(&config, "alan"));
+
+        // A pending key grants nothing, so it does not count.
+        config.recipients = vec![key("alan", Some(Store::YubiKey), MemberState::Pending)];
+        assert!(!needs_yubikey(&config, "alan"));
+    }
+
+    #[test]
+    fn giving_up_on_the_yubikey_is_an_error() {
+        let ui = Ui::scripted(vec![Answer::Yes(false)]);
+        let err = wait_for_yubikey(&ui, || false, "hint").unwrap_err();
+        assert!(err.to_string().contains("no YubiKey plugged in"), "{err}");
+    }
 
     #[test]
     fn allowed_set_admits_known_stores_only() {

@@ -45,6 +45,8 @@ pub fn run(ui: &Ui, args: &EditArgs) -> Result<()> {
     sops_args.extend(args.sops_args.iter().cloned());
     ui.debug(format!("detected file type `{ty}`"));
 
+    crate::commands::keys::prompt_for_yubikey_if_needed(ui)?;
+
     // Flush our own output before the editor takes over the terminal.
     ui.flush();
 
