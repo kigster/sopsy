@@ -1223,7 +1223,7 @@ sopsy run bin/rails console        # `--` is optional when the command comes las
 
 ### `sopsy set` / `sopsy unset`
 
-Change one value in an encrypted file without opening an editor. The value reaches `sops` on stdin, never in a process listing.
+Change one value in an encrypted file without opening an editor. The value reaches `sops` on stdin, never in a process listing. `set` therefore needs sops 3.11 or newer; sopsy says so on an older one.
 
 | Argument / Flag | Description |
 | --- | --- |

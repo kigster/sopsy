@@ -144,3 +144,24 @@ fn set_refuses_binary_files() {
         .failure()
         .stderr(predicate::str::contains("binary file"));
 }
+
+#[test]
+fn set_refuses_a_sops_without_value_stdin() {
+    // Older sops would need the secret on the command line; sopsy refuses.
+    let dir = TempDir::new().unwrap();
+    let fake = dir.path().join("sops");
+    std::fs::write(&fake, "#!/bin/sh\necho 'sops 3.9.4'\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(dir.path().join(".env.encrypted"), "").unwrap();
+    sopsy(dir.path())
+        .env("SOPSY_SOPS_BIN", &fake)
+        .args(["set", "K", "v"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("needs sops 3.11.0 or newer"))
+        .stderr(predicate::str::contains("3.9.4 is installed"));
+}

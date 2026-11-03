@@ -246,6 +246,57 @@ pub fn decrypt(file: &Path, file_type: FileType) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// The first sops release with `sops set --value-stdin`.
+pub const SET_VALUE_STDIN_SINCE: (u32, u32, u32) = (3, 11, 0);
+
+/// The installed sops version, from `sops --version`.
+pub fn version() -> Result<(u32, u32, u32)> {
+    let output = Command::new(sops_bin()).arg("--version").output()?;
+    check_status(&output)?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_version(&text).ok_or_else(|| {
+        Error::Validation(format!(
+            "could not read the sops version from `{}`",
+            text.lines().next().unwrap_or("").trim()
+        ))
+    })
+}
+
+/// Fail with an upgrade hint unless sops is at least `min`.
+pub fn require_version(min: (u32, u32, u32), feature: &str) -> Result<()> {
+    let found = version()?;
+    if found >= min {
+        return Ok(());
+    }
+    let show = |(a, b, c): (u32, u32, u32)| format!("{a}.{b}.{c}");
+    Err(Error::Validation(format!(
+        "{feature} needs sops {} or newer, and sops {} is installed; upgrade it \
+         (`brew upgrade sops`, or a release from https://github.com/getsops/sops/releases)",
+        show(min),
+        show(found)
+    )))
+}
+
+/// `sops 3.13.2 (latest)` → `(3, 13, 2)`.
+fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
+    let word = text
+        .split_whitespace()
+        .map(|w| w.trim_start_matches('v'))
+        .find(|w| w.chars().next().is_some_and(|c| c.is_ascii_digit()))?;
+    let mut parts = word.split('.').map(|p| {
+        p.chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse::<u32>()
+            .ok()
+    });
+    Some((
+        parts.next()??,
+        parts.next()??,
+        parts.next().flatten().unwrap_or(0),
+    ))
+}
+
 /// Decrypt `file` and return it as dotenv (`KEY=value` lines), whatever its
 /// own format: what `sopsy run` puts into a command's environment.
 pub fn decrypt_as_dotenv(file: &Path, file_type: FileType) -> Result<String> {
@@ -266,6 +317,12 @@ pub fn decrypt_as_dotenv(file: &Path, file_type: FileType) -> Result<String> {
 pub fn set_value(file: &Path, file_type: FileType, path: &str, json_value: &str) -> Result<()> {
     use std::io::Write;
     use std::process::Stdio;
+    // An older sops would need the value on the command line, visible to
+    // every process on the machine; refuse instead.
+    require_version(
+        SET_VALUE_STDIN_SINCE,
+        "`sopsy set` (it passes the value on stdin)",
+    )?;
     let ty = file_type.as_sops_type();
     let mut command = Command::new(sops_bin());
     crate::keystore::configure_sops_env(&mut command);
@@ -326,6 +383,16 @@ pub fn rotate_in_place(file: &Path, file_type: FileType) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sops_versions_are_parsed() {
+        assert_eq!(parse_version("sops 3.13.2 (latest)\n"), Some((3, 13, 2)));
+        assert_eq!(parse_version("sops 3.9.4"), Some((3, 9, 4)));
+        assert_eq!(parse_version("sops v3.11.0-rc1"), Some((3, 11, 0)));
+        assert_eq!(parse_version("sops 3.12"), Some((3, 12, 0)));
+        assert_eq!(parse_version("no version here"), None);
+        assert!((3, 9, 4) < SET_VALUE_STDIN_SINCE && (3, 11, 0) >= SET_VALUE_STDIN_SINCE);
+    }
     use std::path::PathBuf;
 
     #[test]
