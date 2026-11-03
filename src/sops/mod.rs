@@ -343,7 +343,12 @@ pub fn set_value(file: &Path, file_type: FileType, path: &str, json_value: &str)
         .stderr(Stdio::piped())
         .spawn()?;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(json_value.as_bytes())?;
+        // A sops that fails before reading stdin closes the pipe; its exit
+        // status and stderr say why, so report those, not the broken pipe.
+        match stdin.write_all(json_value.as_bytes()) {
+            Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => return Err(e.into()),
+            _ => {}
+        }
     }
     check_status(&child.wait_with_output()?)
 }
