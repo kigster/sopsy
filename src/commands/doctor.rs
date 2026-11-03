@@ -217,10 +217,20 @@ fn store_checks(ui: &Ui) {
         }
     }
     // Inside a sopsy repository, its allow list shapes (and filters) `auto`.
-    let allowed = crate::commands::recipient::current_repo_root()
+    // A config that fails to load is reported by the repository checks; an
+    // invalid `key_policy` is reported here, where it changes the outcome.
+    let allowed = match crate::commands::recipient::current_repo_root()
         .ok()
         .and_then(|repo| Config::load_from_dir(&repo).ok())
-        .and_then(|config| config.allowed_stores().ok().flatten());
+        .map(|config| config.allowed_stores())
+    {
+        Some(Ok(allowed)) => allowed,
+        Some(Err(err)) => {
+            ui.failure(format!("key policy: {err}"));
+            return;
+        }
+        None => None,
+    };
     match hardware::priority(allowed.as_deref()) {
         Ok((order, source)) => {
             ui.info(format!(

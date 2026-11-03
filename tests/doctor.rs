@@ -148,3 +148,20 @@ fn doctor_warns_when_no_recipients_configured() {
         .success()
         .stdout(predicate::str::contains("no recipients configured"));
 }
+
+#[test]
+fn doctor_reports_an_invalid_key_policy() {
+    let dir = init_repo();
+    std::fs::write(
+        dir.path().join(".sopsy.yml"),
+        "recipients:\n  - name: alice\n    public_key: age1alice\n\
+         key_policy:\n  allowed:\n    - floppy-disk\n",
+    )
+    .unwrap();
+
+    sopsy_in(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("key policy:"))
+        .stdout(predicate::str::contains("floppy-disk"));
+}
