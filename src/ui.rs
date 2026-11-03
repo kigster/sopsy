@@ -63,6 +63,10 @@ pub struct Ui {
     /// is a resolved global flag like the others; consumed by
     /// [`crate::git::stage_and_advise`].
     git: bool,
+    /// Whether the user explicitly answered "yes" in advance (the global
+    /// `--yes`/`-y` flag, or `SOPSY_ASSUME_YES`). Unlike `interactive`, this
+    /// is never inferred from a missing TTY. Set via [`Ui::with_assume_yes`].
+    assume_yes: bool,
     /// Canned prompt answers, replayed in order instead of reading the
     /// terminal. Unit tests only; see [`Ui::scripted`].
     #[cfg(test)]
@@ -120,6 +124,7 @@ impl Ui {
             // Enabled explicitly via `with_git`; off by default so every test and
             // nested call starts without staging behavior.
             git: false,
+            assume_yes: false,
             #[cfg(test)]
             script: None,
         }
@@ -130,6 +135,19 @@ impl Ui {
     pub fn with_git(mut self, git: bool) -> Self {
         self.git = git;
         self
+    }
+
+    /// Record that the user answered "yes" in advance (`--yes`/`-y` or
+    /// `SOPSY_ASSUME_YES`). Consuming builder, used once in [`crate::run`].
+    pub fn with_assume_yes(mut self, assume_yes: bool) -> Self {
+        self.assume_yes = assume_yes;
+        self
+    }
+
+    /// Whether the user answered "yes" in advance, so a confirmation that
+    /// would otherwise be asked may be taken as granted.
+    pub fn assumes_yes(&self) -> bool {
+        self.assume_yes
     }
 
     /// A clone of this handle with `--git` disabled, for nested command calls
@@ -152,6 +170,7 @@ impl Ui {
             verbose: false,
             interactive: true,
             git: false,
+            assume_yes: false,
             script: Some(std::rc::Rc::new(std::cell::RefCell::new(answers.into()))),
         }
     }
@@ -796,6 +815,7 @@ mod tests {
             verbose: false,
             interactive: false,
             git: false,
+            assume_yes: false,
             script: None,
         }
     }
@@ -811,6 +831,7 @@ mod tests {
             verbose: true,
             interactive: true,
             git: false,
+            assume_yes: false,
             script: None,
         }
     }

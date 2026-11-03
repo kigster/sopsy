@@ -1,0 +1,4 @@
+coverage:
+  command: GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false rustup run stable cargo llvm-cov --all-features --workspace --json --summary-only --output-path target/llvm-cov-summary.json
+  report_command: jq '.data[0].totals.lines.percent' target/llvm-cov-summary.json
+  minimum: 95

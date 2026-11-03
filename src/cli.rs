@@ -10,11 +10,15 @@
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand};
 
 use crate::hardware::Store;
 use crate::hardware::yubikey::{PinPolicy, TouchPolicy};
 use crate::sops::FileType;
+
+mod write_args;
+
+pub use write_args::{DESTINATION_GROUP, WriteArgs};
 
 /// Top-level CLI parser.
 #[derive(Debug, Parser)]
@@ -550,6 +554,7 @@ pub enum SecretsCommand {
 
 /// Arguments for `sopsy secrets encrypt`.
 #[derive(Debug, Args)]
+#[command(group(ArgGroup::new(DESTINATION_GROUP).args(["write", "output"])))]
 pub struct SecretsEncryptArgs {
     /// The plaintext file to encrypt (e.g. `.env`, `config.yaml`, `data.json`).
     pub file: PathBuf,
@@ -562,10 +567,14 @@ pub struct SecretsEncryptArgs {
     /// Override the file type (inferred from `<file>`'s extension otherwise).
     #[arg(long = "type", value_enum)]
     pub file_type: Option<FileType>,
+    /// `-w`/`--write` and `-O`/`--overwrite`.
+    #[command(flatten)]
+    pub write: WriteArgs,
 }
 
 /// Arguments for `sopsy secrets decrypt`.
 #[derive(Debug, Args)]
+#[command(group(ArgGroup::new(DESTINATION_GROUP).args(["write", "output"])))]
 pub struct SecretsDecryptArgs {
     /// The encrypted file to decrypt.
     pub file: PathBuf,
@@ -577,6 +586,9 @@ pub struct SecretsDecryptArgs {
     /// Override the detected file type (when the name has no usable extension).
     #[arg(long = "type", value_enum)]
     pub file_type: Option<FileType>,
+    /// `-w`/`--write` and `-O`/`--overwrite`.
+    #[command(flatten)]
+    pub write: WriteArgs,
 }
 
 /// Arguments for `sopsy deps`.
