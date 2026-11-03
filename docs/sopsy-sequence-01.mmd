@@ -17,7 +17,7 @@ sequenceDiagram
     Sopsy->>FS: scaffold .sops.yaml, .env.example, .sopsy.yml, .gitignore
     Sopsy->>Sops: encrypt .env.encrypted (dotenv)
     Sops-->>FS: write encrypted .env.encrypted
-    opt break-glass (prompted, or --generate-emergency-keys)
+    opt break-glass (interactive runs, unless --no-emergency-keys)
         Sopsy->>Dev: generate portable key, copy to 1Password, wait for ENTER
         Sopsy->>FS: delete local key files, register break-glass, re-key
     end

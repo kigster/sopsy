@@ -73,7 +73,7 @@ When it generates a new identity, `init` shows the public key, pauses so you can
 >
 > Add `--git` to `sopsy init` and it `git add`s exactly the files it just created (`.sops.yaml`, `.env.example`, `.env.encrypted`, `.gitignore`, `.sopsy.yml`, and its `.sopsy.sha` sidecar), then prints ready-to-paste `git commit` / `git push` / `gh pr create` commands. It never runs `git add -A`, so unrelated changes stay out of your first commit.
 
-In **interactive** mode, `init` then offers to set up the break-glass key right away (it prompts; pass `--generate-emergency-keys` / `--no-emergency-keys` to decide explicitly). Accepting runs the same ceremony described in the next section. This is the best moment to do it — don't skip it.
+In **interactive** mode, `init` then sets up the break-glass key right away, running the same ceremony described in the next section (pass `--no-emergency-keys` to skip it). Unattended runs (`-y`) skip it, since nobody is there to store it offline: run `sopsy recipient break-glass` afterwards. Don't put it off.
 
 > [!TIP]
 >

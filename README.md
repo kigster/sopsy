@@ -25,6 +25,7 @@ ______________________________________________________________________
 - [Screenshot](#screenshot)
 - [Architecture](#architecture)
 - [How encryption flows](#how-encryption-flows)
+- [How sopsy picks a key store](#how-sopsy-picks-a-key-store)
 - [The Secure Enclave security model](#the-secure-enclave-security-model)
   - [Where your identity lives](#where-your-identity-lives)
   - [Console session, Touch ID, and one-laptop testing](#console-session-touch-id-and-one-laptop-testing)
@@ -65,7 +66,7 @@ ______________________________________________________________________
 
 The killer property: the secret values live in Git in *encrypted* form, while the private key that can decrypt them stays in hardware you hold.
 
-Each member's private key lives in one of four **key stores**, strongest first. `--store auto` picks the first one your machine has, and a repository limits which ones its members may use (`sopsy init --allow-stores`). The default is hardware only (Secure Enclave and YubiKey); pass `--allow-stores software` or `--allow-stores any` to allow weaker stores:
+Each member's private key lives in one of four **key stores**, strongest first. A repository lists the stores its members may use, in order of preference (`sopsy init --allow-stores`), and `--store auto` picks the first one that works on your machine (see [How sopsy picks a key store](#how-sopsy-picks-a-key-store)). The default is hardware only (Secure Enclave, then YubiKey); pass `--allow-stores software` or `--allow-stores any` to allow weaker stores:
 
 | Store      | Where the key lives                                    | Unlocked by                    | Details                                               |
 | ---------- | ------------------------------------------------------ | ------------------------------ | ----------------------------------------------------- |
@@ -186,10 +187,12 @@ ______________________________________________________________________
 
 ## Prerequisites
 
-`sopsy` is **macOS-first** (v1). It orchestrates three external tools, all installable with [Homebrew](https://brew.sh):
+`sopsy` is **macOS-first** (v1). It orchestrates a few external tools, all installable with [Homebrew](https://brew.sh). `sopsy deps` installs whichever are missing, and `sopsy init` runs the same step first (it asks; with `-y` it just installs):
 
 ```bash
-brew install sops age age-plugin-se
+sopsy deps
+# or by hand:
+brew install sops age age-plugin-se age-plugin-yubikey ykman   # age-plugin-se: Apple Silicon only
 ```
 
 > [!TIP]
@@ -207,7 +210,7 @@ brew install sops age age-plugin-se
 
 > [!IMPORTANT]
 >
-> Your private key lives in a **key store**. `--store auto` (the default) picks the most secure one your machine has:
+> Your private key lives in a **key store**. `--store auto` (the default) picks the first allowed store your machine supports:
 >
 > | Store      | Kind      | Where the private key lives                                   |
 > | ---------- | --------- | ------------------------------------------------------------- |
@@ -216,7 +219,7 @@ brew install sops age age-plugin-se
 > | `keychain` | software  | macOS Keychain / Linux Secret Service, encrypted at rest      |
 > | `file`     | plaintext | `keys.txt` (mode `0600`); last resort, with a loud warning    |
 >
-> `sopsy init` records a hardware-only policy by default (`onchip,exthardware`). `--allow-stores yubikey,keychain` (or the groups `onchip`, `exthardware`, `software`) changes that; `--allow-stores any` (or `all`) records no restriction. `SOPSY_PRIVATE_KEY_STORE_PRIORITY` reorders or restricts `auto` for you personally. `sopsy doctor` shows what is available here.
+> `sopsy init` records a hardware-only policy by default (`onchip,exthardware`). `--allow-stores yubikey,keychain` (or the groups `onchip`, `exthardware`, `software`) changes that, and its order is also the order `auto` tries; `--allow-stores any` (or `all`) records no restriction. `SOPSY_PRIVATE_KEY_STORE_PRIORITY` reorders or narrows that list for you personally. `sopsy doctor` shows what is available here and which store `auto` would use. Details: [How sopsy picks a key store](#how-sopsy-picks-a-key-store).
 
 > [!TIP]
 >
@@ -351,7 +354,7 @@ flowchart TD
 
 > [!TIP]
 >
-> In **interactive** mode `init` offers to set up the break-glass key right then — the moment you're most likely to actually do it. It prints a yellow prompt to copy the generated `break-glass.private` / `.public` into 1Password, waits for you, then deletes the local copies. Use `--generate-emergency-keys` / `--no-emergency-keys` to decide explicitly (e.g. in scripts).
+> In **interactive** mode `init` sets up the break-glass key right then — the moment you're most likely to actually do it. It prints a yellow prompt to copy the generated `break-glass.private` / `.public` into 1Password, waits for you, then deletes the local copies. Pass `--no-emergency-keys` to skip it. Unattended runs (`-y`) always skip it, since nobody is there to store it; run `sopsy recipient break-glass` afterwards.
 
 ______________________________________________________________________
 
@@ -389,6 +392,37 @@ sequenceDiagram
 > [!IMPORTANT]
 >
 > Only **encrypted** files (`.env.encrypted`, `*.encrypted`, `config/*.encrypted.yaml`) and **public** metadata (`.sops.yaml`, `.sopsy.yml`, `.env.example`) belong in Git. The plaintext `.env` must always stay local.
+
+______________________________________________________________________
+
+## How sopsy picks a key store
+
+Three settings decide where a new key goes (`init`, `join`, `recipient keygen`). Each one wins over the next:
+
+| Setting | Set by | Applies to | What it does |
+| --- | --- | --- | --- |
+| `--store <STORE>` | the command line | this run | Uses exactly that store. It must be allowed and work on this machine, or the command fails. |
+| `SOPSY_PRIVATE_KEY_STORE_PRIORITY` | your shell | you | Your own order for `--store auto`, e.g. `yubikey,enclave`. It can reorder or narrow the repository's list, never widen it. |
+| `--allow-stores` (`key_policy.allowed`) | `sopsy init`, committed in `.sopsy.yml` | everyone | Which stores members may use, **and** the default order for `auto`. |
+
+With none of them set (`--allow-stores any`, no env var), `auto` tries `enclave, yubikey, keychain, file`.
+
+`auto` walks the resulting list and takes the first store that works here. Stores this machine cannot support are skipped:
+
+- **Secure Enclave:** skipped on Linux and Intel Macs. On an Apple Silicon Mac without `age-plugin-se` sopsy stops and tells you to install it (`sopsy deps`) rather than quietly falling back to a weaker store.
+- **YubiKey:** skipped unless a PIV-capable YubiKey is plugged in. With one plugged in but no `age-plugin-yubikey`, it is skipped if a store earlier in the list already works, and sopsy stops otherwise.
+- In an interactive run with several usable stores, sopsy asks, listing them in this order.
+
+For example, after `sopsy init --allow-stores yubikey,enclave`:
+
+| Machine | `auto` uses |
+| --- | --- |
+| Any Mac or Linux box with a YubiKey plugged in | `yubikey` |
+| Apple Silicon Mac, no YubiKey | `enclave` |
+| Intel Mac or Linux, no YubiKey | nothing: the command fails, since no allowed store works |
+| Any machine, with `SOPSY_PRIVATE_KEY_STORE_PRIORITY=enclave` | `enclave` (where available) |
+
+The allow list is a soft guardrail: it lives in `.sopsy.yml` like everything else sopsy records. A hand edit breaks the `.sopsy.sha` checksum, so every command refuses to run until `sopsy doctor` accepts the change. Review `.sopsy.yml` changes in pull requests. Break-glass and CI keys are portable by design and exempt from the list.
 
 ______________________________________________________________________
 
@@ -474,7 +508,7 @@ sequenceDiagram
 The output below is illustrative; prompts are interactive menus (↑↓ moves, Space toggles, Enter confirms).
 
 ```text
-$ sopsy init -r exthardware,software -s yubikey
+$ sopsy init -A exthardware,software -s yubikey
 
     If your YubiKey has a default factory PUK (the 'forgot PIN' special recovery PIN), would you like
     to set it to something different than your YubiKey PIN?
@@ -496,14 +530,14 @@ admin  alex      age1yubikey1qg8v…     yubikey (hardware)
 Everything has a flag, so the same setup runs without prompts:
 
 ```bash
-sopsy init -s yubikey --always-new-slot \
-  --yubikey-pin-policy cached --yubikey-touch-policy always \
-  --generate-emergency-keys
+sopsy init -y -s yubikey --always-new-slot \
+  --yubikey-pin-policy cached --yubikey-touch-policy always
+sopsy recipient break-glass     # unattended init skips the emergency key
 ```
 
 - With several YubiKeys plugged in, sopsy asks which one to use (by serial). Without a terminal it stops and asks you to unplug all but one.
 - When the YubiKey already holds age keys, sopsy offers to reuse one. `-a` / `--always-new-slot` skips the question and fills the next free slot.
-- `-r` / `--allow-stores` records the allowed stores in `.sopsy.yml` (`key_policy.allowed`). Non-interactive init without the flag records hardware only (`onchip,exthardware`). `--allow-stores any` (or `all`) records no restriction. Members whose key comes from another store are refused by `join`, `recipient add` and `approve`.
+- `-A` / `--allow-stores` records the allowed stores, in order of preference, in `.sopsy.yml` (`key_policy.allowed`). Non-interactive init without the flag records hardware only (`onchip,exthardware`). `--allow-stores any` (or `all`) records no restriction. Members whose key comes from another store are refused by `join`, `recipient add` and `approve`.
 
 ### Join with a YubiKey
 
@@ -524,7 +558,7 @@ DATABASE_URL=postgres://localhost:5432/myapp
 API_KEY=…
 ```
 
-To have `auto` prefer the YubiKey on a machine that also has a Secure Enclave, set your own order: `export SOPSY_PRIVATE_KEY_STORE_PRIORITY=yubikey,enclave,keychain`.
+To have every member's `auto` prefer a plugged-in YubiKey over the Secure Enclave, list it first when you create the repository: `sopsy init --allow-stores yubikey,enclave`. For just yourself, set your own order: `export SOPSY_PRIVATE_KEY_STORE_PRIORITY=yubikey,enclave`.
 
 ### PIN, PUK and touch
 
@@ -660,20 +694,40 @@ These apply to **every** subcommand (they are global and may appear before or af
 
 Bootstrap an encrypted repository. Verifies the toolchain, acquires an `age` recipient (a generated Secure Enclave identity or a supplied public key), and writes `.sops.yaml`, `.env.example`, an encrypted `.env.encrypted`, `.gitignore` safety rules, and `.sopsy.yml`.
 
-| Flag                                    | Description                                                                                                                                                     |
-| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `-n`, `--recipient-name <NAME>`         | Name to record for the recipient created/registered during init (default: `admin`).                                                                             |
-| `-u`, `--username <NAME>`               | Username of who generated the key, recorded in `.sopsy.yml`. When generating interactively, this is the default offered at the prompt (falls back to `$USER`).  |
-| `-p`, `--age-public-key <age1...>`      | Use an existing `age` public key instead of generating a new identity.                                                                                          |
-| `--no-generate`                         | Skip identity generation. Requires `--age-public-key`, else init errors.                                                                                        |
-| `-r`, `--allow-stores <STORES>`              | Key stores members may use, comma-separated: `enclave`, `yubikey`, `keychain`, `file`, or the groups `onchip`, `exthardware`, `software`. `any` or `all` records no restriction. Non-interactive default: hardware only (`onchip,exthardware`). Interactive runs ask, with hardware stores pre-selected. On a machine with no hardware store, init fails rather than weakening the policy — pass `--allow-stores software` or `--allow-stores any`. |
-| `-s`, `--store <STORE>`                 | Where your private key lives: `auto` (default), `enclave`, `yubikey`, `keychain`, `file`.                                                                       |
-| `-a`, `--always-new-slot`               | Generate a new YubiKey key even if a reusable one exists. Interactive runs list the existing keys (and the YubiKeys, when several are plugged in).              |
-| `-c`, `--yubikey-pin-policy <POLICY>`   | `always`, `cached` (once per session, default) or `never`.                                                                                                      |
-| `-b`, `--yubikey-touch-policy <POLICY>` | `always`, `cached` (15 seconds, fixed by the YubiKey; default) or `never`.                                                                                      |
-| `-e`, `--generate-emergency-keys`       | Generate the portable "break glass" emergency key as part of init (interactive mode prompts by default).                                                        |
-| `--no-emergency-keys`                   | Skip the emergency key during init (you'll get a reminder to run it later).                                                                                     |
-| `--force`                               | Overwrite/recreate `.sops.yaml` and `.env.encrypted` even if they already exist, and proceed even if some doctor checks fail.                                   |
+Before anything else, `init` installs missing supporting tools (the `sopsy deps` step): it asks first, or installs straight away with `-y`; without Homebrew it warns and carries on.
+
+**Repository options** are recorded for everyone using the repository:
+
+| Flag | Description |
+| --- | --- |
+| `-A`, `--allow-stores <STORES>` | Key stores members may use, in order of preference, comma-separated: `enclave`, `yubikey`, `keychain`, `file`, or the groups `onchip`, `exthardware`, `software`. The order is also the default order `auto` tries ([details](#how-sopsy-picks-a-key-store)). `any` or `all` records no restriction. Non-interactive default: hardware only (`onchip,exthardware`). Interactive runs ask, with hardware stores pre-selected. On a machine with no hardware store, init fails rather than weakening the policy: pass `--allow-stores software` or `--allow-stores any`. |
+| `--no-emergency-keys` | Skip the break-glass emergency key that interactive runs create. Unattended runs (`-y`) always skip it; run `sopsy recipient break-glass` later. |
+
+**Personal options** only shape the admin's (your) own key:
+
+| Flag | Description |
+| --- | --- |
+| `-s`, `--store <STORE>` | Where your private key lives: `auto` (default), `enclave`, `yubikey`, `keychain`, `file`. Members choose their own with `sopsy join --store`. |
+| `-n`, `--recipient-name <NAME>` | Name to record for your recipient (default: `admin`). |
+| `-u`, `--username <NAME>` | Username of who generated the key, recorded in `.sopsy.yml`. When generating interactively, this is the default offered at the prompt (falls back to `$USER`). |
+| `-p`, `--age-public-key <age1...>` | Use an existing `age` public key instead of generating a new identity. |
+| `--no-generate` | Skip identity generation. Requires `--age-public-key`, else init errors. |
+
+**YubiKey options** (also on `join` and `recipient keygen`):
+
+| Flag | Description |
+| --- | --- |
+| `-c`, `--yubikey-pin-policy <POLICY>` | `always`, `cached` (once per session, until the key is unplugged; default) or `never`. |
+| `-b`, `--yubikey-touch-policy <POLICY>` | `always`, `cached` (15 seconds, fixed by the YubiKey; default) or `never`. |
+| `-a`, `--always-new-slot` | Generate a new YubiKey key even if a reusable one exists. Interactive runs list the existing keys (and the YubiKeys, when several are plugged in). |
+
+**Other options:**
+
+| Flag | Description |
+| --- | --- |
+| `--force` | Overwrite/recreate `.sops.yaml` and `.env.encrypted` even if they already exist, and proceed even if some doctor checks fail. |
+
+`sopsy init --help` ends with more examples.
 
 ```bash
 # Interactive: generate a Secure Enclave identity (Touch ID may prompt).
@@ -681,6 +735,9 @@ sopsy init
 
 # Interactive but name the recipient:
 sopsy init -n alice
+
+# Prefer a plugged-in YubiKey over the Secure Enclave, for every member:
+sopsy init --allow-stores yubikey,enclave
 
 # Non-interactive / CI: bring your own age key, never touch the Enclave.
 # `--allow-stores any` is required on machines with no hardware store (Linux CI).
@@ -1126,7 +1183,7 @@ ______________________________________________________________________
 | `EDITOR` / `VISUAL`                | Editor for `sopsy edit` (after `--editor`, before the `vi` default).                                                                  |
 | `NO_COLOR`                         | Disables colored output (same as `--no-color`).                                                                                       |
 | `SOPSY_POINTER`                    | One-cell glyph marking the current row in checklists (default `❯`), e.g. a Nerd Font arrow.                                           |
-| `SOPSY_PRIVATE_KEY_STORE_PRIORITY` | Your own key store order for `--store auto`, e.g. `exthardware,software`; stores left out are not used.                               |
+| `SOPSY_PRIVATE_KEY_STORE_PRIORITY` | Your own key store order for `--store auto`, e.g. `yubikey,enclave`; overrides the repository's `--allow-stores` order, and stores left out are not used. It cannot add stores the repository does not allow. |
 | `SOPSY_KEYS_FILE`                  | Override where sopsy stores/reads the age identity (default: the per-user `sops` keys file).                                          |
 | `SOPS_AGE_KEY_FILE`                | Standard `sops` var for the age identity file; if you set it, sopsy honors it and stores there.                                       |
 | `SOPS_AGE_KEY`                     | Standard `sops` var holding a literal age identity — how CI decrypts (see [`recipient ci`](#recipient-ci)). sopsy never overrides it. |
