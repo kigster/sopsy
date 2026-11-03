@@ -213,10 +213,13 @@ fn keygen_generates_and_prints_enclave_identity() {
         ),
     );
 
+    let keys = dir.path().join("age-keys.txt");
     let output = assert_cmd::Command::cargo_bin("sopsy")
         .unwrap()
         .env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew")
         .env("SOPSY_AGE_PLUGIN_SE_BIN", &plugin)
+        // keygen persists the identity; never let it reach the real keystore.
+        .env("SOPSY_KEYS_FILE", &keys)
         .current_dir(dir.path())
         .args([
             "recipient",
@@ -233,6 +236,8 @@ fn keygen_generates_and_prints_enclave_identity() {
         stdout.contains(fake_pubkey),
         "keygen should print the public key; got:\n{stdout}"
     );
+    let stored = std::fs::read_to_string(&keys).expect("identity persisted");
+    assert!(stored.contains("AGE-PLUGIN-SE-1QFAKEIDENTITY"), "{stored}");
     // The trailing `--` args are forwarded verbatim to age-plugin-se keygen.
     let logged = std::fs::read_to_string(&record).unwrap();
     assert!(
