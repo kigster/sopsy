@@ -56,7 +56,9 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
     // 2. Install missing supporting tools (`sopsy deps`), then preflight the
     //    ones we depend on, and an existing `.sops.yaml` (so a broken one
     //    fails before a key is generated for it).
-    crate::commands::deps::offer_install(ui)?;
+    if !args.skip_deps {
+        crate::commands::deps::offer_install(ui)?;
+    }
     sops::ensure_available()?;
     ui.success("Found `sops`.");
     let sops_yaml = root.join(".sops.yaml");

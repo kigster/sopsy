@@ -189,6 +189,7 @@ mod tests {
                     allow_stores: vec![],
                     key: Default::default(),
                     no_break_glass: true,
+                    skip_deps: true,
                     force: false,
                 })
             )

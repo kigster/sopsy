@@ -696,7 +696,7 @@ These apply to **every** subcommand (they are global and may appear before or af
 
 Bootstrap an encrypted repository. Verifies the toolchain, acquires an `age` recipient (a generated Secure Enclave identity or a supplied public key), and writes `.sops.yaml`, `.env.example`, an encrypted `.env.encrypted`, `.gitignore` safety rules, and `.sopsy.yml`.
 
-Before anything else, `init` installs missing supporting tools (the `sopsy deps` step): it asks first, or installs straight away with `-y`; without Homebrew it warns and carries on.
+Before anything else, `init` installs missing supporting tools (the `sopsy deps` step): it asks first, or installs straight away with `-y`; without Homebrew it warns and carries on. `--skip-deps` turns the step off.
 
 **Repository options** are recorded for everyone using the repository:
 
@@ -728,6 +728,7 @@ Before anything else, `init` installs missing supporting tools (the `sopsy deps`
 | Flag | Description |
 | --- | --- |
 | `--force` | Overwrite/recreate `.sops.yaml` and `.env.encrypted` even if they already exist, and proceed even if some doctor checks fail. |
+| `--skip-deps` | Do not install missing supporting tools. Useful on shared or managed machines where `brew install` must not run. |
 
 `sopsy init --help` ends with more examples.
 

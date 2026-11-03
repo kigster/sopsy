@@ -876,3 +876,27 @@ fn init_without_brew_warns_and_carries_on() {
         .stdout(predicate::str::contains("Homebrew was not found"))
         .stderr(predicate::str::contains("sops"));
 }
+
+#[cfg(unix)]
+#[test]
+fn init_skip_deps_never_runs_brew() {
+    let (dir, bin) = repo_with_bare_path();
+    let log = dir.path().join("brew.log");
+    write_script(
+        &bin.join("brew"),
+        &format!("echo \"$@\" >> '{}'\n", log.display()),
+    );
+    sopsy_in(dir.path())
+        .env("PATH", &bin)
+        .env("SOPSY_BREW_BIN", bin.join("brew"))
+        .args([
+            "--non-interactive",
+            "init",
+            "--skip-deps",
+            "--allow-stores",
+            "any",
+        ])
+        .assert()
+        .failure();
+    assert!(!log.exists(), "--skip-deps must not call brew");
+}

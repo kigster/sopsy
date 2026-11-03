@@ -203,6 +203,7 @@ Examples:
     mut_arg("pin_policy", |a| a.display_order(9)),
     mut_arg("touch_policy", |a| a.display_order(10)),
     mut_arg("new_slot", |a| a.display_order(11)),
+    mut_arg("skip_deps", |a| a.display_order(98)),
     mut_arg("force", |a| a.display_order(12)),
 )]
 #[command(after_long_help = INIT_EXAMPLES)]
@@ -256,6 +257,11 @@ pub struct InitArgs {
     /// `sopsy recipient break-glass`.
     #[arg(long = "no-emergency-keys", alias = "no-break-glass")]
     pub no_break_glass: bool,
+
+    /// Do not install missing supporting tools (the `sopsy deps` step). Useful
+    /// on shared or managed machines where `brew install` must not run.
+    #[arg(long)]
+    pub skip_deps: bool,
 
     /// Proceed even if some doctor checks fail.
     #[arg(long)]
