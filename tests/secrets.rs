@@ -179,3 +179,235 @@ fn list_supported_types_lists_all_formats() {
                 .and(predicate::str::contains("binary")),
         );
 }
+
+/// A temp repo with a real age key, its `.sops.yaml`, and `SOPS_AGE_KEY_FILE`
+/// already set on every command [`WriteRepo::sopsy`] returns.
+struct WriteRepo {
+    dir: TempDir,
+    key_file: PathBuf,
+}
+
+impl WriteRepo {
+    fn new() -> Self {
+        let dir = TempDir::new().unwrap();
+        let (public_key, key_file) = age_key(dir.path());
+        write_sops_yaml(dir.path(), &public_key);
+        Self { dir, key_file }
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        self.dir.path().join(name)
+    }
+
+    fn sopsy(&self) -> assert_cmd::Command {
+        let mut cmd = sopsy(self.dir.path());
+        cmd.env("SOPS_AGE_KEY_FILE", &self.key_file);
+        cmd.env_remove("SOPSY_ASSUME_YES");
+        cmd
+    }
+
+    /// Every `.bak` file in the repo.
+    fn backups(&self) -> Vec<PathBuf> {
+        std::fs::read_dir(self.dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.to_string_lossy().ends_with(".bak"))
+            .collect()
+    }
+}
+
+#[test]
+fn write_flag_round_trips_dotenv_yaml_and_json() {
+    let cases = [
+        (".env", "PASSWORD=hunter2\n"),      // pragma: allowlist secret
+        ("app.yaml", "password: hunter2\n"), // pragma: allowlist secret
+        ("app.json", "{\n\t\"password\": \"hunter2\"\n}"), // pragma: allowlist secret
+    ];
+    for (name, plain) in cases {
+        let repo = WriteRepo::new();
+        std::fs::write(repo.path(name), plain).unwrap();
+        repo.sopsy()
+            .args(["encrypt", name, "-w"])
+            .assert()
+            .success();
+        let encrypted = format!("{name}.encrypted");
+        let ciphertext = std::fs::read_to_string(repo.path(&encrypted)).unwrap();
+        assert!(!ciphertext.contains("hunter2"), "{name} must be encrypted");
+
+        std::fs::remove_file(repo.path(name)).unwrap();
+        repo.sopsy()
+            .args(["decrypt", &encrypted, "--write"])
+            .assert()
+            .success();
+        let restored = std::fs::read_to_string(repo.path(name)).unwrap();
+        assert!(restored.contains("hunter2"), "{name}: {restored}");
+        if name == ".env" {
+            assert_eq!(restored, plain);
+        }
+    }
+}
+
+#[test]
+fn secrets_alias_write_flag_behaves_the_same() {
+    let repo = WriteRepo::new();
+    std::fs::write(repo.path(".env"), "A=1\n").unwrap();
+    repo.sopsy()
+        .args(["secrets", "encrypt", ".env", "-w"])
+        .assert()
+        .success();
+    std::fs::remove_file(repo.path(".env")).unwrap();
+    repo.sopsy()
+        .args(["secrets", "decrypt", ".env.encrypted", "-w"])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(repo.path(".env")).unwrap(), "A=1\n");
+}
+
+#[test]
+fn write_flag_rejects_the_wrong_suffix() {
+    let repo = WriteRepo::new();
+    std::fs::write(repo.path("x.encrypted"), "A=1\n").unwrap();
+    std::fs::write(repo.path(".env"), "A=1\n").unwrap();
+    repo.sopsy()
+        .args(["encrypt", "x.encrypted", "-w"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already ends in"));
+    repo.sopsy()
+        .args(["decrypt", ".env", "-w"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("use `-o`"));
+}
+
+#[test]
+fn existing_target_without_a_flag_is_an_error_and_left_untouched() {
+    let repo = WriteRepo::new();
+    std::fs::write(repo.path(".env"), "A=1\n").unwrap();
+    repo.sopsy()
+        .args(["encrypt", ".env", "-w"])
+        .assert()
+        .success();
+    std::fs::write(repo.path(".env"), "LOCAL=edit\n").unwrap();
+
+    repo.sopsy()
+        .args(["decrypt", ".env.encrypted", "-w"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("pass `--overwrite`"));
+    assert_eq!(
+        std::fs::read_to_string(repo.path(".env")).unwrap(),
+        "LOCAL=edit\n"
+    );
+
+    // `-o` follows the same rules.
+    repo.sopsy()
+        .args(["decrypt", ".env.encrypted", "-o", ".env"])
+        .assert()
+        .failure();
+    let before = std::fs::read(repo.path(".env.encrypted")).unwrap();
+    repo.sopsy()
+        .args(["encrypt", ".env", "-w"])
+        .assert()
+        .failure();
+    assert_eq!(std::fs::read(repo.path(".env.encrypted")).unwrap(), before);
+    assert!(repo.backups().is_empty());
+}
+
+#[test]
+fn overwrite_on_decrypt_backs_up_the_old_plaintext() {
+    let repo = WriteRepo::new();
+    std::fs::write(repo.path(".env"), "A=1\n").unwrap();
+    repo.sopsy()
+        .args(["encrypt", ".env", "-w"])
+        .assert()
+        .success();
+    std::fs::write(repo.path(".env"), "LOCAL=edit\n").unwrap();
+
+    repo.sopsy()
+        .args(["decrypt", ".env.encrypted", "-w", "-O"])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(repo.path(".env")).unwrap(), "A=1\n");
+    let backups = repo.backups();
+    assert_eq!(backups.len(), 1, "{backups:?}");
+    let name = backups[0]
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    assert!(
+        name.starts_with(".env.") && name.ends_with(".bak"),
+        "{name}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&backups[0]).unwrap(),
+        "LOCAL=edit\n"
+    );
+}
+
+#[test]
+fn overwrite_on_encrypt_replaces_without_a_backup() {
+    let repo = WriteRepo::new();
+    std::fs::write(repo.path(".env"), "A=1\n").unwrap();
+    repo.sopsy()
+        .args(["encrypt", ".env", "-w"])
+        .assert()
+        .success();
+    std::fs::write(repo.path(".env"), "A=2\n").unwrap();
+    repo.sopsy()
+        .args(["encrypt", ".env", "-w", "--overwrite"])
+        .assert()
+        .success();
+    assert!(repo.backups().is_empty());
+    repo.sopsy()
+        .args(["decrypt", ".env.encrypted"])
+        .assert()
+        .success()
+        .stdout("A=2\n");
+}
+
+#[test]
+fn yes_flag_and_assume_yes_env_overwrite_with_a_backup() {
+    let repo = WriteRepo::new();
+    std::fs::write(repo.path(".env"), "A=1\n").unwrap();
+    repo.sopsy()
+        .args(["encrypt", ".env", "-w"])
+        .assert()
+        .success();
+
+    std::fs::write(repo.path(".env"), "LOCAL=1\n").unwrap();
+    repo.sopsy()
+        .args(["--yes", "decrypt", ".env.encrypted", "-w"])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(repo.path(".env")).unwrap(), "A=1\n");
+    assert_eq!(repo.backups().len(), 1);
+
+    std::fs::write(repo.path(".env"), "LOCAL=2\n").unwrap();
+    // Backups are stamped to the second; wait so the second one gets a new name.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    repo.sopsy()
+        .env("SOPSY_ASSUME_YES", "1")
+        .args(["decrypt", ".env.encrypted", "-w"])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(repo.path(".env")).unwrap(), "A=1\n");
+    assert_eq!(repo.backups().len(), 2);
+}
+
+#[test]
+fn failed_decrypt_leaves_an_existing_target_unchanged() {
+    let repo = WriteRepo::new();
+    std::fs::write(repo.path(".env.encrypted"), "not sops at all\n").unwrap();
+    std::fs::write(repo.path(".env"), "KEEP=me\n").unwrap();
+    repo.sopsy()
+        .args(["decrypt", ".env.encrypted", "-w", "-O"])
+        .assert()
+        .failure();
+    assert_eq!(
+        std::fs::read_to_string(repo.path(".env")).unwrap(),
+        "KEEP=me\n"
+    );
+    assert!(repo.backups().is_empty());
+}
