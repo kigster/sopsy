@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use indicatif::{ProgressBar, ProgressStyle};
 use inquire::ui::{Color, RenderConfig, StyleSheet};
-use inquire::{Confirm, Text};
+use inquire::{Confirm, Password, PasswordDisplayMode, Text};
 use owo_colors::{OwoColorize, Style};
 
 use crate::error::{Error, Result};
@@ -658,6 +658,25 @@ impl Ui {
         })
     }
 
+    /// Ask for a secret value without echoing it.
+    ///
+    /// Returns [`Error::NonInteractive`] when prompting is disabled.
+    pub fn secret(&self, prompt: &str, flag: &str) -> Result<String> {
+        self.ensure_interactive(prompt, flag)?;
+        self.spaced(|| {
+            #[cfg(test)]
+            if let Some(answer) = self.scripted_answer(prompt) {
+                return Ok(scripted_text(prompt, answer, ""));
+            }
+            Password::new(prompt)
+                .without_confirmation()
+                .with_display_mode(PasswordDisplayMode::Hidden)
+                .with_render_config(self.render_config())
+                .prompt()
+                .map_err(into_other)
+        })
+    }
+
     /// Ask the user for a free-form text value, offering `default` when they
     /// press ENTER without typing anything.
     ///
@@ -891,6 +910,11 @@ mod tests {
                 .expect_err("press_enter should refuse without a terminal"),
             Error::NonInteractive { .. }
         ));
+        assert!(matches!(
+            ui.secret("Secret?", "VALUE")
+                .expect_err("secret should refuse to prompt"),
+            Error::NonInteractive { .. }
+        ));
     }
 
     #[test]
@@ -1040,6 +1064,7 @@ mod tests {
             Answer::Text("typed".into()),
             Answer::Text(String::new()),
             Answer::Enter,
+            Answer::Text("hidden".into()),
         ]);
         assert_eq!(ui.select("pick one", "--x", opts()).unwrap(), "b");
         assert_eq!(ui.multi_select("pick", "--x", opts()).unwrap(), ["a", "c"]);
@@ -1067,6 +1092,7 @@ mod tests {
         );
         ui.press_enter("press ENTER").unwrap();
         ui.pause(Duration::from_millis(1));
+        assert_eq!(ui.secret("Secret?", "--value").unwrap(), "hidden");
     }
 
     #[test]
