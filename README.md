@@ -26,6 +26,7 @@ ______________________________________________________________________
 - [Architecture](#architecture)
 - [How encryption flows](#how-encryption-flows)
 - [How sopsy picks a key store](#how-sopsy-picks-a-key-store)
+- [Team scenarios](#team-scenarios)
 - [The Secure Enclave security model](#the-secure-enclave-security-model)
   - [Where your identity lives](#where-your-identity-lives)
   - [Console session, Touch ID, and one-laptop testing](#console-session-touch-id-and-one-laptop-testing)
@@ -427,6 +428,109 @@ For example, after `sopsy init --allow-stores yubikey,enclave`:
 The allow list is a soft guardrail: it lives in `.sopsy.yml` like everything else sopsy records. A hand edit breaks the `.sopsy.sha` checksum, so every command refuses to run until `sopsy doctor` accepts the change. Review `.sopsy.yml` changes in pull requests. Break-glass and CI keys are portable by design and exempt from the list.
 
 ______________________________________________________________________
+
+## Team scenarios
+
+One team, four people:
+
+- **Ada**, the VP of Engineering, sets the policy.
+- **Alan** prefers a YubiKey.
+- **Grace** prefers the Secure Enclave on her MacBook.
+- **Dennis** works on Linux and does not want hardware keys.
+
+Ada's `--allow-stores` choice is the one that decides whether Dennis can join at all, and with what.
+
+### 1. Ada initializes the repository and stores the break-glass key
+
+```bash
+sopsy init -A onchip,exthardware     # hardware only: Enclave or YubiKey (unattended runs default to it; interactive runs ask)
+```
+
+- Ada's own key goes in the best store her Mac has (`-s yubikey` to choose hers).
+- Interactive `init` also creates the **break-glass** key. Ada saves it in the team vault (for example 1Password) and presses ENTER; sopsy deletes the local copy.
+- CI never runs `init`. It gets its own portable key, stored as the `SOPS_AGE_KEY` CI secret: `sopsy recipient ci`.
+- She commits `.sops.yaml`, `.sopsy.yml`, `.sopsy.sha` and `.env.encrypted`.
+
+The policy is now committed: every member's key must live in one of the allowed stores, and their `auto` choice follows Ada's order within each tier.
+
+### 2. Alan joins with a YubiKey
+
+```bash
+sopsy join "Alan Turing" -s yubikey -c cached -b cached
+```
+
+- `-c cached`: the PIN is asked once per session, until the YubiKey is unplugged.
+- `-b cached`: after the PIN, a touch is needed, then not again for 15 seconds.
+- He pushes the pending entry; any active member (Ada) runs `sopsy approve "Alan Turing"`.
+
+### 3. Grace joins with the Secure Enclave
+
+```bash
+sopsy join "Grace Hopper" -s enclave
+```
+
+Every decryption asks for Touch ID. That is fine for an occasional `sopsy edit`, and a problem once tools decrypt on their own: see [scenario 5](#5-caching-many-worktrees-many-prompts).
+
+### 4. Dennis joins from Linux: Ada's policy decides
+
+| Ada ran `init` with | Dennis runs | Result |
+| --- | --- | --- |
+| `-A onchip,exthardware` (default) | `sopsy join "Dennis Ritchie"` | Refused: no allowed store works on his machine. He needs a YubiKey, or Ada widens the policy. |
+| `-A onchip,exthardware,keychain` | `sopsy join "Dennis Ritchie" -s keychain` | His key is kept in the Secret Service keyring (GNOME Keyring, KWallet), encrypted at rest. No plaintext key on disk. |
+| `-A any` (or adding `file`) | `sopsy join "Dennis Ritchie" -s file` | His key is a plaintext file in `keys.txt`. Anyone who can read his home directory can decrypt every secret. |
+
+The repository order never puts a weaker store first: even under `-A any`, Grace's and Alan's `auto` still picks hardware. Changing the policy later means editing `key_policy.allowed` in `.sopsy.yml` through a reviewed pull request (`sopsy doctor` then refreshes the checksum).
+
+### 5. Caching: many worktrees, many prompts
+
+Grace's team works in git worktrees, and each worktree's `.envrc` runs `sopsy decrypt`. Every new worktree, every `direnv reload` and every new shell means another Touch ID, which is not workable. What each key asks for on every decryption:
+
+| Key | Asks for | Fix |
+| --- | --- | --- |
+| Enclave (default) | Touch ID, every time. `age-plugin-se` has no cache. | `sopsy recipient rotate -s enclave -t`, or the worktree script below. |
+| Enclave, made with `-t` | Nothing. The key still never leaves the chip, but any program running as Grace can decrypt silently. | |
+| YubiKey `-c cached -b cached` | PIN once per session; a touch when 15 seconds have passed since the last one. | `-b never` to drop the touch. |
+| YubiKey `-c cached -b never` (or `-t`) | PIN once per session, then nothing until it is unplugged. | |
+
+PIN and touch policies are fixed when a key is generated. To change them, swap the key in place; the secrets are re-encrypted for the new key:
+
+```bash
+sopsy recipient rotate -s enclave -t                # Grace: Enclave key without Touch ID
+sopsy recipient rotate -s yubikey -c cached -b never   # Alan: PIN once per session, no touch
+```
+
+#### A worktree script that decrypts once
+
+If you keep Touch ID, decrypt once per worktree instead of once per shell. This script creates the worktree and gives it a plaintext `.env` (gitignored, mode 0600): copied from the main checkout when that copy is current, so there is no prompt at all, or decrypted once otherwise.
+
+```bash
+#!/usr/bin/env bash
+# bin/worktree-create <branch> [path]: a new worktree with its secrets, at most one decryption.
+set -euo pipefail
+branch="${1:?usage: worktree-create <branch> [path]}"
+main="$(git rev-parse --show-toplevel)"
+path="${2:-$main/../$(basename "$main")-${branch//\//-}}"
+
+git worktree add -b "$branch" "$path"
+if [[ -f "$main/.env" && ! "$main/.env.encrypted" -nt "$main/.env" ]]; then
+  install -m 600 "$main/.env" "$path/.env"        # current copy: no prompt
+else
+  (cd "$path" && umask 077 && sopsy decrypt .env.encrypted -o .env)   # one Touch ID / PIN
+fi
+direnv allow "$path" 2>/dev/null || true
+```
+
+Pair it with an `.envrc` that uses the local `.env` while it is current, and decrypts only when `.env.encrypted` is newer:
+
+```bash
+if [[ -f .env && ! .env.encrypted -nt .env ]]; then
+  dotenv .env
+elif [[ -f .env.encrypted ]]; then
+  eval "$(sopsy decrypt .env.encrypted | sed '/^#.*/d; /^$/d; s/^/export /g')"
+fi
+```
+
+The trade-off: each worktree holds a plaintext `.env` until it is removed. That is the price of keeping Touch ID; without the plaintext copies, use a key without a presence gate, as above.
 
 ## The Secure Enclave security model
 
