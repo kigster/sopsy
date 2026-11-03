@@ -4,11 +4,11 @@
 
 > The missing developer experience for [SOPS](https://github.com/getsops/sops).
 
-`sopsy` is a small, fast, colorful Rust CLI that makes it delightful to keep encrypted secrets in Git. It bootstraps a repository in minutes, generates hardware-backed identities using the macOS **Secure Enclave**, manages the team's recipients, and ships a CI gate that fails the build the moment a plaintext secret sneaks in.
+`sopsy` is a small, fast, colorful Rust CLI that makes it delightful to keep encrypted secrets in Git. It bootstraps a repository in minutes, generates hardware-backed identities in the macOS **Secure Enclave** or on a **YubiKey** (macOS and Linux), manages the team's recipients, and ships a CI gate that fails the build the moment a plaintext secret sneaks in.
 
 > [!NOTE]
 >
-> **sopsy does not replace SOPS. It makes SOPS delightful.** SOPS remains the encryption engine; `age` remains the cryptography; the Secure Enclave holds the private key. sopsy orchestrates and enhances them with safe defaults, great diagnostics, and a scriptable interface.
+> **sopsy does not replace SOPS. It makes SOPS delightful.** SOPS remains the encryption engine; `age` remains the cryptography; your hardware (a Mac's Secure Enclave or a YubiKey) holds the private key. sopsy orchestrates and enhances them with safe defaults, great diagnostics, and a scriptable interface.
 
 ______________________________________________________________________
 
@@ -87,11 +87,11 @@ The hardware stores never let the private key out. The two software stores are f
 
 ## Features
 
-- **Secure Enclave-backed identities** — private key bound to the hardware, protected by Touch ID, and impossible to exfiltrate.
+- **Secure Enclave-backed identities** — on Apple Silicon Macs, the private key is bound to the chip, protected by Touch ID, and impossible to exfiltrate.
 - **YubiKey-backed identities** — the private key lives in a YubiKey PIV slot (via `age-plugin-yubikey`), works on Intel Macs and Linux, and needs your PIN and a touch to decrypt.
 - **Key stores and repo policy** — Secure Enclave, YubiKey, OS keychain or a plaintext file; `sopsy init --allow-stores` decides which ones members may use (default: hardware only).
 - **Repository bootstrap** — one command writes `.sops.yaml`, `.env.example`, an encrypted `.env.encrypted`, `.gitignore` safety rules, and `.sopsy.yml`.
-- **`doctor` health checks** — macOS / Apple Silicon / Secure Enclave / Touch ID, the external tools, repo health, and a break-glass reminder.
+- **`doctor` health checks** — the platform, the external tools, which key stores this machine can use and which one `auto` would pick, repo health, and a break-glass reminder.
 - **`edit`** — open an encrypted file in your editor through SOPS, with nicer errors and automatic file-type detection (including `dotenv`).
 - **Self-service onboarding** — newcomers `sopsy join` to generate a key and request access via a pull request; any active member `sopsy approve`s them.
 - **A built-in audit trail** — every member carries their full name, `username`, when they requested access (`requested_at`), and who granted it and when (`approved_by` as `"Grace Hopper (grace)"`, `approved_at`). `sopsy recipient list` shows it all in one table.
@@ -115,13 +115,13 @@ ______________________________________________________________________
 
 ## Encryption & Team Onboarding Flow
 
-Sopsy's killer feature (besides the Touch ID-based decryption) is the fact that each developer on the team must be onboarded to be allowed to decrypt the secrets file. This means that a random person who acquires your repo with all the encrypted files in it can never decrypt the file, since they have not been officially admitted into the select group of decryptors.
+Sopsy's killer feature (besides decryption gated by hardware: Touch ID, or a YubiKey PIN and touch) is the fact that each developer on the team must be onboarded to be allowed to decrypt the secrets file. This means that a random person who acquires your repo with all the encrypted files in it can never decrypt the file, since they have not been officially admitted into the select group of decryptors.
 
 The first encryptor is considered the **prime** encryptor, and they are also given the "break-glass" in-case-of-emergency pair of private and public keys to be placed in some exec-only 1Password Vault, because you should hopefully never need those keys unless somehow all of the laptops were stolen from the company.
 
 The next person must request to join with `sopsy join "First Last"` or its synonym `sopsy request-access "Full Name"`.
 
-By default, the key minted in the Apple Enclave will require Touch ID every time it's used. This is good security but may get old if you are using, say, `direnv` or many windows with your project there. If you prefer to trade the security of your thumb for convenience, pass the native `-t` / `--without-touch-id` flag to `sopsy join` (equivalent to forwarding `--access-control none` to `age-plugin-se` after `--`). Here is an example:
+By default, a key minted in the Secure Enclave requires Touch ID every time it's used, and a YubiKey key asks for a touch (and its PIN once per session). This is good security but may get old if you are using, say, `direnv` or many windows with your project there. If you prefer to trade the security of your thumb for convenience, pass `-t` / `--without-touch-id` to `sopsy join`: the Enclave key is made with `--access-control none`, the YubiKey key with touch policy `never` (its PIN stays). The private key still never leaves the device. The example below uses a Mac; on a machine without a Secure Enclave, `sopsy join` puts the key on a plugged-in YubiKey instead:
 
 ```bash
 # Alan Turing's MacBook:
@@ -129,15 +129,15 @@ git fetch
 git checkout main
 git checkout -b sopsy/add/alan-turing
 
-# standard request to join, will require Touch ID 
+# standard request to join, will require Touch ID (or a YubiKey touch)
 # on every decryption
 sopsy request-access "Alan Turing"
 
 # or the alias:
 sopsy join "Alan Turing" 
 
-# And in this request to join, private key is still in Enclave, 
-# but no Touch ID would be required for decryption
+# And in this request to join, the private key is still in hardware,
+# but no Touch ID or YubiKey touch is required to decrypt
 sopsy join "Alan Turing" --without-touch-id
 # (equivalent, forwarding the raw age flag)
 sopsy join "Alan Turing" -- --access-control none
@@ -172,10 +172,10 @@ sequenceDiagram
     actor New as Alan (newcomer)
     actor Member as Any active member
     participant Repo as Git branch / PR
-    New->>New: sopsy join "Alan Turing"<br/>(key generated in the Secure Enclave)
+    New->>New: sopsy join "Alan Turing"<br/>(key generated in the Secure Enclave or on a YubiKey)
     New->>Repo: push .sopsy.yml with a pending entry
     Member->>Repo: check out the branch
-    Member->>Member: sopsy approve "Alan Turing"<br/>(Touch ID, sops updatekeys)
+    Member->>Member: sopsy approve "Alan Turing"<br/>(Touch ID or YubiKey, sops updatekeys)
     Member->>Repo: push .sops.yaml + re-wrapped secrets
     Repo-->>New: PR merged — Alan can decrypt
 ```
@@ -188,7 +188,7 @@ ______________________________________________________________________
 
 ## Prerequisites
 
-`sopsy` is **macOS-first** (v1). It orchestrates a few external tools, all installable with [Homebrew](https://brew.sh). `sopsy deps` installs whichever are missing, and `sopsy init` runs the same step first (it asks; with `-y` it just installs):
+`sopsy` runs on **macOS** (Apple Silicon and Intel) and **Linux** (x86_64 and arm64). It orchestrates a few external tools, all installable with [Homebrew](https://brew.sh). `sopsy deps` installs whichever are missing, and `sopsy init` runs the same step first (it asks; with `-y` it just installs):
 
 ```bash
 sopsy deps
@@ -234,7 +234,7 @@ brew install sops age age-plugin-se age-plugin-yubikey ykman   # age-plugin-se: 
 brew install kigster/tap/sopsy
 ```
 
-This is the simplest path: it installs a **prebuilt binary** (no Rust toolchain required) **and** pulls the tools sopsy orchestrates — `sops`, `age`, and, on macOS, `age-plugin-se` — automatically. You can skip the [Prerequisites](#prerequisites) step entirely; Homebrew handles them.
+This is the simplest path: it installs a **prebuilt binary** (no Rust toolchain required) **and** pulls the tools sopsy orchestrates — `sops`, `age`, and, on macOS, `age-plugin-se` — automatically, on macOS and on Linux (Homebrew on Linux). You can skip the [Prerequisites](#prerequisites) step entirely; Homebrew handles them.
 
 > [!IMPORTANT]
 >
@@ -279,7 +279,7 @@ ______________________________________________________________________
 # 1. Start (or enter) a git repository.
 git init my-app && cd my-app
 
-# 2. Bootstrap everything: tools check, Secure Enclave identity, config files.
+# 2. Bootstrap everything: tools check, a hardware identity (Secure Enclave or YubiKey), config files.
 sopsy init
 
 # 3. Put real secrets in. sopsy decrypts to your editor and re-encrypts on save.
@@ -297,7 +297,7 @@ git commit -m "Add encrypted secrets managed by sopsy"
 >
 > Never `git add .env` or any plaintext secret. `sopsy init` configures `.gitignore` to prevent this, and `sopsy check` will fail the build if a plaintext secret is ever tracked — but the first line of defense is you.
 
-The `sopsy init` run prints your **public recipient** prominently. That string (an `age1se1...` key) is what your teammates and admins need to grant you access — it is safe to share. The matching **private key never leaves the Secure Enclave**.
+The `sopsy init` run prints your **public recipient** prominently. That string (`age1se1...` for a Secure Enclave key, `age1yubikey1...` for a YubiKey) is what your teammates and admins need to grant you access — it is safe to share. The matching **private key never leaves the hardware**.
 
 > [!TIP]
 >
@@ -365,7 +365,7 @@ ______________________________________________________________________
 
 ![sopsy-process](docs/sopsy-process.png)
 
-Decrypting with a Secure Enclave key, step by step:
+Decrypting with a Secure Enclave key, step by step (a YubiKey key takes the same path through `age-plugin-yubikey`, with its PIN and a touch in place of Touch ID; see [YubiKey keys](#yubikey-keys)):
 
 ```mermaid
 sequenceDiagram
@@ -738,7 +738,7 @@ $ sopsy init --allow-stores any -s file --no-emergency-keys        # illustrativ
 
 ## Break-glass keys
 
-A **break-glass key** is a separate emergency `age` key pair stored *offline* (for example in 1Password) and shared with only a few admins. It is your disaster-recovery path: if every developer's Secure Enclave device is lost, the break-glass key can still decrypt and re-key the repository. It is a **portable** age key (not Enclave-backed), precisely so it can survive the loss of any device. `sopsy recipient break-glass` runs the whole ceremony — generate, hand off, delete, register — in one command:
+A **break-glass key** is a separate emergency `age` key pair stored *offline* (for example in 1Password) and shared with only a few admins. It is your disaster-recovery path: if every developer's hardware key (a Mac's Secure Enclave or a YubiKey) is lost, the break-glass key can still decrypt and re-key the repository. It is a **portable** age key (bound to no hardware), precisely so it can survive the loss of any device. `sopsy recipient break-glass` runs the whole ceremony — generate, hand off, delete, register — in one command:
 
 ```bash
 sopsy recipient break-glass -o break-glass
@@ -750,7 +750,7 @@ sopsy recipient break-glass -o break-glass
 
 > [!CAUTION]
 >
-> If you lose your Secure Enclave device **and** have no break-glass key, every secret in the repository becomes permanently undecryptable. Set up break-glass on day one. `sopsy doctor` and `sopsy check` both nag you until you do, and sopsy refuses to remove the *sole* break-glass recipient.
+> If you lose your Mac or YubiKey **and** have no break-glass key, every secret in the repository becomes permanently undecryptable. Set up break-glass on day one. `sopsy doctor` and `sopsy check` both nag you until you do, and sopsy refuses to remove the *sole* break-glass recipient.
 
 The same guided ceremony — generate a portable key, hand it off, wait for confirmation, delete the local copies, register and re-key — also powers [`sopsy recipient ci`](#recipient-ci), which provisions a decryption key for your CI pipeline instead of an offline vault. The two keys must never be shared: break-glass is offline/few-hands, CI is online/every-run — opposite threat models.
 
@@ -821,7 +821,7 @@ These apply to **every** subcommand (they are global and may appear before or af
 
 ### `sopsy init`
 
-Bootstrap an encrypted repository. Verifies the toolchain, acquires an `age` recipient (a generated Secure Enclave identity or a supplied public key), and writes `.sops.yaml`, `.env.example`, an encrypted `.env.encrypted`, `.gitignore` safety rules, and `.sopsy.yml`.
+Bootstrap an encrypted repository. Verifies the toolchain, acquires an `age` recipient (an identity generated in your key store: Secure Enclave, YubiKey, keychain or file, see `--store`; or a supplied public key), and writes `.sops.yaml`, `.env.example`, an encrypted `.env.encrypted`, `.gitignore` safety rules, and `.sopsy.yml`.
 
 Before anything else, `init` installs missing supporting tools (the `sopsy deps` step): it asks first, or installs straight away with `-y`; without Homebrew it warns and carries on. `--skip-deps` turns the step off.
 
@@ -885,10 +885,11 @@ sopsy init -y -n ci-bot --allow-stores any \
 
 Print a colorful, grouped health report and **always exit 0** — it is purely informational and safe to paste into a bug report. Takes no flags.
 
-It reports four groups:
+It reports five groups:
 
 - **System** — macOS version, Apple Silicon, Secure Enclave, Touch ID (macOS only; a neutral "n/a" line elsewhere).
-- **Tools** — where `sops`, `age-plugin-se`, and `git` resolve on `PATH`.
+- **Key stores** - which stores this machine can use (Secure Enclave, YubiKey, keychain, file), the `auto` order, and the store `auto` would pick.
+- **Tools** — where `sops`, `age`, and `git` resolve on `PATH`.
 - **Repository** — git presence, `.sops.yaml`, `.sopsy.yml` presence and parsing, and the `.sopsy.sha` integrity checksum. A missing or stale checksum is **repaired** here — the doctor's one write — so after a legitimate manual edit of `.sopsy.yml`, run `sopsy doctor` and commit both files.
 - **Recipients** — a loud reminder if no break-glass recipient is configured.
 
@@ -923,21 +924,23 @@ sopsy edit config/db.encrypted.yaml -- --indent 4
 
 ### `sopsy join`
 
-Request membership in a repo someone else bootstrapped. Generates your Secure Enclave identity (or uses `--age-public-key`) and records a **pending** entry in `.sopsy.yml` with a timestamp. A pending entry is *not* added to `.sops.yaml`, so it grants no access — it is purely a request you then push as a pull request.
+Request membership in a repo someone else bootstrapped. Generates your identity in your key store (`--store`, default `auto`: the Secure Enclave, a YubiKey, the keychain or a file, as the repository allows), or uses `--age-public-key`, and records a **pending** entry in `.sopsy.yml` with a timestamp. A pending entry is *not* added to `.sops.yaml`, so it grants no access — it is purely a request you then push as a pull request.
 
 | Argument / Flag                    | Description                                                                           |
 | ---------------------------------- | ------------------------------------------------------------------------------------- |
 | `<name>`                           | Your name as recorded in `.sopsy.yml` — full name or first name (required).           |
 | `--username <NAME>`                | System username recorded alongside the name (defaults to `$USER`).                    |
-| `-p`, `--age-public-key <age1...>` | Use an existing public key instead of generating a new Secure Enclave identity.       |
-| `-t`, `--without-touch-id`         | Mint the Enclave identity with no Touch ID / passcode gate (`--access-control none`). |
+| `-s`, `--store <STORE>`            | Where to generate your key: `auto` (default), `enclave`, `yubikey`, `keychain`, `file`. |
+| `-p`, `--age-public-key <age1...>` | Use an existing public key instead of generating a new identity.                      |
+| `-t`, `--without-touch-id`         | No presence gate: an Enclave key without Touch ID, a YubiKey key without touch (PIN kept). |
 | `--sopsy-file <FILE>`              | Path to the `.sopsy.yml` to update (defaults to the one in the repo root).            |
-| `-- <age flags>`                   | Everything after `--` is forwarded to `age-plugin-se keygen`.                         |
+| `-- <age flags>`                   | Everything after `--` is forwarded to the store's plugin (`age-plugin-se` or `age-plugin-yubikey`). |
 
 ```bash
 sopsy join alice                                   # generate a key, record a pending request
 sopsy join "Ada Lovelace" --username ada            # full name + explicit username
-sopsy join alice --without-touch-id                # no Touch ID prompt on decryption
+sopsy join alice --without-touch-id                # no Touch ID / YubiKey touch on decryption
+sopsy join alice -s yubikey                        # put the key on a YubiKey
 sopsy join alice --age-public-key age1se1…         # reuse an existing public key
 # then:
 git add .sopsy.yml .sopsy.sha && git commit -m "join: request access for alice" && git push
@@ -959,7 +962,7 @@ Approve one or more pending members (run by **any active member**, on their PR b
 
 ```bash
 git fetch origin pull/123/head:join-alice && git switch join-alice
-sopsy approve alice                       # vouch, re-key, activate (Touch ID prompts)
+sopsy approve alice                       # vouch, re-key, activate (Touch ID or YubiKey prompts)
 sopsy approve annie colin                 # approve several at once, re-keying once
 sopsy approve                             # walk every pending request interactively
 git add -A && git commit -m "approve: alice" && git push   # then merge the PR
@@ -1257,11 +1260,11 @@ ______________________________________________________________________
 CI touches sopsy in two very different ways, with very different key requirements:
 
 1. **The hygiene gate** (`sopsy check`) — validates the repo on every push. Needs **no keys at all**.
-1. **Decrypting secrets** (deploys, integration tests) — needs its own recipient, because Secure Enclave keys are hardware-bound to developer Macs and cannot travel to a runner.
+1. **Decrypting secrets** (deploys, integration tests) — needs its own recipient, because hardware keys (Secure Enclave, YubiKey) are bound to a developer's device and cannot travel to a runner.
 
 ### The hygiene gate: `sopsy check` (no keys needed)
 
-`sopsy check` inspects on-disk metadata and never decrypts, so it needs **no private key and no Secure Enclave** — it runs perfectly on a Linux runner. Put it in every pipeline:
+`sopsy check` inspects on-disk metadata and never decrypts, so it needs **no private key and no hardware key** — it runs perfectly on a Linux runner. Put it in every pipeline:
 
 ```yaml
 name: secrets-hygiene
@@ -1367,7 +1370,7 @@ ______________________________________________________________________
 
 ## Scope and roadmap
 
-`sopsy` is **macOS-first** for v1 — the fastest path to a polished experience (though `sopsy check` and CI decryption via `recipient ci` already work on Linux runners). Members can keep their key in the Secure Enclave, a YubiKey, the OS keychain (macOS Keychain or Linux Secret Service), or a plaintext file, and a repository restricts which of those it accepts (`key_policy.allowed`; hardware only by default). Deliberately **out of scope** until requested: TPM, KMS, 1Password/Vault integration, a native-Rust SOPS, and a Ratatui TUI.
+`sopsy` runs on macOS and Linux, and `sopsy check` and CI decryption via `recipient ci` work on any Linux runner. Members can keep their key in the Secure Enclave, a YubiKey, the OS keychain (macOS Keychain or Linux Secret Service), or a plaintext file, and a repository restricts which of those it accepts (`key_policy.allowed`; hardware only by default). Deliberately **out of scope** until requested: TPM, KMS, 1Password/Vault integration, a native-Rust SOPS, and a Ratatui TUI.
 
 ## Further reading
 
