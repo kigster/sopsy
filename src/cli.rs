@@ -544,6 +544,12 @@ pub struct RecipientKeygenArgs {
     #[command(flatten)]
     pub key: StoreArgs,
 
+    /// Generate the key without a presence gate (no Touch ID for the Secure
+    /// Enclave, touch policy `never` for a YubiKey). The key still never leaves
+    /// the device. Rejected for software stores.
+    #[arg(short = 't', long = "without-touch-id", help_heading = KEY_HEADING)]
+    pub without_touch_id: bool,
+
     /// Extra arguments forwarded verbatim to the store's plugin after `--`
     /// (e.g. `--access-control=any-biometry-or-passcode` for `age-plugin-se`).
     #[arg(last = true)]
@@ -561,6 +567,12 @@ pub struct RecipientRotateArgs {
     /// the keys already on it, so you can switch to one of them.
     #[command(flatten)]
     pub key: StoreArgs,
+
+    /// Generate the key without a presence gate (no Touch ID for the Secure
+    /// Enclave, touch policy `never` for a YubiKey). The key still never leaves
+    /// the device. Rejected for software stores.
+    #[arg(short = 't', long = "without-touch-id", help_heading = KEY_HEADING)]
+    pub without_touch_id: bool,
 
     /// Extra arguments forwarded verbatim to the store's plugin after `--`.
     #[arg(last = true)]

@@ -2364,6 +2364,7 @@ fn rotate_command(name: &str) -> RecipientCommand {
             store: StoreChoice::File,
             ..StoreArgs::default()
         },
+        without_touch_id: false,
         age_args: vec![],
     })
 }

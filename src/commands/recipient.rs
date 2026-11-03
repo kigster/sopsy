@@ -526,7 +526,7 @@ fn keygen(ui: &Ui, args: &RecipientKeygenArgs) -> Result<()> {
         &args.key,
         &label,
         allowed.as_deref(),
-        false,
+        args.without_touch_id,
         &args.age_args,
         false,
     )?;
@@ -593,7 +593,7 @@ fn rotate(ui: &Ui, args: &RecipientRotateArgs) -> Result<()> {
         &args.key,
         &name,
         allowed.as_deref(),
-        false,
+        args.without_touch_id,
         &args.age_args,
         true,
     )?;
