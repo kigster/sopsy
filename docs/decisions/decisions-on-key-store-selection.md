@@ -46,6 +46,7 @@ Rejected: a special rule that a plugged-in YubiKey always wins. It would silentl
 ## Waiting for a YubiKey
 
 - Interactive runs ask the user to insert a missing YubiKey and check again, rather than failing: before generating a key with `--store yubikey`, and before decrypt, edit and re-keying when every active key the user (`$USER`) has in the repository lives on a YubiKey.
+- With `--store auto`, when the YubiKey comes first and is not plugged in, interactive runs offer a single keypress for the next ready store (`e` for the Secure Enclave) instead of waiting, so a member without their YubiKey is not blocked.
 - `encrypt` never asks, since it needs only public keys. Unattended runs and `SOPS_AGE_KEY` skip the prompt.
 
 ## Rotating keys and plugin pass-through

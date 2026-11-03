@@ -160,6 +160,16 @@ fn choose_store(ui: &Ui, key: &StoreArgs, allowed: Option<&[Store]>) -> Result<S
         )?;
     }
     let (priority, _) = hardware::priority(allowed)?;
+    if key.store.store().is_none() && ui.is_interactive() {
+        let order: Vec<Store> = priority
+            .iter()
+            .copied()
+            .filter(|s| allowed.is_none_or(|a| a.contains(s)))
+            .collect();
+        if let Some(fallback) = missing_yubikey_fallback(&order, Store::probe) {
+            return insert_yubikey_or(ui, fallback, yubikey::device_present);
+        }
+    }
     let ready = hardware::candidates(key.store.store(), allowed, &priority, Store::probe)?;
     if ready.len() == 1 || !ui.is_interactive() {
         return Ok(ready[0]);
@@ -171,6 +181,56 @@ fn choose_store(ui: &Ui, key: &StoreArgs, allowed: Option<&[Store]>) -> Result<S
     let picked = ui.select("Where should your private key live?", "--store", options)?;
     let name = picked.split_whitespace().next().unwrap_or_default();
     name.parse()
+}
+
+/// When `auto` would pick a YubiKey that is not plugged in: `Some(fallback)`,
+/// the first ready store after it (if any). `None` when the YubiKey would not
+/// be the choice anyway (a store ahead of it is ready, or it is plugged in).
+fn missing_yubikey_fallback(
+    order: &[Store],
+    probe: impl Fn(Store) -> Availability,
+) -> Option<Option<Store>> {
+    let at = order.iter().position(|s| *s == Store::YubiKey)?;
+    if order[..at].iter().any(|s| probe(*s) == Availability::Ready)
+        || !matches!(probe(Store::YubiKey), Availability::Unavailable { .. })
+    {
+        return None;
+    }
+    Some(
+        order[at + 1..]
+            .iter()
+            .copied()
+            .find(|s| probe(*s) == Availability::Ready),
+    )
+}
+
+/// The preferred YubiKey is missing: wait for it, or let the user press a key
+/// to use `fallback` instead, so someone without their YubiKey is not stuck.
+fn insert_yubikey_or(
+    ui: &Ui,
+    fallback: Option<Store>,
+    present: impl Fn() -> bool,
+) -> Result<Store> {
+    let Some(fallback) = fallback else {
+        wait_for_yubikey(ui, present, "pick another store with --store")?;
+        return Ok(Store::YubiKey);
+    };
+    let (letter, label) = match fallback {
+        Store::Enclave => ('e', "the Secure Enclave hardware chip".to_string()),
+        Store::Keychain => ('k', format!("the {}", fallback.display_name())),
+        Store::File => ('f', format!("a {}", fallback.display_name())),
+        Store::YubiKey => unreachable!("the fallback comes after the YubiKey"),
+    };
+    let prompt = format!(
+        "No YubiKey detected. Insert it and press ENTER, or press `{letter}` to use {label} instead:"
+    );
+    loop {
+        match ui.key_choice(&prompt, "--store", &[letter])? {
+            Some(_) => return Ok(fallback),
+            None if present() => return Ok(Store::YubiKey),
+            None => ui.warn("Still no YubiKey detected."),
+        }
+    }
 }
 
 /// With no YubiKey plugged in, ask the user to insert one and check again
@@ -475,6 +535,62 @@ mod tests {
         // A pending key grants nothing, so it does not count.
         config.recipients = vec![key("alan", Some(Store::YubiKey), MemberState::Pending)];
         assert!(!needs_yubikey(&config, "alan"));
+    }
+
+    #[test]
+    fn a_missing_preferred_yubikey_offers_the_next_ready_store() {
+        let probe = |s: Store| match s {
+            Store::YubiKey => Availability::Unavailable {
+                reason: "unplugged".into(),
+            },
+            _ => Availability::Ready,
+        };
+        let order = [Store::YubiKey, Store::Enclave, Store::Keychain];
+        assert_eq!(
+            missing_yubikey_fallback(&order, probe),
+            Some(Some(Store::Enclave))
+        );
+        // The Enclave comes first: it wins, nothing to ask.
+        let order = [Store::Enclave, Store::YubiKey];
+        assert_eq!(missing_yubikey_fallback(&order, probe), None);
+        // Nothing else is ready: wait for the YubiKey.
+        let only = |s: Store| match s {
+            Store::YubiKey => probe(s),
+            _ => Availability::Unavailable {
+                reason: "no".into(),
+            },
+        };
+        let order = [Store::YubiKey, Store::Enclave];
+        assert_eq!(missing_yubikey_fallback(&order, only), Some(None));
+        // Plugged in: no question.
+        assert_eq!(
+            missing_yubikey_fallback(&order, |_| Availability::Ready),
+            None
+        );
+    }
+
+    #[test]
+    fn pressing_e_uses_the_enclave_and_enter_waits_for_the_yubikey() {
+        let ui = Ui::scripted(vec![Answer::Text("e".into())]);
+        assert_eq!(
+            insert_yubikey_or(&ui, Some(Store::Enclave), || false).unwrap(),
+            Store::Enclave
+        );
+
+        let plugged = std::cell::Cell::new(false);
+        let ui = Ui::scripted(vec![
+            Answer::Text(String::new()),
+            Answer::Text(String::new()),
+        ]);
+        let present = || {
+            let now = plugged.get();
+            plugged.set(true); // missing on the first ENTER, there on the second
+            now
+        };
+        assert_eq!(
+            insert_yubikey_or(&ui, Some(Store::Enclave), present).unwrap(),
+            Store::YubiKey
+        );
     }
 
     #[test]

@@ -612,6 +612,7 @@ sequenceDiagram
 **Forgot to plug it in?** At a terminal, sopsy asks you to insert the YubiKey and waits, instead of failing:
 
 - `sopsy init -s yubikey`, `join -s yubikey` and `recipient keygen -s yubikey` ask before making the key.
+- With `--store auto` and the YubiKey first in your order, sopsy asks you to insert it **or press `e`** to use the Secure Enclave hardware chip instead (`k` for the keychain, `f` for a key file, whichever comes next and works). Someone without their YubiKey is not stuck.
 - `sopsy decrypt`, `edit` and re-keying (`approve`, `recipient add` / `remove`) ask when every active key you have in the repository (matched by `$USER`) is on a YubiKey.
 - Before decrypting it reminds you to touch the key after the PIN, and how to cache the PIN.
 - `sopsy encrypt` never asks: it uses only public keys.

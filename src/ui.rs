@@ -444,6 +444,56 @@ impl Ui {
         Ok(())
     }
 
+    /// Show `prompt` and wait for one keypress: ENTER returns `None`, one of
+    /// `keys` returns `Some(key)`, Esc or Ctrl-C cancels. Other keys are ignored.
+    ///
+    /// Returns [`Error::NonInteractive`] when prompting is disabled.
+    pub fn key_choice(&self, prompt: &str, flag: &str, keys: &[char]) -> Result<Option<char>> {
+        if !self.interactive {
+            return Err(Error::NonInteractive {
+                prompt: prompt.to_string(),
+                flag: flag.to_string(),
+            });
+        }
+        if !AT_BLANK_LINE.load(Ordering::Relaxed) {
+            out!();
+        }
+        print!("{} ", self.paint(prompt, Style::new().green()));
+        let _ = std::io::stdout().flush();
+        #[cfg(test)]
+        if let Some(answer) = self.scripted_answer(prompt) {
+            let Answer::Text(text) = answer else {
+                panic!("`{prompt}` expects a key (Text), got {answer:?}");
+            };
+            out!();
+            return Ok(text.chars().next());
+        }
+        let picked = {
+            use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+            let _raw = checklist::RawMode::enter()?;
+            loop {
+                let Event::Key(key) = event::read()? else {
+                    continue;
+                };
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                match key.code {
+                    KeyCode::Enter => break None,
+                    KeyCode::Esc => return Err(canceled()),
+                    KeyCode::Char('c' | 'd') if ctrl => return Err(canceled()),
+                    KeyCode::Char(c) if keys.contains(&c.to_ascii_lowercase()) => {
+                        break Some(c.to_ascii_lowercase());
+                    }
+                    _ => {}
+                }
+            }
+        };
+        out!();
+        Ok(picked)
+    }
+
     // ----- Interactive prompt wrappers ------------------------------------
 
     /// Ask the user to pick one option from `options`.
