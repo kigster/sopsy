@@ -5,6 +5,7 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use super::existing::{self, Disposition};
+use super::plaintext;
 use super::target::Direction;
 use crate::cli::WriteArgs;
 use crate::error::Result;
@@ -45,7 +46,10 @@ impl Sink {
             }
             Disposition::Write => {}
         }
-        std::fs::write(path, data)?;
+        match self.direction {
+            Direction::Decrypt => plaintext::write(path, data)?,
+            Direction::Encrypt => std::fs::write(path, data)?,
+        }
         ui.success(format!("wrote {} to {}", self.label, path.display()));
         Ok(())
     }

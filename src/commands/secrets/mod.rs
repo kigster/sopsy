@@ -19,6 +19,7 @@
 //! output.
 
 mod existing;
+mod plaintext;
 mod sink;
 mod target;
 
