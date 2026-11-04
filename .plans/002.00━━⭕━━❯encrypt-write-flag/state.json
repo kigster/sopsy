@@ -6,7 +6,7 @@
     "slug": "encrypt-write-flag"
   },
   "state": "blocked",
-  "updated_at": "2026-11-03T17:36:36-08:00",
+  "updated_at": "2026-11-03T18:21:50-08:00",
   "stages": [
     {
       "agent": "chores-coder",
@@ -373,6 +373,13 @@
       "session": "cb534585-2602-4dda-933e-f923425da8a3",
       "verdict": "passed",
       "review": 16
+    },
+    {
+      "agent": "rebaser",
+      "round": 1,
+      "status": "Interrupted",
+      "note": "harness died",
+      "finished_at": "2026-11-03T18:21:50-08:00"
     }
   ],
   "signatures": [
@@ -686,6 +693,13 @@
       "status": "Completed",
       "round": 1,
       "note": "rejected: PR #30 is labelled review-passed, and desired_codebase_quality is high; signed by harness"
+    },
+    {
+      "at": "2026-11-03T18:21:50-08:00",
+      "agent": "rebaser",
+      "status": "Interrupted",
+      "round": 1,
+      "note": "harness died"
     }
   ],
   "messages": [
@@ -871,6 +885,15 @@
       "from": "github",
       "to": "frontend-coder",
       "body": "PR #30 was labelled review-rejected on GitHub.\n\nverifier (https://github.com/kigster/sopsy/pull/30):\n\nPR #30 is labelled review-passed, and desired_codebase_quality is high: reply in the thread of every review comment that is not ✅, with a fix or a backed-up rebuttal (R4).",
+      "read": "no"
+    },
+    {
+      "id": "0ddc2ceb-b332-4873-a3da-71b631cec6a4",
+      "number": 21,
+      "at": "2026-11-03T18:21:50-08:00",
+      "from": "openlanes",
+      "to": "rebaser",
+      "body": "RESUME: the harness died during your round 1; carry on from your last resume note",
       "read": "no"
     }
   ],
@@ -1205,6 +1228,13 @@
       "round": 1,
       "status": "Interrupted",
       "note": "no closing ledger line; last ledger line: Completed, round 3: passed; last seen: Round 3 design review of PR #30 is finished: it passes, with no new findings."
+    },
+    "rebaser": {
+      "source": "harness",
+      "at": "2026-11-03T18:21:50-08:00",
+      "round": 1,
+      "status": "Interrupted",
+      "note": "harness died"
     }
   },
   "extensions": [
