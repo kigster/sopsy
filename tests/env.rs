@@ -274,6 +274,22 @@ fn sops_failures_are_reported_for_every_command() {
 }
 
 #[test]
+fn set_reports_the_sops_error_when_sops_never_reads_the_value() {
+    // A value larger than a pipe buffer makes the write fail every time
+    // against a sops that exits without reading stdin.
+    let dir = fixture();
+    let fake = failing_sops(dir.path());
+    sopsy(dir.path())
+        .env("SOPSY_SOPS_BIN", &fake)
+        .args(["set", "K"])
+        .write_stdin("v".repeat(1 << 20))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("simulated failure"))
+        .stderr(predicate::str::contains("Broken pipe").not());
+}
+
+#[test]
 fn run_reports_a_missing_file_and_a_missing_program() {
     let dir = fixture();
     sopsy(dir.path())
