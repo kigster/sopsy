@@ -6,9 +6,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
-
-/// The suffix every encrypted artifact carries.
-const SUFFIX: &str = ".encrypted";
+use crate::sops::suffix::{
+    ENCRYPTED_SUFFIX as SUFFIX, ends_with_encrypted, with_encrypted_suffix,
+    without_encrypted_suffix,
+};
 
 /// Which way the payload is going.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,9 +32,24 @@ pub(super) fn destination(
     if write {
         return conventional_name(direction, input).map(Some);
     }
-    Ok(output
-        .filter(|path| path.as_os_str() != "-")
-        .map(Path::to_path_buf))
+    let Some(path) = output.filter(|path| path.as_os_str() != "-") else {
+        return Ok(None);
+    };
+    if same_file(input, path) {
+        return Err(Error::Validation(format!(
+            "`-o {}` names the input file; refusing to overwrite it",
+            path.display()
+        )));
+    }
+    Ok(Some(path.to_path_buf()))
+}
+
+/// Whether `a` and `b` name one existing file, through `..`, `.` or symlinks.
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// The `-w` name: `FILE` ↔ `FILE.encrypted`.
@@ -54,77 +70,9 @@ pub(super) fn conventional_name(direction: Direction, input: &Path) -> Result<Pa
     }
 }
 
-/// Whether `path` ends in `.encrypted` (case-insensitive).
-pub(super) fn ends_with_encrypted(path: &Path) -> bool {
-    path.to_string_lossy()
-        .to_ascii_lowercase()
-        .ends_with(SUFFIX)
-}
-
-/// Append `.encrypted` to `path` (`config.json` → `config.json.encrypted`).
-pub(super) fn with_encrypted_suffix(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(SUFFIX);
-    PathBuf::from(name)
-}
-
-/// Strip a trailing `.encrypted` (`.env.encrypted` → `.env`), case-insensitive.
-///
-/// `None` when there is no such suffix, or nothing is left of the file name.
-pub(super) fn without_encrypted_suffix(path: &Path) -> Option<PathBuf> {
-    let text = path.to_str()?;
-    if !ends_with_encrypted(path) {
-        return None;
-    }
-    let stem = &text[..text.len() - SUFFIX.len()];
-    if stem.is_empty() || stem.ends_with(std::path::is_separator) {
-        return None;
-    }
-    Some(PathBuf::from(stem))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn ends_with_encrypted_is_case_insensitive() {
-        assert!(ends_with_encrypted(Path::new(".env.encrypted")));
-        assert!(ends_with_encrypted(Path::new("config.json.ENCRYPTED")));
-        assert!(!ends_with_encrypted(Path::new("config.json")));
-        assert!(!ends_with_encrypted(Path::new("notes.encrypted.txt")));
-    }
-
-    #[test]
-    fn with_encrypted_suffix_appends() {
-        assert_eq!(
-            with_encrypted_suffix(Path::new("config.json")),
-            PathBuf::from("config.json.encrypted")
-        );
-        assert_eq!(
-            with_encrypted_suffix(Path::new(".env")),
-            PathBuf::from(".env.encrypted")
-        );
-    }
-
-    #[test]
-    fn without_encrypted_suffix_strips_it() {
-        assert_eq!(
-            without_encrypted_suffix(Path::new(".env.encrypted")),
-            Some(PathBuf::from(".env"))
-        );
-        assert_eq!(
-            without_encrypted_suffix(Path::new("config/app.yaml.ENCRYPTED")),
-            Some(PathBuf::from("config/app.yaml"))
-        );
-    }
-
-    #[test]
-    fn without_encrypted_suffix_rejects_other_names() {
-        assert_eq!(without_encrypted_suffix(Path::new(".env")), None);
-        assert_eq!(without_encrypted_suffix(Path::new(".encrypted")), None);
-        assert_eq!(without_encrypted_suffix(Path::new("dir/.encrypted")), None);
-    }
 
     #[test]
     fn conventional_name_in_both_directions() {
@@ -144,6 +92,23 @@ mod tests {
         assert!(err.to_string().contains("already ends in"), "{err}");
         let err = conventional_name(Direction::Decrypt, Path::new(".env")).unwrap_err();
         assert!(err.to_string().contains("use `-o`"), "{err}");
+    }
+
+    #[test]
+    fn destination_refuses_the_input_as_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join(".env.encrypted");
+        std::fs::write(&input, "x").unwrap();
+        let aliased = dir.path().join(".").join(".env.encrypted");
+        for output in [&input, &aliased] {
+            let err = destination(Direction::Decrypt, &input, Some(output), false).unwrap_err();
+            assert!(err.to_string().contains("names the input file"), "{err}");
+        }
+        let other = dir.path().join(".env");
+        assert_eq!(
+            destination(Direction::Decrypt, &input, Some(&other), false).unwrap(),
+            Some(other)
+        );
     }
 
     #[test]

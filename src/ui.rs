@@ -46,6 +46,10 @@ macro_rules! out {
     }};
 }
 
+/// When set, every confirmation sopsy would ask is taken as granted, as if
+/// `--yes` had been passed. Intended for automation and tests.
+pub const ASSUME_YES_ENV: &str = "SOPSY_ASSUME_YES";
+
 /// Presentation handle threaded through commands.
 ///
 /// Construct via [`Ui::new`] (usually from parsed global CLI flags).
@@ -137,8 +141,8 @@ impl Ui {
         self
     }
 
-    /// Record that the user answered "yes" in advance (`--yes`/`-y` or
-    /// `SOPSY_ASSUME_YES`). Consuming builder, used once in [`crate::run`].
+    /// Record that the user answered "yes" in advance with `--yes`/`-y`.
+    /// Consuming builder, used once in [`crate::run`].
     pub fn with_assume_yes(mut self, assume_yes: bool) -> Self {
         self.assume_yes = assume_yes;
         self
@@ -146,8 +150,12 @@ impl Ui {
 
     /// Whether the user answered "yes" in advance, so a confirmation that
     /// would otherwise be asked may be taken as granted.
+    ///
+    /// The one owner of that answer: the global `--yes`/`-y` flag (recorded by
+    /// [`Ui::with_assume_yes`]) or the [`ASSUME_YES_ENV`] automation opt-in,
+    /// read here so every command answers the question the same way.
     pub fn assumes_yes(&self) -> bool {
-        self.assume_yes
+        self.assume_yes || std::env::var_os(ASSUME_YES_ENV).is_some()
     }
 
     /// A clone of this handle with `--git` disabled, for nested command calls

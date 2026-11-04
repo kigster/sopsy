@@ -11,6 +11,12 @@ use clap::Args;
 pub const DESTINATION_GROUP: &str = "destination";
 
 /// Where to write by naming convention, and what to do when the target exists.
+///
+/// A struct that flattens this must also declare
+/// `#[command(group(ArgGroup::new(DESTINATION_GROUP).args(["write", "output"])))]`
+/// and an `output` field, since `--overwrite` requires that group. The
+/// `every_flattener_declares_the_destination_group` test walks every
+/// subcommand and fails when one forgets.
 #[derive(Debug, Args, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WriteArgs {
     /// Write next to the input by convention: `encrypt FILE` writes
@@ -29,7 +35,42 @@ mod tests {
     use clap::Parser;
     use clap::error::ErrorKind;
 
+    use clap::CommandFactory;
+
+    use super::DESTINATION_GROUP;
     use crate::cli::{Cli, Command, SecretsCommand};
+
+    /// Every (sub)command, depth first, with its path for messages.
+    fn all_commands(cmd: &clap::Command, path: String, out: &mut Vec<(String, clap::Command)>) {
+        for sub in cmd.get_subcommands() {
+            let sub_path = format!("{path} {}", sub.get_name());
+            out.push((sub_path.clone(), sub.clone()));
+            all_commands(sub, sub_path, out);
+        }
+    }
+
+    #[test]
+    fn every_flattener_declares_the_destination_group() {
+        let mut commands = Vec::new();
+        all_commands(&Cli::command(), "sopsy".to_string(), &mut commands);
+        let flatteners: Vec<_> = commands
+            .iter()
+            .filter(|(_, cmd)| cmd.get_arguments().any(|a| a.get_id() == "overwrite"))
+            .collect();
+        assert_eq!(
+            flatteners.len(),
+            4,
+            "encrypt, decrypt and their secrets aliases"
+        );
+        for (path, cmd) in flatteners {
+            let group = cmd
+                .get_groups()
+                .find(|g| g.get_id() == DESTINATION_GROUP)
+                .unwrap_or_else(|| panic!("`{path}` flattens WriteArgs without the group"));
+            let members: Vec<_> = group.get_args().map(|a| a.as_str()).collect();
+            assert_eq!(members, ["write", "output"], "{path}");
+        }
+    }
 
     fn parse(argv: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(argv)

@@ -167,7 +167,7 @@ fn portable_key_ceremony(
     // This flow blocks on an interactive confirmation. Fail fast — before any
     // key material touches disk — when we cannot prompt (and automation has not
     // opted in via SOPSY_ASSUME_YES).
-    let assume_yes = assume_yes();
+    let assume_yes = ui.assumes_yes();
     if !ui.is_interactive() && !assume_yes {
         return Err(Error::NonInteractive {
             prompt: format!("press ENTER to confirm the {label} key is stored safely"),

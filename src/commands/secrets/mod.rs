@@ -19,17 +19,14 @@
 //! output.
 
 mod existing;
+mod sink;
 mod target;
 
-use std::io::Write;
-use std::path::Path;
-use std::time::SystemTime;
-
-use self::existing::Disposition;
+use self::sink::Sink;
 use self::target::Direction;
-use crate::cli::{SecretsCommand, SecretsDecryptArgs, SecretsEncryptArgs, WriteArgs};
+use crate::cli::{SecretsCommand, SecretsDecryptArgs, SecretsEncryptArgs};
 use crate::error::{Error, Result};
-use crate::sops::{self, FileType};
+use crate::sops::{self, FileType, suffix};
 use crate::ui::Ui;
 
 /// Dispatch a `secrets` subcommand.
@@ -59,14 +56,14 @@ fn encrypt(ui: &Ui, args: &SecretsEncryptArgs) -> Result<()> {
     // file target it must be that (validated `.encrypted`) name; to stdout we
     // synthesize `<file>.encrypted` so a default rule still matches.
     let override_name = match &destination {
-        Some(path) if !target::ends_with_encrypted(path) => {
+        Some(path) if !suffix::ends_with_encrypted(path) => {
             return Err(Error::Validation(format!(
                 "output must end in `.encrypted` (got `{}`)",
                 path.display()
             )));
         }
         Some(path) => path.clone(),
-        None => target::with_encrypted_suffix(&args.file),
+        None => suffix::with_encrypted_suffix(&args.file),
     };
 
     let ciphertext = sops::encrypt_to_string(&args.file, file_type, &override_name)?;
@@ -116,46 +113,5 @@ pub fn list_supported_types(ui: &Ui) {
             file_type.as_sops_type(),
             file_type.extension_hint()
         ));
-    }
-}
-
-/// Writes a finished payload to stdout or a file, honoring the
-/// existing-target rules for files.
-struct Sink {
-    direction: Direction,
-    write: WriteArgs,
-    label: &'static str,
-}
-
-impl Sink {
-    /// Write `data` to `destination` (`None` is stdout). The payload goes to
-    /// stdout untouched; status, printed only for file output, cannot then
-    /// corrupt a pipe.
-    fn deliver(&self, ui: &Ui, destination: Option<&Path>, data: &[u8]) -> Result<()> {
-        let Some(path) = destination else {
-            std::io::stdout().write_all(data)?;
-            return Ok(());
-        };
-        match existing::decide(ui, self.direction, path, self.write.overwrite)? {
-            Disposition::Skip => {
-                ui.warn(format!(
-                    "left {} unchanged; nothing written",
-                    path.display()
-                ));
-                return Ok(());
-            }
-            Disposition::BackupThenWrite => {
-                let backup = existing::back_up(path, SystemTime::now())?;
-                ui.info(format!(
-                    "backed up {} to {}",
-                    path.display(),
-                    backup.display()
-                ));
-            }
-            Disposition::Write => {}
-        }
-        std::fs::write(path, data)?;
-        ui.success(format!("wrote {} to {}", self.label, path.display()));
-        Ok(())
     }
 }
