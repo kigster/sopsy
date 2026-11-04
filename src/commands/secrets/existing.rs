@@ -13,6 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use super::plaintext;
 use super::target::Direction;
 use crate::error::{Error, Result};
 use crate::ui::Ui;
@@ -64,20 +65,26 @@ pub(super) fn decide(
 
 /// Copy `target` to its timestamped backup and return the backup's path.
 ///
-/// Never replaces an existing backup: when two runs land in the same second,
-/// the later one takes the next free `-1`, `-2`, … name instead.
+/// The backup holds plaintext, so it is created mode 0600 whatever the old
+/// file's mode. It never replaces anything: when a name is taken (two runs in
+/// one second, or a planted symlink), the next free `-1`, `-2`, … name is used.
 pub(super) fn back_up(target: &Path, now: SystemTime) -> Result<PathBuf> {
-    let backup = (0..MAX_SAME_SECOND_BACKUPS)
-        .map(|n| backup_path(target, now, n))
-        .find(|candidate| !candidate.exists())
-        .ok_or_else(|| {
-            Error::Validation(format!(
-                "{MAX_SAME_SECOND_BACKUPS} backups of `{}` already exist for this second",
-                target.display()
-            ))
-        })?;
-    std::fs::copy(target, &backup)?;
-    Ok(backup)
+    let mut source = std::fs::File::open(target)?;
+    for n in 0..MAX_SAME_SECOND_BACKUPS {
+        let candidate = backup_path(target, now, n);
+        match plaintext::create_new(&candidate) {
+            Ok(mut backup) => {
+                std::io::copy(&mut source, &mut backup)?;
+                return Ok(candidate);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Err(Error::Validation(format!(
+        "{MAX_SAME_SECOND_BACKUPS} backups of `{}` already exist for this second",
+        target.display()
+    )))
 }
 
 /// How many backups of one file a single second may hold.
@@ -129,6 +136,30 @@ mod tests {
             backup_path(Path::new("dir/.env"), instant(), 0),
             PathBuf::from("dir/.env.2026-11-03.235007.bak")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_backup_is_private_even_when_the_original_is_not() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let target = existing(&dir);
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let backup = back_up(&target, instant()).unwrap();
+        let mode = std::fs::metadata(&backup).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_at_the_backup_name_is_skipped_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = existing(&dir);
+        let planted = backup_path(&target, instant(), 0);
+        std::os::unix::fs::symlink(dir.path().join("stolen"), &planted).unwrap();
+        let backup = back_up(&target, instant()).unwrap();
+        assert_eq!(backup, backup_path(&target, instant(), 1));
+        assert!(!dir.path().join("stolen").exists());
     }
 
     #[test]
