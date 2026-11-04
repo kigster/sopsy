@@ -64,27 +64,40 @@ pub(super) fn decide(
 
 /// Copy `target` to its timestamped backup and return the backup's path.
 ///
-/// Refuses to replace an existing backup, so no earlier copy is ever lost.
+/// Never replaces an existing backup: when two runs land in the same second,
+/// the later one takes the next free `-1`, `-2`, … name instead.
 pub(super) fn back_up(target: &Path, now: SystemTime) -> Result<PathBuf> {
-    let backup = backup_path(target, now);
-    if backup.exists() {
-        return Err(Error::Validation(format!(
-            "backup `{}` already exists; try again in a second",
-            backup.display()
-        )));
-    }
+    let backup = (0..MAX_SAME_SECOND_BACKUPS)
+        .map(|n| backup_path(target, now, n))
+        .find(|candidate| !candidate.exists())
+        .ok_or_else(|| {
+            Error::Validation(format!(
+                "{MAX_SAME_SECOND_BACKUPS} backups of `{}` already exist for this second",
+                target.display()
+            ))
+        })?;
     std::fs::copy(target, &backup)?;
     Ok(backup)
 }
 
-/// `FILE.YYYY-MM-DD.HHMMSS.bak`, stamped in UTC (decision D1).
-pub(super) fn backup_path(target: &Path, now: SystemTime) -> PathBuf {
+/// How many backups of one file a single second may hold.
+const MAX_SAME_SECOND_BACKUPS: u32 = 100;
+
+/// The `n`th backup name for one second, stamped in UTC (decision D1):
+/// `FILE.YYYY-MM-DD.HHMMSS.bak` for `n == 0`, then
+/// `FILE.YYYY-MM-DD.HHMMSS-1.bak`, `-2`, ….
+fn backup_path(target: &Path, now: SystemTime, n: u32) -> PathBuf {
     // `2026-11-03T23:50:07Z` → `2026-11-03` and `235007`.
     let stamp = humantime::format_rfc3339_seconds(now).to_string();
     let date = &stamp[..10];
     let time: String = stamp[11..19].chars().filter(|c| *c != ':').collect();
+    let counter = if n == 0 {
+        String::new()
+    } else {
+        format!("-{n}")
+    };
     let mut name = target.as_os_str().to_os_string();
-    name.push(format!(".{date}.{time}.bak"));
+    name.push(format!(".{date}.{time}{counter}.bak"));
     PathBuf::from(name)
 }
 
@@ -113,7 +126,7 @@ mod tests {
     #[test]
     fn backup_path_keeps_the_extension_last() {
         assert_eq!(
-            backup_path(Path::new("dir/.env"), instant()),
+            backup_path(Path::new("dir/.env"), instant(), 0),
             PathBuf::from("dir/.env.2026-11-03.235007.bak")
         );
     }
@@ -125,7 +138,23 @@ mod tests {
         let backup = back_up(&target, instant()).unwrap();
         assert_eq!(std::fs::read_to_string(&backup).unwrap(), "OLD=1\n");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "OLD=1\n");
-        assert!(back_up(&target, instant()).is_err());
+
+        std::fs::write(&target, "NEWER=2\n").unwrap();
+        let second = back_up(&target, instant()).unwrap();
+        assert_eq!(second, dir.path().join(".env.2026-11-03.235007-1.bak"));
+        assert_eq!(std::fs::read_to_string(&second).unwrap(), "NEWER=2\n");
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), "OLD=1\n");
+    }
+
+    #[test]
+    fn back_up_gives_up_when_every_name_is_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = existing(&dir);
+        for n in 0..MAX_SAME_SECOND_BACKUPS {
+            std::fs::write(backup_path(&target, instant(), n), "").unwrap();
+        }
+        let err = back_up(&target, instant()).unwrap_err();
+        assert!(err.to_string().contains("already exist"), "{err}");
     }
 
     #[test]

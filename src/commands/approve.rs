@@ -17,8 +17,8 @@ use std::time::{Duration, SystemTime};
 
 use crate::cli::ApproveArgs;
 use crate::commands::recipient::{
-    ConfigSnapshot, SOPS_CONFIG_FILE_NAME, add_key_to_sops_yaml, assume_yes, current_repo_root,
-    load_config, membership_paths, run_updatekeys, sops_config_path,
+    ConfigSnapshot, SOPS_CONFIG_FILE_NAME, add_key_to_sops_yaml, current_repo_root, load_config,
+    membership_paths, run_updatekeys, sops_config_path,
 };
 use crate::config::{CONFIG_FILE_NAME, Config, MemberState, Recipient};
 use crate::error::{Error, Result};
@@ -276,8 +276,8 @@ fn confirm_vouch(ui: &Ui, name: &str, public_key: &str) -> Result<bool> {
     ui.info(format!("key:  {public_key}"));
     ui.warn("Confirm out-of-band (Slack/in person) that this key is really theirs.");
 
-    if assume_yes() {
-        ui.info("SOPSY_ASSUME_YES set — vouching automatically.");
+    if ui.assumes_yes() {
+        ui.info("--yes / SOPSY_ASSUME_YES set — vouching automatically.");
         return Ok(true);
     }
     if !ui.is_interactive() {
