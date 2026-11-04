@@ -1,6 +1,6 @@
 ---
 created: 2026-10-30
-starts: building
+starts: planning
 ---
 
 # Spec for `--write` 
@@ -37,6 +37,25 @@ If the target already exists, sopsy asks interactively if the user wishes to ove
 
 If `--yes | -y` was passed, the backup of an existing file is created silently and without confirmation.s
    
+## Decisions
+
+### B4 (answered) — Scope of the change
+
+The spec wants the prompt rules applied to `-o` as well, and the plan adds file modes, an atomic write and a git warning. Each is a separate design choice, so one plan carries several changes.
+
+### D4 (decision) — Split the work into three changes
+
+Answered:
+
+- 2026-11-03
+- By kig
+
+Split this feature into three changes:
+
+1. `-w` naming and the target-exists rules.
+2. File modes (`0600` / `0700`) and atomic writes.
+3. The git ignore warning on decrypt.
+
 # Research
 
 ## Current state                                                                                           

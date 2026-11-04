@@ -17,14 +17,7 @@ task-completed-when:
   - "`src/commands/recipient/mod.rs` holds only the facade and `run` dispatch; each subcommand lives in its own file."
   - "Repository, `.sops.yaml` editing, encrypted-file discovery and re-keying each live in their own module with a facade, and `init`, `join`, `approve`, `doctor`, `keys` and `env` use those facades instead of `commands::recipient` helpers."
   - "fmt, clippy `-D warnings` and `cargo test --all` are green."
-how-to-verify:
-  - "cargo fmt --all -- --check"
-  - "cargo clippy --all-targets --all-features -- -D warnings"
-  - "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false cargo test --all"
-  - "fd -e rs . src/commands/recipient src/repo src/rekey | xargs wc -l  # no file far above 400 lines"
-  - "rg -n 'commands::recipient::' src --glob '!src/commands/recipient/**' --glob '!src/lib.rs'  # prints nothing"
 ---
-
 # Split Recipient Module
 
 ## What we are trying to achieve
@@ -67,3 +60,11 @@ Out of scope, follow-ups for separate plans: `ui.rs` (1,104 lines), `cli.rs` (1,
 ## What research needs to settle
 
 Nothing external: this is an internal refactor and the planner can work from the code. The open choices are naming (`repo` versus `workspace`; `.sops.yaml` editing in `sops::config` versus its own module) and whether `rekey` exposes a transaction helper. The planner decides and records why in `plan.md`.
+
+## How to tell it's working?
+
+- cargo fmt --all -- --check
+- cargo clippy --all-targets --all-features -- -D warnings
+- GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=commit.gpgsign GIT_CONFIG_VALUE_0=false cargo test --all
+- fd -e rs . src/commands/recipient src/repo src/rekey | xargs wc -l  # no file far above 400 lines
+- rg -n 'commands::recipient::' src --glob '!src/commands/recipient/**' --glob '!src/lib.rs'  # prints nothing

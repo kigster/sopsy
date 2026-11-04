@@ -1,0 +1,13 @@
+project: sopsy
+starts: planning
+frontend: false
+desired_codebase_quality: high
+merge:
+  by: human
+ci:
+  provider: github_actions
+  config: ".github/workflows/ci.yml"
+stack:
+  language: rust
+  deployment: cargo
+  domain: sopsy-cli.dev
