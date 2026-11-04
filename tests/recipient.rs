@@ -929,6 +929,73 @@ fn approve_non_interactive_without_optin_errors_at_vouch() {
     });
 }
 
+/// `--non-interactive` / `--yes` means "fail instead of asking". It must not
+/// vouch for a key: without `SOPSY_ASSUME_YES`, approve fails and bob stays
+/// pending.
+#[test]
+#[serial]
+fn approve_with_yes_flag_but_no_optin_still_fails() {
+    for flag in ["--non-interactive", "--yes", "-y"] {
+        let dir = TempDir::new().unwrap();
+        git_init(dir.path());
+        std::fs::write(dir.path().join(".sopsy.yml"), sopsy_with_pending_bob("")).unwrap();
+        std::fs::write(dir.path().join(".sops.yaml"), SOPS_ALICE_ONLY).unwrap();
+        let fake = dir.path().join("fake-sops.sh");
+        write_script(&fake, "exit 0\n");
+
+        let output = assert_cmd::Command::cargo_bin("sopsy")
+            .unwrap()
+            .env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew")
+            .env("SOPSY_SOPS_BIN", &fake)
+            .env_remove("SOPSY_ASSUME_YES")
+            .current_dir(dir.path())
+            .args([flag, "approve", "bob"])
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "`{flag} approve` must not vouch without SOPSY_ASSUME_YES"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("SOPSY_ASSUME_YES"), "{flag}: {stderr}");
+        let cfg = Config::load_from_dir(dir.path()).unwrap();
+        assert_eq!(cfg.recipient("bob").unwrap().state, MemberState::Pending);
+    }
+}
+
+/// The break-glass ceremony's "keys are stored" confirmation is not skipped
+/// by `--yes` either.
+#[test]
+#[serial]
+fn break_glass_with_yes_flag_but_no_optin_still_fails() {
+    let dir = TempDir::new().unwrap();
+    git_init(dir.path());
+    std::fs::write(dir.path().join(".sopsy.yml"), sopsy_with_pending_bob("")).unwrap();
+    std::fs::write(dir.path().join(".sops.yaml"), SOPS_ALICE_ONLY).unwrap();
+
+    let output = assert_cmd::Command::cargo_bin("sopsy")
+        .unwrap()
+        .env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew")
+        .env_remove("SOPSY_ASSUME_YES")
+        .current_dir(dir.path())
+        .args(["-y", "recipient", "break-glass", "--output", "bg"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "`-y recipient break-glass` must not skip the storage confirmation"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("SOPSY_ASSUME_YES"), "{stderr}");
+    assert!(
+        std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .all(|e| !e.file_name().to_string_lossy().ends_with(".private")),
+        "no private key may be written"
+    );
+}
+
 #[test]
 #[serial]
 fn approve_rolls_back_when_reencryption_fails() {

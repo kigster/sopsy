@@ -39,7 +39,7 @@ pub(super) fn decide(
         return Ok(Disposition::Write);
     }
     let backs_up = direction == Direction::Decrypt;
-    if overwrite || ui.assumes_yes() {
+    if overwrite || ui.consents_to_overwrite() {
         return Ok(if backs_up {
             Disposition::BackupThenWrite
         } else {
@@ -184,10 +184,10 @@ mod tests {
     }
 
     #[test]
-    fn assume_yes_acts_like_overwrite() {
+    fn yes_flag_acts_like_overwrite() {
         let dir = tempfile::tempdir().unwrap();
         let target = existing(&dir);
-        let ui = plain_ui().with_assume_yes(true);
+        let ui = plain_ui().with_yes_flag(true);
         assert_eq!(
             decide(&ui, Direction::Decrypt, &target, false).unwrap(),
             Disposition::BackupThenWrite
