@@ -963,37 +963,52 @@ fn approve_with_yes_flag_but_no_optin_still_fails() {
     }
 }
 
-/// The break-glass ceremony's "keys are stored" confirmation is not skipped
-/// by `--yes` either.
+/// The break-glass and CI ceremonies delete the private key once the operator
+/// confirms it is stored. No spelling of `--yes` / `--non-interactive` may skip
+/// that confirmation: without `SOPSY_ASSUME_YES` each run fails before a key
+/// is generated, so no key is ever registered and then lost.
 #[test]
 #[serial]
-fn break_glass_with_yes_flag_but_no_optin_still_fails() {
-    let dir = TempDir::new().unwrap();
-    git_init(dir.path());
-    std::fs::write(dir.path().join(".sopsy.yml"), sopsy_with_pending_bob("")).unwrap();
-    std::fs::write(dir.path().join(".sops.yaml"), SOPS_ALICE_ONLY).unwrap();
+fn ceremonies_with_yes_flag_but_no_optin_still_fail() {
+    for ceremony in ["break-glass", "ci"] {
+        for flag in ["--non-interactive", "--yes", "-y"] {
+            let dir = TempDir::new().unwrap();
+            git_init(dir.path());
+            std::fs::write(dir.path().join(".sopsy.yml"), sopsy_with_pending_bob("")).unwrap();
+            std::fs::write(dir.path().join(".sops.yaml"), SOPS_ALICE_ONLY).unwrap();
+            let sopsy_before = std::fs::read_to_string(dir.path().join(".sopsy.yml")).unwrap();
 
-    let output = assert_cmd::Command::cargo_bin("sopsy")
-        .unwrap()
-        .env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew")
-        .env_remove("SOPSY_ASSUME_YES")
-        .current_dir(dir.path())
-        .args(["-y", "recipient", "break-glass", "--output", "bg"])
-        .output()
-        .unwrap();
-    assert!(
-        !output.status.success(),
-        "`-y recipient break-glass` must not skip the storage confirmation"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("SOPSY_ASSUME_YES"), "{stderr}");
-    assert!(
-        std::fs::read_dir(dir.path())
-            .unwrap()
-            .flatten()
-            .all(|e| !e.file_name().to_string_lossy().ends_with(".private")),
-        "no private key may be written"
-    );
+            let output = assert_cmd::Command::cargo_bin("sopsy")
+                .unwrap()
+                .env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew")
+                .env_remove("SOPSY_ASSUME_YES")
+                .current_dir(dir.path())
+                .args([flag, "recipient", ceremony, "--output", "portable"])
+                .output()
+                .unwrap();
+            assert!(
+                !output.status.success(),
+                "`{flag} recipient {ceremony}` must not skip the storage confirmation"
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("SOPSY_ASSUME_YES"),
+                "{flag} {ceremony}: {stderr}"
+            );
+            assert!(
+                std::fs::read_dir(dir.path()).unwrap().flatten().all(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    !name.ends_with(".private") && !name.ends_with(".public")
+                }),
+                "{flag} {ceremony}: no key may be written"
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join(".sopsy.yml")).unwrap(),
+                sopsy_before,
+                "{flag} {ceremony}: no recipient may be registered"
+            );
+        }
+    }
 }
 
 #[test]
