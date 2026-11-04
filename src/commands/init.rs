@@ -125,6 +125,9 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
         // but ignore them so an interrupted ceremony can never commit a key.
         "*.private",
         "*.public",
+        // `decrypt -w` backs up a plaintext file it replaces as
+        // `FILE.<stamp>.bak`, whatever the file is called.
+        "*.bak",
     ] {
         gitignore_changed |= git::ensure_gitignored(&root, pattern)?;
     }
