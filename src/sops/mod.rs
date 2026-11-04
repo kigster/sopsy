@@ -23,6 +23,8 @@ use std::process::Command;
 
 use crate::error::{Error, Result};
 
+pub(crate) mod suffix;
+
 /// The default name of the external binary this module drives.
 pub const SOPS_BIN: &str = "sops";
 
@@ -108,11 +110,9 @@ impl FileType {
 
         // Strip a trailing `.encrypted` (case-insensitive) so the encrypted
         // artifact detects by its inner format.
-        let name = if original.to_ascii_lowercase().ends_with(".encrypted") {
-            original[..original.len() - ".encrypted".len()].to_string()
-        } else {
-            original
-        };
+        let name = suffix::without_encrypted_suffix(Path::new(&original))
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or(original);
         let lower = name.to_ascii_lowercase();
 
         // dotenv: the file is exactly `.env`, begins with `.env.`, or ends in `.env`.

@@ -17,8 +17,8 @@ use std::time::{Duration, SystemTime};
 
 use crate::cli::ApproveArgs;
 use crate::commands::recipient::{
-    ConfigSnapshot, SOPS_CONFIG_FILE_NAME, add_key_to_sops_yaml, assume_yes, current_repo_root,
-    load_config, membership_paths, run_updatekeys, sops_config_path,
+    ConfigSnapshot, SOPS_CONFIG_FILE_NAME, add_key_to_sops_yaml, current_repo_root, load_config,
+    membership_paths, run_updatekeys, sops_config_path,
 };
 use crate::config::{CONFIG_FILE_NAME, Config, MemberState, Recipient};
 use crate::error::{Error, Result};
@@ -269,14 +269,15 @@ fn request_age(requested_at: &str) -> Result<Duration> {
 
 /// Ask the approver to vouch that the key belongs to the named person, returning
 /// whether they did. `SOPSY_ASSUME_YES` auto-vouches; a non-interactive terminal
-/// without it is an error (there is no safe way to vouch unattended).
+/// without it is an error (there is no safe way to vouch unattended). The
+/// `--yes` / `--non-interactive` flag alone never vouches.
 fn confirm_vouch(ui: &Ui, name: &str, public_key: &str) -> Result<bool> {
     ui.header("Verify before you vouch");
     ui.info(format!("name: {name}"));
     ui.info(format!("key:  {public_key}"));
     ui.warn("Confirm out-of-band (Slack/in person) that this key is really theirs.");
 
-    if assume_yes() {
+    if ui.assumes_yes() {
         ui.info("SOPSY_ASSUME_YES set — vouching automatically.");
         return Ok(true);
     }

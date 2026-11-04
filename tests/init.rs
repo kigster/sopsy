@@ -900,3 +900,64 @@ fn init_skip_deps_never_runs_brew() {
         .failure();
     assert!(!log.exists(), "--skip-deps must not call brew");
 }
+
+/// `decrypt -w -O` backs up the plaintext it replaces as `FILE.<stamp>.bak`.
+/// For a YAML secrets file nothing but `init`'s `*.bak` rule keeps that backup
+/// out of git, and both plaintext files must be readable by their owner only.
+#[test]
+#[serial]
+fn a_yaml_plaintext_backup_is_gitignored_and_private() {
+    let dir = TempDir::new().unwrap();
+    init_git_repo(dir.path());
+    let (public_key, key_file) = generate_age_key(dir.path());
+    sopsy_in(dir.path())
+        .args([
+            "--non-interactive",
+            "init",
+            "--allow-stores",
+            "any",
+            "--no-generate",
+            "--public-key",
+            &public_key,
+        ])
+        .assert()
+        .success();
+
+    let decrypt = |args: &[&str]| {
+        sopsy_in(dir.path())
+            .env("SOPS_AGE_KEY_FILE", &key_file)
+            .env_remove("SOPSY_ASSUME_YES")
+            .args(args)
+            .assert()
+            .success();
+    };
+    std::fs::write(dir.path().join("app.yaml"), "password: old\n").unwrap();
+    decrypt(&["encrypt", "app.yaml", "-w"]);
+    decrypt(&["decrypt", "app.yaml.encrypted", "-w", "-O"]);
+
+    let backups: Vec<PathBuf> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.to_string_lossy().ends_with(".bak"))
+        .collect();
+    assert_eq!(backups.len(), 1, "{backups:?}");
+    let backup = &backups[0];
+    let ignored = StdCommand::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .arg("check-ignore")
+        .arg(backup)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ignored, "{} must be gitignored", backup.display());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for path in [backup.clone(), dir.path().join("app.yaml")] {
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{}", path.display());
+        }
+    }
+}

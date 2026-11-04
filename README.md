@@ -784,10 +784,15 @@ The `.gitignore` rules `sopsy init` ensures are present:
 .env
 .env.*
 !.env.example
-!.env.encrypted
+!*.encrypted
 *.key
 *.pem
+*.private
+*.public
+*.bak
 ```
+
+`*.private` and `*.public` cover a break-glass or CI key left behind by an interrupted ceremony; `*.bak` covers the plaintext backups `decrypt -w -O` makes.
 
 A minimal generated `.sops.yaml` looks like:
 
@@ -816,7 +821,7 @@ These apply to **every** subcommand (they are global and may appear before or af
 
 | Flag                               | Description                                                                                                                                                                                            |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `-y`, `--yes`, `--non-interactive` | Disable all prompts; fail with a clear error instead of asking. Auto-enabled when stdout is not a TTY.                                                                                                 |
+| `-y`, `--yes`, `--non-interactive` | Never prompt: a question that needs an answer fails with a clear error instead. Auto-enabled when stdout is not a TTY. For `encrypt`/`decrypt` it also allows replacing an existing output file. It never approves a key or confirms a portable key is stored; automation sets `SOPSY_ASSUME_YES=1` for those. |
 | `--no-color`                       | Disable colored output. Also honored via the `NO_COLOR` environment variable.                                                                                                                          |
 | `-v`, `--verbose`                  | Increase verbosity (show debug detail such as the resolved editor and file type).                                                                                                                      |
 | `--git`                            | After a command changes files, `git add` exactly those files and print ready-to-paste `git commit` / `git push` / `gh pr create` instructions. A no-op for commands that don't modify committed files. |
@@ -1137,6 +1142,8 @@ One-shot encrypt/decrypt of a single file, defaulting to **stdout** so it compos
 | --------------------- | ------------------------------------------------------------------------------------------------- |
 | `<file>`              | The plaintext file to encrypt (`.env`/`.yaml`/`.json`/`.ini`/…).                                  |
 | `-o, --output <FILE>` | Write ciphertext to a file (**must end in `.encrypted`**) instead of stdout.                      |
+| `-w, --write`         | Write to `FILE.encrypted`, next to the input.                                                     |
+| `-O, --overwrite`     | Replace an existing output file without asking.                                                   |
 | `--type <T>`          | Override the format (`dotenv`/`yaml`/`json`/`ini`/`binary`) if the name lacks a usable extension. |
 
 ```bash
@@ -1150,12 +1157,17 @@ sopsy encrypt config.json > config.json.encrypted
 | --------------------- | ------------------------------------------------------------ |
 | `<file>`              | The encrypted file to decrypt.                               |
 | `-o, --output <FILE>` | Write plaintext to a file instead of stdout.                 |
+| `-w, --write`         | Write to `FILE`, the input name without `.encrypted`.        |
+| `-O, --overwrite`     | Replace an existing file without asking, after a backup.     |
 | `--type <T>`          | Override the format (rarely needed; inferred from the name). |
 
 ```bash
 sopsy decrypt .env.encrypted                 # → plaintext on stdout
 sopsy decrypt config.json.encrypted -o config.json
+sopsy decrypt config.yaml.encrypted -w -O    # → config.yaml, old copy kept as a .bak
 ```
+
+When the output file already exists, a terminal asks first; a script fails unless it passes `-O` or `-y`. Decrypt keeps the old plaintext as `FILE.YYYY-MM-DD.HHMMSS.bak` before replacing it. The plaintext and every backup are written mode `0600`, and `init`'s `*.bak` rule keeps backups out of git.
 
 > [!TIP]
 >
