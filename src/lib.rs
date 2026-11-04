@@ -48,7 +48,7 @@ pub fn run() -> Result<()> {
         cli.global.resolve_interactive(),
     )
     .with_git(cli.global.git)
-    .with_assume_yes(cli.global.non_interactive);
+    .with_yes_flag(cli.global.non_interactive);
     dispatch(&ui, cli.command)
 }
 

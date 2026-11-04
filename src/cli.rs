@@ -47,7 +47,10 @@ pub struct Cli {
 #[command(next_help_heading = "Global options")]
 pub struct GlobalArgs {
     /// Disable all interactive prompts; fail instead of asking. Also enabled
-    /// automatically when stdout is not a TTY. Aliased as `--yes`/`-y`.
+    /// automatically when stdout is not a TTY. Aliased as `--yes`/`-y`. For
+    /// `encrypt`/`decrypt` it also consents to replacing an existing output
+    /// file; it never vouches for a key (`approve`) or skips a key-storage
+    /// confirmation, which need `SOPSY_ASSUME_YES`.
     #[arg(
         long,
         short = 'y',

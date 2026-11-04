@@ -126,7 +126,7 @@ Per D4, this folder builds **change 1 only**: `-w` naming and the target-exists 
 - [x] **U1 CLI flags.** `WriteArgs` (`-w/--write`, `-O/--overwrite`) in `src/cli/write_args.rs`, flattened into both arg structs. `-w` conflicts with `-o`; `-O` requires `-w` or `-o` (clap group `destination`). Parse tests live beside it.
 - [x] **U2 Target naming.** `src/commands/secrets/target.rs`: `destination`, `conventional_name`, `without_encrypted_suffix`; wrong suffix is a validation error in both directions.
 - [x] **U3 Existing-target policy + backup.** `src/commands/secrets/existing.rs`: `decide` returns `Write` / `BackupThenWrite` / `Skip`; `back_up` copies to `FILE.YYYY-MM-DD.HHMMSS.bak` (UTC) and never replaces an existing backup.
-- [x] **U4 Wiring.** `src/commands/secrets/mod.rs` (moved from `secrets.rs`) uses U2/U3 through `Sink::deliver`; `Ui::with_assume_yes` / `assumes_yes` carry `--yes`/`-y` and `SOPSY_ASSUME_YES` (set in `lib.rs::run`).
+- [x] **U4 Wiring.** `src/commands/secrets/mod.rs` (moved from `secrets.rs`) uses U2/U3 through `Sink::deliver`; `Ui::with_yes_flag` (set in `lib.rs::run`) records `--yes`/`-y`; `Ui::consents_to_overwrite` (flag or `SOPSY_ASSUME_YES`) is used only by encrypt/decrypt, while `Ui::assumes_yes` (env only) guards the trust gates in `approve` and the portable-key ceremony. amended: round 3, the flag must not vouch for a key.
 - [x] **U5 Integration tests** in `tests/secrets.rs` against real `sops` + `age`.
 
 ## Frontend

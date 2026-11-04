@@ -55,3 +55,20 @@ Checks after the fixes (commit signing off via `GIT_CONFIG_*`):
 - `cargo clippy --all-targets --all-features -- -D warnings` — clean
 - `cargo test --all` — 476 passed, 0 failed (lib 253, was 250: +3 new tests)
 - coverage (`.openlanes.yml` command) — **95.08%** lines, minimum 95
+
+## Answers, round 3
+
+| Comment (finding) | Answer | Files |
+| :--- | :--- | :--- |
+| Grok review 🛑 (`--non-interactive` means "yes to everything"); human mail #11 | fix: "don't prompt" and "assume yes" are separate inputs again. `Ui::with_yes_flag` records `-y`/`--yes`/`--non-interactive`; `Ui::consents_to_overwrite()` (flag or `SOPSY_ASSUME_YES`) is read only by `secrets::existing::decide`. `Ui::assumes_yes()` is env-only, so `approve`'s vouch and the break-glass/CI "keys stored" confirmation need `SOPSY_ASSUME_YES` as before this PR. This overrides the round-2 F201 answer for those two callers. Flag help and README row say so. New tests: `approve_with_yes_flag_but_no_optin_still_fails` (`--non-interactive`, `--yes`, `-y`: exits non-zero, bob stays pending), `break_glass_with_yes_flag_but_no_optin_still_fails`, `ui::tests::yes_flag_consents_to_overwrite_but_never_assumes_yes`. Both integration tests fail when `assumes_yes` reads the flag again (checked). | `src/ui.rs`, `src/lib.rs`, `src/cli.rs`, `src/commands/approve.rs`, `src/commands/secrets/existing.rs`, `tests/recipient.rs`, `README.md` |
+| Grok review 🤔 "No" on decrypt still overwrites | rebuttal: the behaviour is D5 in spec.md, chosen by the owner; changing the prompt wording is a product call outside this round's fix scope. | — |
+| Grok review 🤔 plaintext 0600 modes; `*.bak` in `init`'s gitignore | rebuttal: out of scope by D4 (change 2 modes/atomic writes, change 3 git-ignore warning), as for F3/F101 in round 2. | — |
+| Grok review 🤔 `state.json` in the diff | rebuttal: `.plans/` is published by the openlanes harness, not by this role. | — |
+
+Checks after the fix (commit signing off via `GIT_CONFIG_*`):
+
+- `cargo fmt --all -- --check` — clean
+- `cargo clippy --all-targets --all-features -- -D warnings` — clean
+- `cargo test --all` — 480 passed, 0 failed (lib 254, recipient 71)
+
+- coverage (`.openlanes.yml` command) — **95.08%** lines, minimum 95

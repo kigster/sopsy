@@ -269,7 +269,8 @@ fn request_age(requested_at: &str) -> Result<Duration> {
 
 /// Ask the approver to vouch that the key belongs to the named person, returning
 /// whether they did. `SOPSY_ASSUME_YES` auto-vouches; a non-interactive terminal
-/// without it is an error (there is no safe way to vouch unattended).
+/// without it is an error (there is no safe way to vouch unattended). The
+/// `--yes` / `--non-interactive` flag alone never vouches.
 fn confirm_vouch(ui: &Ui, name: &str, public_key: &str) -> Result<bool> {
     ui.header("Verify before you vouch");
     ui.info(format!("name: {name}"));
@@ -277,7 +278,7 @@ fn confirm_vouch(ui: &Ui, name: &str, public_key: &str) -> Result<bool> {
     ui.warn("Confirm out-of-band (Slack/in person) that this key is really theirs.");
 
     if ui.assumes_yes() {
-        ui.info("--yes / SOPSY_ASSUME_YES set — vouching automatically.");
+        ui.info("SOPSY_ASSUME_YES set — vouching automatically.");
         return Ok(true);
     }
     if !ui.is_interactive() {
