@@ -584,7 +584,16 @@ pub(crate) fn run_updatekeys(ui: &Ui, repo: &Path, skip: bool) -> Result<()> {
     let globs = load_config(repo)
         .map(|c| c.encrypted_globs)
         .unwrap_or_else(|_| Config::default().encrypted_globs);
-    let files = collect_encrypted_files(repo, &globs)?;
+    let Discovery {
+        files,
+        skipped_symlinks,
+    } = discover_encrypted_files(repo, &globs);
+    for link in &skipped_symlinks {
+        ui.warn(format!(
+            "not re-keying through the symlink `{}`: sopsy only re-keys regular files inside the repository",
+            link.strip_prefix(repo).unwrap_or(link).display()
+        ));
+    }
     if !files.is_empty() {
         crate::commands::keys::prompt_for_yubikey_if_needed(ui)?;
     }
@@ -638,21 +647,66 @@ fn updatekeys_file(file: &Path) -> Result<()> {
 /// working tree directly, so **every** matching artifact is found regardless of
 /// git status — a not-yet-committed or even `.gitignore`d `*.encrypted` still
 /// has to be re-keyed when membership changes, or the new member can't decrypt
-/// it. Expansion is bounded (see [`expand_glob`]): `*` never crosses `/`, so a
-/// glob like `*.encrypted` lists one directory, never a recursive walk of (say)
-/// `$HOME`. Each match must also carry the `ENC[` marker to count.
+/// it. Expansion is bounded (see [`expand_glob_into`]): `*` never crosses `/`,
+/// so a glob like `*.encrypted` lists one directory, never a recursive walk of
+/// (say) `$HOME`. Each match must also carry the `ENC[` marker to count.
+///
+/// Symbolic links are never selected and never entered; see
+/// [`discover_encrypted_files`].
 pub(crate) fn collect_encrypted_files(repo: &Path, globs: &[String]) -> Result<Vec<PathBuf>> {
-    let mut found = Vec::new();
+    Ok(discover_encrypted_files(repo, globs).files)
+}
+
+/// What [`discover_encrypted_files`] found under a repository.
+pub(crate) struct Discovery {
+    /// Regular files that match an encrypted glob and carry sops ciphertext.
+    pub(crate) files: Vec<PathBuf>,
+    /// Symbolic links met while expanding the globs. They were left alone.
+    pub(crate) skipped_symlinks: Vec<PathBuf>,
+}
+
+/// Expand `globs` under `repo` into the managed encrypted files, reporting the
+/// symbolic links that were refused on the way.
+///
+/// A membership change hands every selected path to `sops updatekeys`, which
+/// rewrites the file it is given. A symlink that matches a glob, or a symlinked
+/// directory on the way to a match, would let a planted link point that rewrite
+/// at ciphertext outside the repository and grant the new recipient a stanza
+/// there. So no path component below `repo` may be a symlink: links are
+/// recorded in `skipped_symlinks`, not followed. With no link ever crossed,
+/// every selected file is inside `repo`.
+///
+/// The check and the later `sops` run are separate steps, so a link swapped in
+/// between them is not covered here.
+pub(crate) fn discover_encrypted_files(repo: &Path, globs: &[String]) -> Discovery {
+    let mut files = Vec::new();
+    let mut skipped_symlinks = Vec::new();
     for pattern in globs {
-        for path in expand_glob(repo, pattern) {
-            if path.is_file() && is_encrypted_file(&path) {
-                found.push(path);
+        for path in expand_glob_into(repo, pattern, &mut skipped_symlinks) {
+            if is_regular_file(&path) && is_encrypted_file(&path) {
+                files.push(path);
             }
         }
     }
-    found.sort();
-    found.dedup();
-    Ok(found)
+    files.sort();
+    files.dedup();
+    skipped_symlinks.sort();
+    skipped_symlinks.dedup();
+    Discovery {
+        files,
+        skipped_symlinks,
+    }
+}
+
+/// Whether `path` is a regular file, judged without following a symlink.
+fn is_regular_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file())
+}
+
+/// [`expand_glob_into`] without the symlink report.
+#[cfg(test)]
+fn expand_glob(repo: &Path, pattern: &str) -> Vec<PathBuf> {
+    expand_glob_into(repo, pattern, &mut Vec::new())
 }
 
 /// Expand a glob `pattern` against the filesystem under `repo`, one path segment
@@ -660,7 +714,10 @@ pub(crate) fn collect_encrypted_files(repo: &Path, globs: &[String]) -> Result<V
 /// containing `*`/`?` lists exactly its parent directory and keeps the matches.
 /// There is no `**`, and `*` never crosses `/`, so the work is bounded to the
 /// directories the pattern actually names — no recursive descent.
-fn expand_glob(repo: &Path, pattern: &str) -> Vec<PathBuf> {
+///
+/// A segment that resolves to a symbolic link is pushed onto `symlinks` and
+/// dropped, so a link is neither returned nor used as a directory to list.
+fn expand_glob_into(repo: &Path, pattern: &str, symlinks: &mut Vec<PathBuf>) -> Vec<PathBuf> {
     let mut current = vec![repo.to_path_buf()];
     for segment in pattern.split('/').filter(|s| !s.is_empty()) {
         let mut next = Vec::new();
@@ -671,16 +728,24 @@ fn expand_glob(repo: &Path, pattern: &str) -> Vec<PathBuf> {
                 };
                 for entry in entries.flatten() {
                     let name = entry.file_name();
-                    if glob_match(segment, &name.to_string_lossy()) {
-                        next.push(dir.join(&name));
+                    if !glob_match(segment, &name.to_string_lossy()) {
+                        continue;
+                    }
+                    // `DirEntry::file_type` does not follow symlinks.
+                    match entry.file_type() {
+                        Ok(kind) if kind.is_symlink() => symlinks.push(dir.join(&name)),
+                        Ok(_) => next.push(dir.join(&name)),
+                        Err(_) => {}
                     }
                 }
             }
         } else {
             for dir in &current {
                 let candidate = dir.join(segment);
-                if candidate.exists() {
-                    next.push(candidate);
+                match std::fs::symlink_metadata(&candidate) {
+                    Ok(meta) if meta.file_type().is_symlink() => symlinks.push(candidate),
+                    Ok(_) => next.push(candidate),
+                    Err(_) => {}
                 }
             }
         }
@@ -1069,6 +1134,82 @@ mod tests {
             vec![repo.join(".env.encrypted")]
         );
         assert!(expand_glob(repo, "missing.encrypted").is_empty());
+    }
+
+    /// The symlinks discovery refused under `repo` for `globs`.
+    #[cfg(unix)]
+    fn skipped_symlinks(repo: &Path, globs: &[String]) -> Vec<PathBuf> {
+        discover_encrypted_files(repo, globs).skipped_symlinks
+    }
+
+    /// Issue #39: a matching symlink must never be selected, wherever it points.
+    #[cfg(unix)]
+    #[test]
+    fn collect_encrypted_files_skips_a_symlink_to_a_file_outside_the_repo() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(repo.join(".env.encrypted"), "A=ENC[x]\n").unwrap();
+        std::fs::write(outside.join("victim.env.encrypted"), "B=ENC[y]\n").unwrap();
+        std::os::unix::fs::symlink(
+            outside.join("victim.env.encrypted"),
+            repo.join("planted.env.encrypted"),
+        )
+        .unwrap();
+
+        let globs = vec!["*.encrypted".to_string()];
+        assert_eq!(
+            collect_encrypted_files(&repo, &globs).unwrap(),
+            vec![repo.join(".env.encrypted")]
+        );
+        assert_eq!(
+            skipped_symlinks(&repo, &globs),
+            vec![repo.join("planted.env.encrypted")]
+        );
+    }
+
+    /// Issue #39: a symlinked directory on the way to a match is not entered,
+    /// whether the pattern names it literally or reaches it through a wildcard.
+    #[cfg(unix)]
+    #[test]
+    fn collect_encrypted_files_does_not_descend_into_a_symlinked_directory() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path().join("repo");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("db.encrypted.yaml"), "k: ENC[z]\n").unwrap();
+        std::os::unix::fs::symlink(&outside, repo.join("config")).unwrap();
+
+        for pattern in ["config/*.encrypted.yaml", "*/db.encrypted.yaml"] {
+            let globs = vec![pattern.to_string()];
+            assert_eq!(
+                collect_encrypted_files(&repo, &globs).unwrap(),
+                Vec::<PathBuf>::new(),
+                "pattern `{pattern}` reached through the symlinked directory"
+            );
+            assert_eq!(skipped_symlinks(&repo, &globs), vec![repo.join("config")]);
+        }
+    }
+
+    /// A symlink that stays inside the repository is skipped too: its target is
+    /// re-keyed under its own name when that name matches a glob.
+    #[cfg(unix)]
+    #[test]
+    fn collect_encrypted_files_skips_a_symlink_inside_the_repo() {
+        let dir = TempDir::new().unwrap();
+        let repo = dir.path();
+        std::fs::write(repo.join(".env.encrypted"), "A=ENC[x]\n").unwrap();
+        std::os::unix::fs::symlink(repo.join(".env.encrypted"), repo.join("alias.encrypted"))
+            .unwrap();
+
+        let globs = vec!["*.encrypted".to_string()];
+        assert_eq!(
+            collect_encrypted_files(repo, &globs).unwrap(),
+            vec![repo.join(".env.encrypted")]
+        );
     }
 
     #[test]

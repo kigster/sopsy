@@ -1558,6 +1558,58 @@ fn staged_files(repo: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Issue #39: a symlink in the working tree that matches an encrypted glob must
+/// not carry a membership change onto ciphertext outside the repository. Runs
+/// real `sops` with disposable keys.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn add_does_not_rekey_through_a_symlink_to_ciphertext_outside_the_repo() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let repo_dir = dir.path().join("repo");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let (repo, key_a, key_b) = setup_repo(&repo_dir);
+    set_age_key_file(Some(&key_a.file));
+
+    // Another project's secret, encrypted for A only, living outside the repo.
+    let staging = repo.join("victim.env.encrypted");
+    std::fs::write(&staging, "SECRET=outside\n").unwrap();
+    sops::encrypt_in_place(&staging, FileType::Dotenv).unwrap();
+    let victim = outside.join("victim.env.encrypted");
+    std::fs::rename(&staging, &victim).unwrap();
+    let victim_before = std::fs::read(&victim).unwrap();
+
+    // The planted link keeps the `.env.encrypted` suffix so sops reads it as dotenv.
+    std::os::unix::fs::symlink(&victim, repo.join("planted.env.encrypted")).unwrap();
+
+    let result = recipient::run(
+        &test_ui(),
+        &add_command("extra", &key_b.public, false, false),
+    );
+
+    set_age_key_file(None);
+    restore_cwd(&original);
+
+    result.expect("adding a recipient should still succeed");
+    assert!(
+        std::fs::read(&victim).unwrap() == victim_before,
+        "ciphertext outside the repository was re-keyed through the symlink"
+    );
+    assert!(
+        !String::from_utf8_lossy(&std::fs::read(&victim).unwrap()).contains(&key_b.public),
+        "the new recipient gained a stanza in a file outside the repository"
+    );
+    // The repository's own secret was re-keyed for the new recipient.
+    let own = std::fs::read_to_string(repo.join(".env.encrypted")).unwrap();
+    assert!(
+        own.contains(&key_b.public),
+        "the in-repo secret was not re-keyed"
+    );
+}
+
 #[test]
 #[serial]
 fn add_with_git_flag_stages_the_membership_files() {
