@@ -1196,7 +1196,7 @@ The seven invariants:
 1. `.env` **is** gitignored.
 1. `.sops.yaml` exists and parses with at least one `creation_rules` entry.
 1. Every encrypted file (matching `.sopsy.yml`'s `encrypted_globs`) matches at least one `.sops.yaml` `path_regex`.
-1. No plaintext secrets are tracked (`.env`/`.env.*` that isn't `.env.example`/`*.encrypted`, or any `*.key`/`*.pem`).
+1. No plaintext secrets are tracked (`.env`/`.env.*` that isn't `.env.example`/`*.encrypted`, or any `*.key`/`*.pem`/`*.private`).
 1. Every encrypted file carries sops metadata (`sops` section + `ENC[`).
 1. A break-glass recipient exists in `.sopsy.yml`.
 
