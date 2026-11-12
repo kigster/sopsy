@@ -13,7 +13,7 @@
 //! 4. Every encrypted file (matching `.sopsy.yml` `encrypted_globs`) matches at
 //!    least one `.sops.yaml` creation-rule `path_regex`.
 //! 5. No plaintext secrets are tracked (`.env`/`.env.*` that isn't
-//!    `.env.example`/`*.encrypted`, or any `*.key`/`*.pem`).
+//!    `.env.example`/`*.encrypted`, or any `*.key`/`*.pem`/`*.private`).
 //! 6. Every encrypted file carries sops metadata (`sops` section + `ENC[`).
 //! 7. A break-glass recipient exists in `.sopsy.yml`.
 
@@ -295,7 +295,11 @@ fn check_plaintext_secrets(ui: &Ui, tracked: &[PathBuf], failures: &mut Vec<Stri
         let suspect_env = (name == ".env" || name.starts_with(".env."))
             && name != ".env.example"
             && !name.ends_with(".encrypted");
-        let suspect_key = name.ends_with(".key") || name.ends_with(".pem");
+        // `.private` is the portable identity the break-glass and CI ceremonies
+        // write (`<output>.private`); `init` gitignores it for the same reason.
+        // Its `.public` half is not sensitive and stays allowed.
+        let suspect_key =
+            name.ends_with(".key") || name.ends_with(".pem") || name.ends_with(".private");
 
         if suspect_env || suspect_key {
             offenders.push(file.to_string_lossy().to_string());
