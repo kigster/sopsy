@@ -438,10 +438,9 @@ impl Ui {
             out!();
             return Ok(());
         }
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
+        let confirmed = confirm_enter(&mut std::io::stdin().lock());
         out!();
-        Ok(())
+        confirmed
     }
 
     /// Show `prompt` and wait for one keypress: ENTER returns `None`, one of
@@ -764,7 +763,21 @@ where
     Error::Other(error.into())
 }
 
-/// The error a canceled checklist (Esc, Ctrl-C) turns into.
+/// Read the line that answers a [`Ui::press_enter`] prompt from `input`.
+///
+/// End of input (a closed stdin, `</dev/null`, Ctrl-D on an empty line) is not
+/// a confirmation: nobody pressed ENTER, so the prompt counts as canceled. The
+/// portable-key ceremony relies on this, because what follows the prompt is the
+/// deletion of the only local copy of a private key.
+fn confirm_enter(input: &mut impl std::io::BufRead) -> Result<()> {
+    let mut line = String::new();
+    if input.read_line(&mut line)? == 0 {
+        return Err(canceled());
+    }
+    Ok(())
+}
+
+/// The error a canceled prompt (Esc, Ctrl-C, end of input) turns into.
 fn canceled() -> Error {
     into_other(std::io::Error::new(
         std::io::ErrorKind::Interrupted,
@@ -1093,6 +1106,18 @@ mod tests {
         ui.press_enter("press ENTER").unwrap();
         ui.pause(Duration::from_millis(1));
         assert_eq!(ui.secret("Secret?", "--value").unwrap(), "hidden");
+    }
+
+    #[test]
+    fn enter_confirms_a_press_enter_prompt() {
+        assert!(confirm_enter(&mut "\n".as_bytes()).is_ok());
+        assert!(confirm_enter(&mut "done\n".as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn end_of_input_cancels_a_press_enter_prompt() {
+        let err = confirm_enter(&mut "".as_bytes()).unwrap_err();
+        assert!(err.to_string().contains("prompt canceled"), "{err}");
     }
 
     #[test]
