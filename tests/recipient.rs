@@ -312,6 +312,46 @@ fn break_glass_generates_registers_and_deletes_local_files() {
     restore_cwd(&original);
 }
 
+/// Issue #38: when the public half cannot be written, the private identity that
+/// was written a moment earlier must not be left behind.
+#[test]
+#[serial]
+fn break_glass_leaves_no_private_key_when_the_public_half_cannot_be_written() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let (repo, key_a, _key_b) = setup_repo(dir.path());
+    set_age_key_file(Some(&key_a.file));
+    set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+
+    // A directory where the public half belongs makes that write fail.
+    let out_prefix = repo.join("bg");
+    std::fs::create_dir(with_suffix_test(&out_prefix, "public")).unwrap();
+
+    let result = recipient::run(
+        &test_ui(),
+        &RecipientCommand::BreakGlass(RecipientBreakGlassArgs {
+            output: out_prefix.clone(),
+            name: None,
+            force: true,
+            no_updatekeys: false,
+        }),
+    );
+
+    set_env("SOPSY_ASSUME_YES", None);
+    set_age_key_file(None);
+    restore_cwd(&original);
+
+    assert!(result.is_err(), "the ceremony must fail, got {result:?}");
+    let private = with_suffix_test(&out_prefix, "private");
+    assert!(
+        !private.exists(),
+        "an orphan private identity was left at {}",
+        private.display()
+    );
+    let config = Config::load_from_dir(&repo).unwrap();
+    assert!(config.recipient("break-glass").is_none());
+}
+
 #[test]
 #[serial]
 fn break_glass_non_interactive_without_optin_fails_before_writing() {
