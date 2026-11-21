@@ -194,16 +194,18 @@ fn portable_key_ceremony(
     spinner.finish_and_clear();
     let keypair = keypair?;
 
-    // Write both halves to disk (private key locked down on unix).
-    std::fs::write(&private_path, &keypair.identity)?;
-    std::fs::write(&public_path, format!("{}\n", keypair.public_key))?;
-    restrict_permissions(&private_path);
-
-    // The private key now exists on disk. Guarantee it never survives the
-    // ceremony: this guard shreds both halves on any normal/error return or
+    // The private key is about to exist on disk. Guarantee it never survives
+    // the ceremony: this guard shreds both halves on any normal/error return or
     // panic, and the signal handler it arms shreds them on SIGINT/SIGTERM/SIGHUP
-    // (e.g. Ctrl-C at the prompt below), which bypass `Drop`.
+    // (e.g. Ctrl-C at the prompt below), which bypass `Drop`. It is armed before
+    // the first write, so a failure part-way through (the public half cannot be
+    // written, say) leaves no orphan private key behind.
     let _cleanup = KeyFileGuard::arm(&private_path, &public_path);
+
+    // Write both halves to disk. The private key is owner-only from the moment
+    // the file is created (see `write_private_key`).
+    write_private_key(&private_path, &keypair.identity)?;
+    std::fs::write(&public_path, format!("{}\n", keypair.public_key))?;
 
     ui.success(format!("wrote private key to {}", private_path.display()));
     ui.success(format!("wrote public key to {}", public_path.display()));
@@ -308,24 +310,83 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Best-effort tighten of a private-key file to owner read/write only (unix).
-fn restrict_permissions(path: &Path) {
+/// Create the private-key file at `path`, readable and writable by its owner
+/// only (unix).
+///
+/// The mode is part of the `open` call, so the key is never on disk with the
+/// permissions a permissive umask would give it, not even for the moment
+/// between a write and a later `chmod`. A path that already exists (reachable
+/// only with `--force`) is removed first and created fresh: a planted symlink is
+/// replaced, never followed, and an old file's looser mode is not inherited.
+fn write_private_key(path: &Path, identity: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        if let Ok(metadata) = std::fs::metadata(path) {
-            let mut perms = metadata.permissions();
-            perms.set_mode(0o600);
-            let _ = std::fs::set_permissions(path, perms);
-        }
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
-    #[cfg(not(unix))]
-    let _ = path;
+    options.open(path)?.write_all(identity.as_bytes())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_key_creates_an_owner_only_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bg.private");
+        write_private_key(&path, "AGE-SECRET-KEY-1TEST\n").unwrap();
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "AGE-SECRET-KEY-1TEST\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_key_does_not_inherit_an_existing_files_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bg.private");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private_key(&path, "new").unwrap();
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_key_replaces_a_symlink_without_following_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::write(&elsewhere, "untouched").unwrap();
+        let path = dir.path().join("bg.private");
+        std::os::unix::fs::symlink(&elsewhere, &path).unwrap();
+
+        write_private_key(&path, "AGE-SECRET-KEY-1TEST\n").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&elsewhere).unwrap(), "untouched");
+        assert!(!std::fs::symlink_metadata(&path).unwrap().is_symlink());
+        assert_eq!(mode(&path), 0o600);
+    }
 
     #[test]
     fn with_suffix_appends_dotted_extension() {
