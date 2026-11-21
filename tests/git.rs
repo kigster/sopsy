@@ -303,3 +303,76 @@ fn stage_and_advise_handles_detached_head() {
 
     assert!(git::is_tracked(dir.path(), Path::new(".sops.yaml")).unwrap());
 }
+
+/// Commit every change in `dir` with message `msg`.
+fn commit_all(dir: &Path, msg: &str) {
+    run_git(dir, &["add", "-A"]);
+    run_git(
+        dir,
+        &["-c", "commit.gpgsign=false", "commit", "-q", "-m", msg],
+    );
+}
+
+#[test]
+fn base_branch_is_none_before_the_first_commit() {
+    let dir = init_repo();
+    assert_eq!(git::base_branch(dir.path()), None);
+}
+
+#[test]
+fn base_branch_prefers_main_and_falls_back_to_master() {
+    let dir = init_repo();
+    std::fs::write(dir.path().join("f"), "x").unwrap();
+    commit_all(dir.path(), "one");
+    assert_eq!(
+        git::base_branch(dir.path()).as_deref(),
+        Some("refs/heads/main")
+    );
+
+    run_git(dir.path(), &["branch", "-q", "-m", "main", "master"]);
+    assert_eq!(
+        git::base_branch(dir.path()).as_deref(),
+        Some("refs/heads/master")
+    );
+}
+
+#[test]
+fn changed_since_lists_only_what_the_branch_changed() {
+    let dir = init_repo();
+    std::fs::write(dir.path().join("kept"), "x").unwrap();
+    std::fs::write(dir.path().join("edited"), "x").unwrap();
+    std::fs::write(dir.path().join("moved"), "x").unwrap();
+    commit_all(dir.path(), "base");
+
+    run_git(dir.path(), &["checkout", "-q", "-b", "feature"]);
+    std::fs::write(dir.path().join("edited"), "y").unwrap();
+    std::fs::write(dir.path().join("added"), "y").unwrap();
+    run_git(dir.path(), &["mv", "moved", "renamed"]);
+    commit_all(dir.path(), "feature");
+
+    // A later change on main is not the branch's doing.
+    run_git(dir.path(), &["checkout", "-q", "main"]);
+    std::fs::write(dir.path().join("kept"), "z").unwrap();
+    commit_all(dir.path(), "main moves on");
+    run_git(dir.path(), &["checkout", "-q", "feature"]);
+
+    let mut changed = git::changed_since(dir.path(), "refs/heads/main").unwrap();
+    changed.sort();
+    let expected: Vec<std::path::PathBuf> = ["added", "edited", "moved", "renamed"]
+        .iter()
+        .map(std::path::PathBuf::from)
+        .collect();
+    assert_eq!(changed, expected);
+}
+
+#[test]
+fn changed_since_refuses_a_branch_with_no_shared_history() {
+    let dir = init_repo();
+    std::fs::write(dir.path().join("f"), "x").unwrap();
+    commit_all(dir.path(), "main");
+    run_git(dir.path(), &["checkout", "-q", "--orphan", "fresh"]);
+    commit_all(dir.path(), "unrelated");
+
+    let err = git::changed_since(dir.path(), "refs/heads/main").unwrap_err();
+    assert!(err.to_string().contains("shares no history"), "{err}");
+}

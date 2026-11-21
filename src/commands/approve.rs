@@ -13,12 +13,15 @@
 //!
 //! If the re-key fails, all changes are rolled back (see [`recipient`]).
 
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::cli::ApproveArgs;
 use crate::commands::recipient::{
-    ConfigSnapshot, LinkPolicy, SOPS_CONFIG_FILE_NAME, add_key_to_sops_yaml, current_repo_root,
-    load_config, membership_paths, run_updatekeys, sops_config_path,
+    ConfigSnapshot, LinkPolicy, SOPS_CONFIG_FILE_NAME, add_key_to_sops_yaml,
+    collect_encrypted_files, current_repo_root, load_config, membership_paths, run_updatekeys,
+    sops_config_path,
 };
 use crate::config::{CONFIG_FILE_NAME, Config, MemberState, Recipient};
 use crate::error::{Error, Result};
@@ -41,6 +44,9 @@ pub fn run(ui: &Ui, args: &ApproveArgs) -> Result<()> {
     let mut config = load_config(&repo)?;
     let sops_config = sops_config_path(&repo)?;
     let ttl = config.resolved_request_ttl();
+    if !args.no_updatekeys {
+        refuse_changed_secrets(ui, &repo, &config)?;
+    }
 
     let interactive = args.names.is_empty();
     let candidates = resolve_candidates(&config, &args.names, interactive)?;
@@ -316,4 +322,57 @@ fn print_next_steps(ui: &Ui, names: &[String], staged: bool) {
     ui.info(format!(
         "{joined} then pull main and can `sopsy edit`/`sopsy decrypt` — Touch ID unlocks it."
     ));
+}
+
+/// Refuse to approve on a branch that changed any encrypted file `approve`
+/// would re-key.
+///
+/// A join request changes `.sopsy.yml` and `.sopsy.sha` and nothing else. A
+/// join branch that also replaces, say, `.env.encrypted` with a copy of another
+/// repository's ciphertext would have `approve` re-key that copy for the
+/// newcomer, handing them the other repository's secrets. The approver can
+/// decrypt it, so `sops` would not object, and an encrypted diff is unreadable
+/// in review. So every file about to be re-keyed must be unchanged on this
+/// branch since it left the base branch (see [`crate::git::base_branch`]).
+fn refuse_changed_secrets(ui: &Ui, repo: &Path, config: &Config) -> Result<()> {
+    let Some(base) = crate::git::base_branch(repo) else {
+        ui.warn(
+            "no `main` or `master` branch to compare with; not checking whether this \
+             branch changed encrypted files",
+        );
+        return Ok(());
+    };
+    let changed: HashSet<PathBuf> = crate::git::changed_since(repo, &base)?
+        .into_iter()
+        .map(|path| repo.join(path))
+        .collect();
+    let policy = LinkPolicy::from_ui(ui);
+    let touched: Vec<String> = collect_encrypted_files(repo, &config.encrypted_globs, policy)?
+        .into_iter()
+        .filter(|file| changed.contains(file))
+        .map(|file| {
+            let shown = file
+                .strip_prefix(repo)
+                .unwrap_or(&file)
+                .display()
+                .to_string();
+            format!("`{shown}`")
+        })
+        .collect();
+    if touched.is_empty() {
+        return Ok(());
+    }
+    let base = base
+        .trim_start_matches("refs/heads/")
+        .trim_start_matches("refs/remotes/");
+    let list = touched.join(", ");
+    ui.banner_alert(format!(
+        "Refusing to approve: this branch changed {list} since `{base}`. A join request \
+         never touches encrypted files. If you did not make this change, someone may be \
+         trying to obtain secrets from another repository through this approval."
+    ));
+    Err(Error::Validation(format!(
+        "this branch changed encrypted files since `{base}`: {list}. Approve from a \
+         branch that changes only {CONFIG_FILE_NAME} and its checksum"
+    )))
 }

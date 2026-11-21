@@ -130,6 +130,59 @@ pub fn stage(repo: &Path, files: &[PathBuf]) -> Result<Vec<PathBuf>> {
     Ok(existing)
 }
 
+/// The branch a feature branch is compared with: the remote's default branch
+/// when known, else `main`, else `master` (remote before local). Returns the
+/// full ref name, or `None` when no such branch exists, as in a repository
+/// with no commits yet.
+pub fn base_branch(repo: &Path) -> Option<String> {
+    [
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+        "refs/heads/main",
+        "refs/remotes/origin/master",
+        "refs/heads/master",
+    ]
+    .into_iter()
+    .find(|candidate| {
+        let spec = format!("{candidate}^{{commit}}");
+        git(repo, &["rev-parse", "--verify", "--quiet", &spec])
+            .is_ok_and(|output| output.status.success())
+    })
+    .map(String::from)
+}
+
+/// The files that commits on `HEAD` changed since it diverged from `base`
+/// (added, modified or deleted; renames count as both paths), relative to
+/// `repo`. Changes made on `base` after the fork are not included.
+///
+/// Fails when `HEAD` and `base` share no history, so a branch built from
+/// scratch cannot dodge the comparison.
+pub fn changed_since(repo: &Path, base: &str) -> Result<Vec<PathBuf>> {
+    let fork = git(repo, &["merge-base", base, "HEAD"])?;
+    if !fork.status.success() {
+        return Err(Error::Validation(format!(
+            "this branch shares no history with `{base}`, so sopsy cannot tell what it changed"
+        )));
+    }
+    let fork = String::from_utf8_lossy(&fork.stdout).trim().to_string();
+    let output = git(
+        repo,
+        &["diff", "--name-only", "--no-renames", "-z", &fork, "HEAD"],
+    )?;
+    if !output.status.success() {
+        return Err(Error::ProcessFailed {
+            tool: GIT_BIN.to_string(),
+            code: output.status.code().unwrap_or(-1),
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .collect())
+}
+
 /// The current branch name, or `None` on a detached HEAD.
 ///
 /// Uses `symbolic-ref` rather than `rev-parse --abbrev-ref` so it still returns
