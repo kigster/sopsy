@@ -95,6 +95,9 @@ struct FixtureOpts {
     track_plaintext_env: bool,
     /// Track an extra plaintext `server.key` file.
     track_key_file: bool,
+    /// Force-track a `break-glass.private` portable identity (the filename the
+    /// recovery and CI ceremonies write) next to its `break-glass.public` half.
+    track_private_identity: bool,
     /// Overwrite `.env.encrypted` with plaintext (no sops metadata) after
     /// encryption.
     corrupt_encrypted: bool,
@@ -110,6 +113,7 @@ impl Default for FixtureOpts {
             break_glass: true,
             track_plaintext_env: false,
             track_key_file: false,
+            track_private_identity: false,
             corrupt_encrypted: false,
             delete_sops_yaml: false,
         }
@@ -179,6 +183,28 @@ fn build_repo(opts: FixtureOpts) -> TempDir {
     if opts.track_plaintext_env {
         std::fs::write(repo.join(".env"), "TOKEN=secret123\n").unwrap();
         git(repo, &["add", "-f", ".env"]);
+    }
+
+    if opts.track_private_identity {
+        // A real identity from `age-keygen`, under the names the ceremony uses.
+        // `init` gitignores `*.private`, so only a forced add gets it tracked.
+        let private = repo.join("break-glass.private");
+        let output = Command::new("age-keygen")
+            .arg("-o")
+            .arg(&private)
+            .output()
+            .expect("age-keygen should run");
+        assert!(output.status.success(), "age-keygen failed");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let public_half = stderr
+            .lines()
+            .find_map(|line| line.strip_prefix("Public key: "))
+            .expect("age-keygen prints the public key");
+        std::fs::write(repo.join("break-glass.public"), format!("{public_half}\n")).unwrap();
+        git(
+            repo,
+            &["add", "-f", "break-glass.private", "break-glass.public"],
+        );
     }
 
     git(repo, &["commit", "-qm", "fixture"]);
@@ -287,6 +313,35 @@ fn tracked_key_file_fails() {
         predicate::str::contains("server.key")
             .and(predicate::str::contains("looks like a plaintext secret")),
     );
+}
+
+#[test]
+#[serial]
+fn tracked_private_identity_fails() {
+    // (e2) A `*.private` portable identity (break-glass / CI key) is tracked.
+    let dir = build_repo(FixtureOpts {
+        track_private_identity: true,
+        ..Default::default()
+    });
+    run_check(dir.path())
+        .failure()
+        .stdout(predicate::str::contains(
+            "tracked file `break-glass.private` looks like a plaintext secret",
+        ));
+}
+
+#[test]
+#[serial]
+fn tracked_public_half_is_allowed() {
+    // The `.public` half is not sensitive: it is the recipient committed to
+    // `.sops.yaml`, so it must never be reported.
+    let dir = build_repo(FixtureOpts {
+        track_private_identity: true,
+        ..Default::default()
+    });
+    run_check(dir.path())
+        .failure()
+        .stdout(predicate::str::contains("break-glass.public").not());
 }
 
 #[test]
