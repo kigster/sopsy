@@ -67,10 +67,19 @@ pub fn tracked_files(repo: &Path) -> Result<Vec<PathBuf>> {
 ///
 /// Runs `git -C <repo> ls-files --error-unmatch <path>`: exit 0 means tracked,
 /// a non-zero exit means untracked. `path` is interpreted relative to `repo`
-/// (absolute paths inside the repo also work).
+/// (absolute paths inside the repo also work). It is matched literally, so a
+/// name holding `*` or `?` names that one file, not a pattern.
 pub fn is_tracked(repo: &Path, path: &Path) -> Result<bool> {
     let path_str = path.to_string_lossy();
-    let output = git(repo, &["ls-files", "--error-unmatch", &path_str])?;
+    let output = git(
+        repo,
+        &[
+            "--literal-pathspecs",
+            "ls-files",
+            "--error-unmatch",
+            &path_str,
+        ],
+    )?;
     Ok(output.status.success())
 }
 
