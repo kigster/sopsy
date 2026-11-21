@@ -43,6 +43,7 @@ impl Sink {
                     path.display(),
                     backup.display()
                 ));
+                existing::ignore_backup(ui, &backup)?;
             }
             Disposition::Write => {}
         }

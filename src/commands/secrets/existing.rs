@@ -16,7 +16,15 @@ use std::time::SystemTime;
 use super::plaintext;
 use super::target::Direction;
 use crate::error::{Error, Result};
+use crate::git;
 use crate::ui::Ui;
+
+/// The suffix every plaintext backup ends in.
+const BACKUP_SUFFIX: &str = ".bak";
+
+/// The `.gitignore` rule that keeps every plaintext backup out of git. `init`
+/// writes it, and a backup made in a repository without it adds it.
+pub(crate) const BACKUP_GITIGNORE_PATTERN: &str = "*.bak";
 
 /// How to treat the target before writing to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,12 +55,7 @@ pub(super) fn decide(
             Disposition::Write
         });
     }
-    if !ui.is_interactive() {
-        return Err(Error::Validation(format!(
-            "`{}` exists; pass `--overwrite` to replace it",
-            target.display()
-        )));
-    }
+    refuse_without_consent(ui, target, overwrite)?;
     let prompt = format!("{} exists. Overwrite?", target.display());
     Ok(
         match (ui.confirm(&prompt, "--overwrite", false)?, backs_up) {
@@ -61,6 +64,48 @@ pub(super) fn decide(
             (false, false) => Disposition::Skip,
         },
     )
+}
+
+/// Fail when `target` exists and nothing can consent to replacing it: no
+/// `--overwrite`, no `--yes` / `SOPSY_ASSUME_YES`, and no terminal to ask.
+///
+/// `decrypt` calls this before it touches a YubiKey or runs sops, so a doomed
+/// run fails at once instead of after the decrypt.
+pub(super) fn refuse_without_consent(ui: &Ui, target: &Path, overwrite: bool) -> Result<()> {
+    if target.exists() && !overwrite && !ui.consents_to_overwrite() && !ui.is_interactive() {
+        return Err(Error::Validation(format!(
+            "`{}` exists; pass `--overwrite` to replace it",
+            target.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Make sure git ignores `backup`, which holds plaintext.
+///
+/// A repository set up before `init` wrote [`BACKUP_GITIGNORE_PATTERN`] does
+/// not ignore backups, so the rule is added to its `.gitignore` the first time
+/// one is made there. Outside a git repository there is nothing to do.
+pub(super) fn ignore_backup(ui: &Ui, backup: &Path) -> Result<()> {
+    let dir = match backup.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let Ok(root) = git::repo_root(dir) else {
+        return Ok(());
+    };
+    // Canonical, so the path agrees with the root git reports (macOS `/var`
+    // is a symlink to `/private/var`).
+    let backup = std::fs::canonicalize(backup)?;
+    if git::is_ignored(&root, &backup)? {
+        return Ok(());
+    }
+    if git::ensure_gitignored(&root, BACKUP_GITIGNORE_PATTERN)? {
+        ui.info(format!(
+            "added `{BACKUP_GITIGNORE_PATTERN}` to .gitignore so plaintext backups stay out of git"
+        ));
+    }
+    Ok(())
 }
 
 /// Copy `target` to its timestamped backup and return the backup's path.
@@ -104,7 +149,7 @@ fn backup_path(target: &Path, now: SystemTime, n: u32) -> PathBuf {
         format!("-{n}")
     };
     let mut name = target.as_os_str().to_os_string();
-    name.push(format!(".{date}.{time}{counter}.bak"));
+    name.push(format!(".{date}.{time}{counter}{BACKUP_SUFFIX}"));
     PathBuf::from(name)
 }
 
@@ -136,6 +181,36 @@ mod tests {
             backup_path(Path::new("dir/.env"), instant(), 0),
             PathBuf::from("dir/.env.2026-11-03.235007.bak")
         );
+    }
+
+    #[test]
+    fn the_gitignore_pattern_matches_every_backup_name() {
+        assert_eq!(BACKUP_GITIGNORE_PATTERN, format!("*{BACKUP_SUFFIX}"));
+        for n in [0, 1] {
+            let name = backup_path(Path::new("config/app.yaml"), instant(), n);
+            assert!(name.to_string_lossy().ends_with(BACKUP_SUFFIX), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn refuse_without_consent_only_without_any_way_to_consent() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        assert!(refuse_without_consent(&plain_ui(), &missing, false).is_ok());
+        let target = existing(&dir);
+        assert!(refuse_without_consent(&plain_ui(), &target, true).is_ok());
+        assert!(refuse_without_consent(&plain_ui().with_yes_flag(true), &target, false).is_ok());
+        let err = refuse_without_consent(&plain_ui(), &target, false).unwrap_err();
+        assert!(err.to_string().contains("pass `--overwrite`"), "{err}");
+    }
+
+    #[test]
+    fn ignore_backup_outside_a_repository_does_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let backup = dir.path().join(".env.2026-11-03.235007.bak");
+        std::fs::write(&backup, "").unwrap();
+        ignore_backup(&plain_ui(), &backup).unwrap();
+        assert!(!dir.path().join(".gitignore").exists());
     }
 
     #[cfg(unix)]

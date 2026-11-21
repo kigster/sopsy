@@ -127,7 +127,7 @@ pub fn run(ui: &Ui, args: &InitArgs) -> Result<()> {
         "*.public",
         // `decrypt -w` backs up a plaintext file it replaces as
         // `FILE.<stamp>.bak`, whatever the file is called.
-        "*.bak",
+        crate::commands::secrets::BACKUP_GITIGNORE_PATTERN,
     ] {
         gitignore_changed |= git::ensure_gitignored(&root, pattern)?;
     }

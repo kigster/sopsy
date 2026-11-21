@@ -23,6 +23,8 @@ mod plaintext;
 mod sink;
 mod target;
 
+pub(crate) use self::existing::BACKUP_GITIGNORE_PATTERN;
+
 use self::sink::Sink;
 use self::target::Direction;
 use crate::cli::{SecretsCommand, SecretsDecryptArgs, SecretsEncryptArgs};
@@ -93,6 +95,9 @@ fn decrypt(ui: &Ui, args: &SecretsDecryptArgs) -> Result<()> {
         args.output.as_deref(),
         args.write.write,
     )?;
+    if let Some(path) = &destination {
+        existing::refuse_without_consent(ui, path, args.write.overwrite)?;
+    }
     crate::commands::keys::prompt_for_yubikey_if_needed(ui)?;
     let plaintext = sops::decrypt(&args.file, file_type)?;
     let sink = Sink {

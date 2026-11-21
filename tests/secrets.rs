@@ -411,3 +411,60 @@ fn failed_decrypt_leaves_an_existing_target_unchanged() {
     );
     assert!(repo.backups().is_empty());
 }
+
+/// Without a TTY or a flag, a decrypt over an existing file can only fail, so
+/// it fails before sops (or a YubiKey touch) runs at all.
+#[test]
+fn a_doomed_decrypt_fails_before_running_sops() {
+    let repo = WriteRepo::new();
+    std::fs::write(repo.path(".env.encrypted"), "never read\n").unwrap();
+    std::fs::write(repo.path(".env"), "KEEP=me\n").unwrap();
+    repo.sopsy()
+        .env("SOPSY_SOPS_BIN", "/nonexistent/sopsy-test-sops")
+        .args(["decrypt", ".env.encrypted", "-w"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("pass `--overwrite`"));
+    assert_eq!(
+        std::fs::read_to_string(repo.path(".env")).unwrap(),
+        "KEEP=me\n"
+    );
+}
+
+/// A repository set up before `init` wrote `*.bak` gets the rule the first
+/// time a plaintext backup is made in it, so the backup can't be committed.
+#[test]
+fn a_backup_in_a_repo_without_the_rule_adds_it_to_gitignore() {
+    let repo = WriteRepo::new();
+    let git = |args: &[&str]| {
+        let status = StdCommand::new("git")
+            .arg("-C")
+            .arg(repo.dir.path())
+            .args(args)
+            .status()
+            .unwrap();
+        status.success()
+    };
+    assert!(git(&["init", "-q"]));
+    std::fs::write(repo.path(".gitignore"), "age.key\n").unwrap();
+    std::fs::write(repo.path("app.yaml"), "password: old\n").unwrap();
+    repo.sopsy()
+        .args(["encrypt", "app.yaml", "-w"])
+        .assert()
+        .success();
+    repo.sopsy()
+        .args(["decrypt", "app.yaml.encrypted", "-w", "-O"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("added `*.bak` to .gitignore"));
+
+    let backups = repo.backups();
+    assert_eq!(backups.len(), 1, "{backups:?}");
+    let backup = backups[0].to_string_lossy().to_string();
+    assert!(
+        git(&["check-ignore", "-q", &backup]),
+        "{backup} must be ignored"
+    );
+    let gitignore = std::fs::read_to_string(repo.path(".gitignore")).unwrap();
+    assert_eq!(gitignore, "age.key\n*.bak\n");
+}
