@@ -47,7 +47,8 @@ pub fn run() -> Result<()> {
         cli.global.verbose,
         cli.global.resolve_interactive(),
     )
-    .with_git(cli.global.git);
+    .with_git(cli.global.git)
+    .with_yes_flag(cli.global.non_interactive);
     dispatch(&ui, cli.command)
 }
 
@@ -160,6 +161,7 @@ mod tests {
                     file: "no-such-file.env".into(),
                     output: None,
                     file_type: None,
+                    write: Default::default(),
                 })
             )
             .is_err()
@@ -171,6 +173,7 @@ mod tests {
                     file: "no-such-file.env.encrypted".into(),
                     output: None,
                     file_type: None,
+                    write: Default::default(),
                 })
             )
             .is_err()

@@ -36,12 +36,7 @@ pub(crate) const SOPS_CONFIG_FILE_NAME: &str = ".sops.yaml";
 /// When set, interactive confirmations (`break-glass`'s press-ENTER, `approve`'s
 /// vouch prompt) are assumed. Intended for automation and tests; in real use the
 /// operator should confirm interactively.
-pub(crate) const ASSUME_YES_ENV: &str = "SOPSY_ASSUME_YES";
-
-/// Whether the [`ASSUME_YES_ENV`] automation opt-in is set.
-pub(crate) fn assume_yes() -> bool {
-    std::env::var_os(ASSUME_YES_ENV).is_some()
-}
+pub(crate) use crate::ui::ASSUME_YES_ENV;
 
 /// Best-effort current system username from `$USER` / `$LOGNAME`.
 ///
