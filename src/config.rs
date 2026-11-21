@@ -221,7 +221,40 @@ fn default_encrypted_globs() -> Vec<String> {
     ]
 }
 
+/// Why `pattern` cannot be one of `encrypted_globs`, or `None` when it can.
+///
+/// Globs are expanded under the repository root and every file they select is
+/// handed to `sops` to rewrite, so a glob must name paths inside the
+/// repository: no `..` (which climbs out of it), no `.`, and nothing absolute.
+pub fn encrypted_glob_problem(pattern: &str) -> Option<&'static str> {
+    if pattern.starts_with('/') || Path::new(pattern).is_absolute() {
+        return Some("is absolute");
+    }
+    let segments = || pattern.split('/');
+    if segments().any(|segment| segment == "..") {
+        return Some("climbs out of the repository with `..`");
+    }
+    if segments().any(|segment| segment == ".") {
+        return Some("has a `.` segment");
+    }
+    None
+}
+
 impl Config {
+    /// Refuse any of `encrypted_globs` that could select a file outside the
+    /// repository (see [`encrypted_glob_problem`]).
+    pub fn validate_encrypted_globs(&self) -> Result<()> {
+        for pattern in &self.encrypted_globs {
+            if let Some(problem) = encrypted_glob_problem(pattern) {
+                return Err(Error::Validation(format!(
+                    "{CONFIG_FILE_NAME} encrypted_globs: `{pattern}` {problem}; \
+                     globs must name paths inside the repository"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Return the break-glass recipient, if one is configured.
     pub fn break_glass_recipient(&self) -> Option<&Recipient> {
         self.recipients.iter().find(|r| r.break_glass)
@@ -287,7 +320,8 @@ impl Config {
     ///
     /// Returns [`Error::FileNotFound`] if the file does not exist,
     /// [`Error::Parse`] if it cannot be deserialized, and [`Error::Validation`]
-    /// if the sidecar checksum does not match (tamper evidence). A missing
+    /// if the sidecar checksum does not match (tamper evidence) or an
+    /// `encrypted_globs` entry reaches outside the repository. A missing
     /// sidecar is accepted — repos initialised by older sopsy versions have
     /// none; `sopsy doctor` writes it.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
@@ -304,6 +338,7 @@ impl Config {
                 path.display()
             )));
         }
+        config.validate_encrypted_globs()?;
         Ok(config)
     }
 
@@ -556,6 +591,47 @@ mod tests {
 
         let loaded = Config::load_from_dir(dir.path()).unwrap();
         assert_eq!(loaded.recipient("alice").unwrap().public_key, "age1alice");
+    }
+
+    #[test]
+    fn encrypted_globs_must_stay_inside_the_repository() {
+        for ok in [
+            "*.encrypted",
+            ".env.encrypted",
+            "config/*.encrypted.yaml",
+            "a..b/*.enc",
+        ] {
+            assert_eq!(encrypted_glob_problem(ok), None, "{ok}");
+        }
+        for (bad, problem) in [
+            ("../victim/*.encrypted", "climbs out"),
+            ("config/../../x.encrypted", "climbs out"),
+            ("./*.encrypted", "`.` segment"),
+            ("config/./db.encrypted.yaml", "`.` segment"),
+            ("/etc/*.encrypted", "absolute"),
+        ] {
+            assert!(
+                encrypted_glob_problem(bad).is_some_and(|p| p.contains(problem)),
+                "{bad}"
+            );
+        }
+    }
+
+    /// Review of #39: a committed config whose glob climbs out of the
+    /// repository fails to load, rather than selecting another project's files.
+    #[test]
+    fn load_refuses_a_glob_that_leaves_the_repository() {
+        let dir = assert_fs::TempDir::new().unwrap();
+        let mut cfg = Config::default();
+        cfg.recipients.push(Recipient::new("alice", "age1alice"));
+        cfg.encrypted_globs.push("../victim/*.encrypted".into());
+        cfg.save_to_dir(dir.path()).unwrap();
+
+        let err = Config::load_from_dir(dir.path()).unwrap_err();
+        assert!(
+            matches!(&err, Error::Validation(m) if m.contains("../victim/*.encrypted")),
+            "{err}"
+        );
     }
 
     #[test]
