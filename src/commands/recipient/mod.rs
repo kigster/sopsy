@@ -32,7 +32,9 @@ mod ceremony;
 mod discovery;
 mod rotate;
 
-pub(crate) use discovery::{Discovery, collect_encrypted_files, discover_encrypted_files};
+pub(crate) use discovery::{
+    LinkPolicy, collect_encrypted_files, discover_and_warn, verify_before_rewrite,
+};
 
 pub(crate) const SOPS_CONFIG_FILE_NAME: &str = ".sops.yaml";
 
@@ -98,7 +100,7 @@ pub(crate) fn load_config(repo: &Path) -> Result<Config> {
 /// (`.sops.yaml`, `.sopsy.yml`, `.sopsy.sha`) plus every managed encrypted file
 /// (which `sops updatekeys` re-wraps). Handed to [`crate::git::stage_and_advise`]
 /// for the `--git` flow; absent entries are skipped there.
-pub(crate) fn membership_paths(repo: &Path) -> Vec<PathBuf> {
+pub(crate) fn membership_paths(repo: &Path, policy: LinkPolicy) -> Vec<PathBuf> {
     let sopsy = repo.join(CONFIG_FILE_NAME);
     let mut paths = vec![
         repo.join(SOPS_CONFIG_FILE_NAME),
@@ -108,7 +110,14 @@ pub(crate) fn membership_paths(repo: &Path) -> Vec<PathBuf> {
     let globs = load_config(repo)
         .map(|c| c.encrypted_globs)
         .unwrap_or_else(|_| Config::default().encrypted_globs);
-    paths.extend(collect_encrypted_files(repo, &globs).unwrap_or_default());
+    // Under `--external-symlinks` a re-keyed file may live outside the
+    // repository; git cannot stage it, so only the repository's own are listed.
+    paths.extend(
+        collect_encrypted_files(repo, &globs, policy)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|path| path.starts_with(repo)),
+    );
     paths
 }
 
@@ -117,7 +126,8 @@ pub(crate) fn membership_paths(repo: &Path) -> Vec<PathBuf> {
 /// user's explicit request, so a failure to stage should be surfaced.
 pub(crate) fn maybe_stage(ui: &Ui, repo: &Path, subject: &str) -> Result<()> {
     if ui.stage_requested() {
-        crate::git::stage_and_advise(ui, repo, &membership_paths(repo), subject)?;
+        let paths = membership_paths(repo, LinkPolicy::from_ui(ui));
+        crate::git::stage_and_advise(ui, repo, &paths, subject)?;
     }
     Ok(())
 }
@@ -193,7 +203,7 @@ fn add(ui: &Ui, args: &RecipientAddArgs) -> Result<()> {
 
     // Snapshot the config files so a failed re-encryption rolls back cleanly,
     // never leaving a recipient listed that the secrets were not re-wrapped for.
-    let snapshot = ConfigSnapshot::capture(&repo, &sops_config);
+    let snapshot = ConfigSnapshot::capture(&repo, &sops_config, LinkPolicy::from_ui(ui));
 
     // Append to `.sopsy.yml`.
     let recipient = Recipient {
@@ -271,7 +281,7 @@ fn remove(ui: &Ui, args: &RecipientRemoveArgs) -> Result<()> {
     }
 
     // Snapshot for rollback if re-encryption fails (see `add`).
-    let snapshot = ConfigSnapshot::capture(&repo, &sops_config);
+    let snapshot = ConfigSnapshot::capture(&repo, &sops_config, LinkPolicy::from_ui(ui));
 
     config.recipients.retain(|r| r.name != name);
     config.save_to_dir(&repo)?;
@@ -324,7 +334,7 @@ impl ConfigSnapshot {
     /// Capture the current bytes of the config files (`None` if absent) —
     /// `.sopsy.yml`, its `.sopsy.sha` integrity sidecar, and `.sops.yaml` — plus
     /// the bytes of every managed encrypted file that `run_updatekeys` will touch.
-    pub(crate) fn capture(repo: &Path, sops_config: &Path) -> Self {
+    pub(crate) fn capture(repo: &Path, sops_config: &Path, policy: LinkPolicy) -> Self {
         let sopsy = repo.join(CONFIG_FILE_NAME);
         let sha = Config::checksum_path(&sopsy);
         // Resolve globs the same way `run_updatekeys` does (falling back to the
@@ -333,7 +343,7 @@ impl ConfigSnapshot {
         let globs = load_config(repo)
             .map(|c| c.encrypted_globs)
             .unwrap_or_else(|_| Config::default().encrypted_globs);
-        let encrypted = collect_encrypted_files(repo, &globs)
+        let encrypted = collect_encrypted_files(repo, &globs, policy)
             .unwrap_or_default()
             .into_iter()
             .filter_map(|path| std::fs::read(&path).ok().map(|bytes| (path, bytes)))
@@ -587,16 +597,7 @@ pub(crate) fn run_updatekeys(ui: &Ui, repo: &Path, skip: bool) -> Result<()> {
     let globs = load_config(repo)
         .map(|c| c.encrypted_globs)
         .unwrap_or_else(|_| Config::default().encrypted_globs);
-    let Discovery {
-        files,
-        skipped_symlinks,
-    } = discover_encrypted_files(repo, &globs);
-    for link in &skipped_symlinks {
-        ui.warn(format!(
-            "not re-keying through the symlink `{}`: sopsy only re-keys regular files inside the repository",
-            link.strip_prefix(repo).unwrap_or(link).display()
-        ));
-    }
+    let files = discover_and_warn(ui, repo, &globs);
     if !files.is_empty() {
         crate::commands::keys::prompt_for_yubikey_if_needed(ui)?;
     }
@@ -605,7 +606,9 @@ pub(crate) fn run_updatekeys(ui: &Ui, repo: &Path, skip: bool) -> Result<()> {
         return Ok(());
     }
     ui.info("re-encrypting secrets for the updated recipient set (your key may ask for a touch or PIN)…");
+    let policy = LinkPolicy::from_ui(ui);
     for file in &files {
+        verify_before_rewrite(repo, file, policy)?;
         updatekeys_file(file)?;
     }
     ui.success(format!(

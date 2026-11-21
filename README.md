@@ -820,6 +820,11 @@ These apply to **every** subcommand (they are global and may appear before or af
 | `--no-color`                       | Disable colored output. Also honored via the `NO_COLOR` environment variable.                                                                                                                          |
 | `-v`, `--verbose`                  | Increase verbosity (show debug detail such as the resolved editor and file type).                                                                                                                      |
 | `--git`                            | After a command changes files, `git add` exactly those files and print ready-to-paste `git commit` / `git push` / `gh pr create` instructions. A no-op for commands that don't modify committed files. |
+| `--[no-]external-symlinks`         | When re-keying or rotating every encrypted file, also follow symlinks that leave the repository or point at untracked files, and include hard-linked files. Off by default (see below).                |
+
+> [!IMPORTANT]
+>
+> Every file that `encrypted_globs` selects is handed to `sops` to rewrite, so by default sopsy only rewrites files inside the repository. A symlink is followed only when it resolves inside the repository and git tracks the file it points at; a file with more than one hard link is skipped. Each skipped path is named in a warning. Globs with `..`, `.` or a leading `/` are rejected when `.sopsy.yml` loads. Pass `--external-symlinks` to follow links that leave the repository on purpose.
 
 > [!TIP]
 >

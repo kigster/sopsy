@@ -1610,6 +1610,94 @@ fn add_does_not_rekey_through_a_symlink_to_ciphertext_outside_the_repo() {
     );
 }
 
+/// A symlink to a git-tracked file inside the repository is followed: the
+/// file it points at is re-keyed for the new recipient. Runs real `sops`.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn add_rekeys_a_tracked_file_reached_through_an_in_repo_symlink() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let (repo, key_a, key_b) = setup_repo(dir.path());
+    set_age_key_file(Some(&key_a.file));
+
+    // `shared/` matches no glob; only the link at the top level does.
+    std::fs::create_dir(repo.join("shared")).unwrap();
+    let target = repo.join("shared/app.env.encrypted");
+    std::fs::write(&target, "APP=1\n").unwrap();
+    sops::encrypt_in_place(&target, FileType::Dotenv).unwrap();
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["add", "shared/app.env.encrypted"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    std::os::unix::fs::symlink("shared/app.env.encrypted", repo.join("app.env.encrypted")).unwrap();
+
+    let result = recipient::run(
+        &test_ui(),
+        &add_command("extra", &key_b.public, false, false),
+    );
+
+    set_age_key_file(None);
+    restore_cwd(&original);
+
+    result.expect("adding a recipient should succeed");
+    assert!(
+        std::fs::read_to_string(&target)
+            .unwrap()
+            .contains(&key_b.public),
+        "the tracked file behind the in-repo symlink was not re-keyed"
+    );
+    assert!(
+        std::fs::symlink_metadata(repo.join("app.env.encrypted"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the symlink itself must be left in place"
+    );
+}
+
+/// `--external-symlinks` opts back in to re-keying through a link that
+/// leaves the repository. Runs real `sops`.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn add_with_external_symlinks_rekeys_through_an_outside_link() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let repo_dir = dir.path().join("repo");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let (repo, key_a, key_b) = setup_repo(&repo_dir);
+    set_age_key_file(Some(&key_a.file));
+
+    let staging = repo.join("shared.env.encrypted");
+    std::fs::write(&staging, "SHARED=1\n").unwrap();
+    sops::encrypt_in_place(&staging, FileType::Dotenv).unwrap();
+    let shared = outside.join("shared.env.encrypted");
+    std::fs::rename(&staging, &shared).unwrap();
+    std::os::unix::fs::symlink(&shared, repo.join("shared.env.encrypted")).unwrap();
+
+    let result = recipient::run(
+        &test_ui().with_external_symlinks(true),
+        &add_command("extra", &key_b.public, false, false),
+    );
+
+    set_age_key_file(None);
+    restore_cwd(&original);
+
+    result.expect("adding a recipient should succeed");
+    assert!(
+        std::fs::read_to_string(&shared)
+            .unwrap()
+            .contains(&key_b.public),
+        "--external-symlinks did not re-key the file outside the repository"
+    );
+}
+
 #[test]
 #[serial]
 fn add_with_git_flag_stages_the_membership_files() {

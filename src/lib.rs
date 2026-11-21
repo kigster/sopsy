@@ -47,7 +47,8 @@ pub fn run() -> Result<()> {
         cli.global.verbose,
         cli.global.resolve_interactive(),
     )
-    .with_git(cli.global.git);
+    .with_git(cli.global.git)
+    .with_external_symlinks(cli.global.external_symlinks);
     dispatch(&ui, cli.command)
 }
 

@@ -17,8 +17,8 @@ use std::time::{Duration, SystemTime};
 
 use crate::cli::ApproveArgs;
 use crate::commands::recipient::{
-    ConfigSnapshot, SOPS_CONFIG_FILE_NAME, add_key_to_sops_yaml, assume_yes, current_repo_root,
-    load_config, membership_paths, run_updatekeys, sops_config_path,
+    ConfigSnapshot, LinkPolicy, SOPS_CONFIG_FILE_NAME, add_key_to_sops_yaml, assume_yes,
+    current_repo_root, load_config, membership_paths, run_updatekeys, sops_config_path,
 };
 use crate::config::{CONFIG_FILE_NAME, Config, MemberState, Recipient};
 use crate::error::{Error, Result};
@@ -92,7 +92,7 @@ pub fn run(ui: &Ui, args: &ApproveArgs) -> Result<()> {
     }
 
     // Snapshot once, mark every approved member active, add their keys, re-key once.
-    let snapshot = ConfigSnapshot::capture(&repo, &sops_config);
+    let snapshot = ConfigSnapshot::capture(&repo, &sops_config, LinkPolicy::from_ui(ui));
     let approved_names: Vec<String> = approved.iter().map(|m| m.name.clone()).collect();
 
     // Provenance: who granted access and when. `requested_at` is deliberately
@@ -142,7 +142,8 @@ pub fn run(ui: &Ui, args: &ApproveArgs) -> Result<()> {
     let staged = ui.stage_requested();
     if staged {
         let subject = format!("Approve sopsy access for {}", approved_names.join(", "));
-        crate::git::stage_and_advise(ui, &repo, &membership_paths(&repo), &subject)?;
+        let paths = membership_paths(&repo, LinkPolicy::from_ui(ui));
+        crate::git::stage_and_advise(ui, &repo, &paths, &subject)?;
     }
     print_next_steps(ui, &approved_names, staged);
     Ok(())

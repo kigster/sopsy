@@ -1,11 +1,14 @@
 //! `sopsy rotate-data-key`: re-encrypt files under a new data key
 //! (`sops rotate --in-place`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::encrypted_file_type;
 use crate::cli::RotateDataKeyArgs;
 use crate::commands::keys::prompt_for_yubikey_if_needed;
+use crate::commands::recipient::{
+    LinkPolicy, current_repo_root, discover_and_warn, verify_before_rewrite,
+};
 use crate::error::{Error, Result};
 use crate::sops;
 use crate::ui::Ui;
@@ -18,10 +21,13 @@ use crate::ui::Ui;
 pub fn rotate_data_key(ui: &Ui, args: &RotateDataKeyArgs) -> Result<()> {
     ui.header("sopsy rotate-data-key");
     sops::ensure_available()?;
-    let files = if args.files.is_empty() {
-        repository_files()?
+    // Files discovered from the globs are re-checked before each rewrite;
+    // files named on the command line are the operator's explicit choice.
+    let (files, repo) = if args.files.is_empty() {
+        let repo = current_repo_root()?;
+        (repository_files(ui, &repo)?, Some(repo))
     } else {
-        args.files.clone()
+        (args.files.clone(), None)
     };
     if files.is_empty() {
         ui.warn("no encrypted files found; nothing to rotate");
@@ -31,8 +37,13 @@ pub fn rotate_data_key(ui: &Ui, args: &RotateDataKeyArgs) -> Result<()> {
 
     let mut failed = Vec::new();
     for file in &files {
-        let rotated =
-            encrypted_file_type(file, None).and_then(|ty| sops::rotate_in_place(file, ty));
+        let rotated = repo
+            .as_deref()
+            .map_or(Ok(()), |repo| {
+                verify_before_rewrite(repo, file, LinkPolicy::from_ui(ui))
+            })
+            .and_then(|()| encrypted_file_type(file, None))
+            .and_then(|ty| sops::rotate_in_place(file, ty));
         match rotated {
             Ok(()) => ui.success(format!("new data key for {}", file.display())),
             Err(err) => {
@@ -55,8 +66,8 @@ pub fn rotate_data_key(ui: &Ui, args: &RotateDataKeyArgs) -> Result<()> {
     Ok(())
 }
 
-fn repository_files() -> Result<Vec<PathBuf>> {
-    let repo = crate::commands::recipient::current_repo_root()?;
-    let globs = crate::config::Config::load_from_dir(&repo)?.encrypted_globs;
-    crate::commands::recipient::collect_encrypted_files(&repo, &globs)
+/// Every managed encrypted file under `repo`, warning about the paths skipped.
+fn repository_files(ui: &Ui, repo: &Path) -> Result<Vec<PathBuf>> {
+    let globs = crate::config::Config::load_from_dir(repo)?.encrypted_globs;
+    Ok(discover_and_warn(ui, repo, &globs))
 }

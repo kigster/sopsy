@@ -63,6 +63,10 @@ pub struct Ui {
     /// is a resolved global flag like the others; consumed by
     /// [`crate::git::stage_and_advise`].
     git: bool,
+    /// Whether discovery may follow symlinks that leave the repository and
+    /// include hard-linked files (the global `--external-symlinks` flag).
+    /// Consumed by `LinkPolicy::from_ui` in the recipient discovery module.
+    external_symlinks: bool,
     /// Canned prompt answers, replayed in order instead of reading the
     /// terminal. Unit tests only; see [`Ui::scripted`].
     #[cfg(test)]
@@ -120,6 +124,7 @@ impl Ui {
             // Enabled explicitly via `with_git`; off by default so every test and
             // nested call starts without staging behavior.
             git: false,
+            external_symlinks: false,
             #[cfg(test)]
             script: None,
         }
@@ -130,6 +135,18 @@ impl Ui {
     pub fn with_git(mut self, git: bool) -> Self {
         self.git = git;
         self
+    }
+
+    /// Let discovery follow symlinks that leave the repository
+    /// (`--external-symlinks`). Consuming builder, used once in [`crate::run`].
+    pub fn with_external_symlinks(mut self, external_symlinks: bool) -> Self {
+        self.external_symlinks = external_symlinks;
+        self
+    }
+
+    /// Whether `--external-symlinks` was passed.
+    pub fn follows_external_symlinks(&self) -> bool {
+        self.external_symlinks
     }
 
     /// A clone of this handle with `--git` disabled, for nested command calls
@@ -152,6 +169,7 @@ impl Ui {
             verbose: false,
             interactive: true,
             git: false,
+            external_symlinks: false,
             script: Some(std::rc::Rc::new(std::cell::RefCell::new(answers.into()))),
         }
     }
@@ -796,6 +814,7 @@ mod tests {
             verbose: false,
             interactive: false,
             git: false,
+            external_symlinks: false,
             script: None,
         }
     }
@@ -811,6 +830,7 @@ mod tests {
             verbose: true,
             interactive: true,
             git: false,
+            external_symlinks: false,
             script: None,
         }
     }

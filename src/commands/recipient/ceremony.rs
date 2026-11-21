@@ -261,7 +261,7 @@ fn portable_key_ceremony(
 
     // Register the recipient in both config files and re-wrap secrets, rolling
     // back atomically if the re-encryption fails (see `add`).
-    let snapshot = ConfigSnapshot::capture(&repo, &sops_config);
+    let snapshot = ConfigSnapshot::capture(&repo, &sops_config, LinkPolicy::from_ui(ui));
     config.recipients.push(Recipient {
         break_glass: kind == PortableKeyKind::BreakGlass,
         ..Recipient::new(&name, &keypair.public_key)
