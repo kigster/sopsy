@@ -346,6 +346,80 @@ fn break_glass_non_interactive_without_optin_fails_before_writing() {
 // `recipient ci` — portable CI decryption key (real age-keygen + sops).
 // ---------------------------------------------------------------------------
 
+/// A `script(1)` invocation that runs `line` through `sh -c` with a
+/// pseudo-terminal on stdout. sopsy decides it is interactive from stdout alone,
+/// so this is how a test reaches a real prompt.
+#[cfg(target_os = "linux")]
+fn pty_command(line: &str) -> Command {
+    let mut command = Command::new("script");
+    command.args(["-qec", line, "/dev/null"]);
+    command
+}
+
+#[cfg(target_os = "macos")]
+fn pty_command(line: &str) -> Command {
+    let mut command = Command::new("script");
+    command.args(["-q", "/dev/null", "sh", "-c", line]);
+    command
+}
+
+/// Issue #31: a closed stdin is not the operator pressing ENTER. The ceremony
+/// must stop there, exit non-zero and leave the recipient unregistered.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+#[serial]
+fn break_glass_treats_stdin_eof_as_cancel_not_confirmation() {
+    let dir = TempDir::new().unwrap();
+    let repo = dir.path();
+    let (public_key, _key_file) = generate_age_key(repo, "keyA.txt");
+    git_init(repo);
+    write_sops_yaml(repo, &public_key);
+    write_sopsy_yml(repo, &public_key);
+    let sops_yaml_before = std::fs::read_to_string(repo.join(".sops.yaml")).unwrap();
+
+    // stdout is a pseudo-terminal (so the prompt is shown), stdin is at EOF.
+    let sopsy = assert_cmd::cargo::cargo_bin("sopsy");
+    let line = format!(
+        "'{}' recipient break-glass -o bg --no-updatekeys </dev/null",
+        sopsy.display()
+    );
+    let output = pty_command(&line)
+        .current_dir(repo)
+        .env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew")
+        .env_remove("SOPSY_ASSUME_YES")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("script(1) should be installed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("Please press ENTER"),
+        "the ceremony should have reached its prompt; got:\n{stdout}"
+    );
+    assert!(
+        !output.status.success(),
+        "EOF at the prompt must not count as confirmation; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("removed the local key files"),
+        "the ceremony must stop at the prompt; got:\n{stdout}"
+    );
+
+    // Nothing was registered: no recipient, and `.sops.yaml` is untouched.
+    let config = Config::load_from_dir(repo).unwrap();
+    assert!(
+        config.recipient("break-glass").is_none(),
+        "an unconfirmed key must not become a recipient"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join(".sops.yaml")).unwrap(),
+        sops_yaml_before
+    );
+    // A canceled ceremony leaves no key material behind, as with Ctrl-C.
+    assert!(!repo.join("bg.private").exists());
+    assert!(!repo.join("bg.public").exists());
+}
+
 #[test]
 #[serial]
 fn ci_ceremony_generates_registers_and_deletes_local_files() {
