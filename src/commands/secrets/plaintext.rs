@@ -17,6 +17,11 @@ const PRIVATE_MODE: u32 = 0o600;
 ///
 /// An existing file is narrowed to 0600 before anything is written to it, so
 /// the new plaintext is never readable by others, even for a moment.
+///
+/// A symlink at `path` is followed, as `std::fs::write` would: the file it
+/// points at is narrowed to 0600 and replaced. The user named `path`, so that
+/// is the file they asked for. Backups, whose names sopsy picks, go through
+/// [`create_new`] instead and never follow a link.
 pub(super) fn write(path: &Path, data: &[u8]) -> Result<()> {
     if path.exists() {
         restrict(path)?;
