@@ -312,6 +312,46 @@ fn break_glass_generates_registers_and_deletes_local_files() {
     restore_cwd(&original);
 }
 
+/// Issue #38: when the public half cannot be written, the private identity that
+/// was written a moment earlier must not be left behind.
+#[test]
+#[serial]
+fn break_glass_leaves_no_private_key_when_the_public_half_cannot_be_written() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let (repo, key_a, _key_b) = setup_repo(dir.path());
+    set_age_key_file(Some(&key_a.file));
+    set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+
+    // A directory where the public half belongs makes that write fail.
+    let out_prefix = repo.join("bg");
+    std::fs::create_dir(with_suffix_test(&out_prefix, "public")).unwrap();
+
+    let result = recipient::run(
+        &test_ui(),
+        &RecipientCommand::BreakGlass(RecipientBreakGlassArgs {
+            output: out_prefix.clone(),
+            name: None,
+            force: true,
+            no_updatekeys: false,
+        }),
+    );
+
+    set_env("SOPSY_ASSUME_YES", None);
+    set_age_key_file(None);
+    restore_cwd(&original);
+
+    assert!(result.is_err(), "the ceremony must fail, got {result:?}");
+    let private = with_suffix_test(&out_prefix, "private");
+    assert!(
+        !private.exists(),
+        "an orphan private identity was left at {}",
+        private.display()
+    );
+    let config = Config::load_from_dir(&repo).unwrap();
+    assert!(config.recipient("break-glass").is_none());
+}
+
 #[test]
 #[serial]
 fn break_glass_non_interactive_without_optin_fails_before_writing() {
@@ -345,6 +385,80 @@ fn break_glass_non_interactive_without_optin_fails_before_writing() {
 // ---------------------------------------------------------------------------
 // `recipient ci` — portable CI decryption key (real age-keygen + sops).
 // ---------------------------------------------------------------------------
+
+/// A `script(1)` invocation that runs `line` through `sh -c` with a
+/// pseudo-terminal on stdout. sopsy decides it is interactive from stdout alone,
+/// so this is how a test reaches a real prompt.
+#[cfg(target_os = "linux")]
+fn pty_command(line: &str) -> Command {
+    let mut command = Command::new("script");
+    command.args(["-qec", line, "/dev/null"]);
+    command
+}
+
+#[cfg(target_os = "macos")]
+fn pty_command(line: &str) -> Command {
+    let mut command = Command::new("script");
+    command.args(["-q", "/dev/null", "sh", "-c", line]);
+    command
+}
+
+/// Issue #31: a closed stdin is not the operator pressing ENTER. The ceremony
+/// must stop there, exit non-zero and leave the recipient unregistered.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+#[serial]
+fn break_glass_treats_stdin_eof_as_cancel_not_confirmation() {
+    let dir = TempDir::new().unwrap();
+    let repo = dir.path();
+    let (public_key, _key_file) = generate_age_key(repo, "keyA.txt");
+    git_init(repo);
+    write_sops_yaml(repo, &public_key);
+    write_sopsy_yml(repo, &public_key);
+    let sops_yaml_before = std::fs::read_to_string(repo.join(".sops.yaml")).unwrap();
+
+    // stdout is a pseudo-terminal (so the prompt is shown), stdin is at EOF.
+    let sopsy = assert_cmd::cargo::cargo_bin("sopsy");
+    let line = format!(
+        "'{}' recipient break-glass -o bg --no-updatekeys </dev/null",
+        sopsy.display()
+    );
+    let output = pty_command(&line)
+        .current_dir(repo)
+        .env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew")
+        .env_remove("SOPSY_ASSUME_YES")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("script(1) should be installed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout.contains("Please press ENTER"),
+        "the ceremony should have reached its prompt; got:\n{stdout}"
+    );
+    assert!(
+        !output.status.success(),
+        "EOF at the prompt must not count as confirmation; got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("removed the local key files"),
+        "the ceremony must stop at the prompt; got:\n{stdout}"
+    );
+
+    // Nothing was registered: no recipient, and `.sops.yaml` is untouched.
+    let config = Config::load_from_dir(repo).unwrap();
+    assert!(
+        config.recipient("break-glass").is_none(),
+        "an unconfirmed key must not become a recipient"
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.join(".sops.yaml")).unwrap(),
+        sops_yaml_before
+    );
+    // A canceled ceremony leaves no key material behind, as with Ctrl-C.
+    assert!(!repo.join("bg.private").exists());
+    assert!(!repo.join("bg.public").exists());
+}
 
 #[test]
 #[serial]
@@ -927,6 +1041,88 @@ fn approve_non_interactive_without_optin_errors_at_vouch() {
             MemberState::Pending
         );
     });
+}
+
+/// `--non-interactive` / `--yes` means "fail instead of asking". It must not
+/// vouch for a key: without `SOPSY_ASSUME_YES`, approve fails and bob stays
+/// pending.
+#[test]
+#[serial]
+fn approve_with_yes_flag_but_no_optin_still_fails() {
+    for flag in ["--non-interactive", "--yes", "-y"] {
+        let dir = TempDir::new().unwrap();
+        git_init(dir.path());
+        std::fs::write(dir.path().join(".sopsy.yml"), sopsy_with_pending_bob("")).unwrap();
+        std::fs::write(dir.path().join(".sops.yaml"), SOPS_ALICE_ONLY).unwrap();
+        let fake = dir.path().join("fake-sops.sh");
+        write_script(&fake, "exit 0\n");
+
+        let output = assert_cmd::Command::cargo_bin("sopsy")
+            .unwrap()
+            .env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew")
+            .env("SOPSY_SOPS_BIN", &fake)
+            .env_remove("SOPSY_ASSUME_YES")
+            .current_dir(dir.path())
+            .args([flag, "approve", "bob"])
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "`{flag} approve` must not vouch without SOPSY_ASSUME_YES"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("SOPSY_ASSUME_YES"), "{flag}: {stderr}");
+        let cfg = Config::load_from_dir(dir.path()).unwrap();
+        assert_eq!(cfg.recipient("bob").unwrap().state, MemberState::Pending);
+    }
+}
+
+/// The break-glass and CI ceremonies delete the private key once the operator
+/// confirms it is stored. No spelling of `--yes` / `--non-interactive` may skip
+/// that confirmation: without `SOPSY_ASSUME_YES` each run fails before a key
+/// is generated, so no key is ever registered and then lost.
+#[test]
+#[serial]
+fn ceremonies_with_yes_flag_but_no_optin_still_fail() {
+    for ceremony in ["break-glass", "ci"] {
+        for flag in ["--non-interactive", "--yes", "-y"] {
+            let dir = TempDir::new().unwrap();
+            git_init(dir.path());
+            std::fs::write(dir.path().join(".sopsy.yml"), sopsy_with_pending_bob("")).unwrap();
+            std::fs::write(dir.path().join(".sops.yaml"), SOPS_ALICE_ONLY).unwrap();
+            let sopsy_before = std::fs::read_to_string(dir.path().join(".sopsy.yml")).unwrap();
+
+            let output = assert_cmd::Command::cargo_bin("sopsy")
+                .unwrap()
+                .env("SOPSY_BREW_BIN", "/nonexistent/sopsy-test-brew")
+                .env_remove("SOPSY_ASSUME_YES")
+                .current_dir(dir.path())
+                .args([flag, "recipient", ceremony, "--output", "portable"])
+                .output()
+                .unwrap();
+            assert!(
+                !output.status.success(),
+                "`{flag} recipient {ceremony}` must not skip the storage confirmation"
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("SOPSY_ASSUME_YES"),
+                "{flag} {ceremony}: {stderr}"
+            );
+            assert!(
+                std::fs::read_dir(dir.path()).unwrap().flatten().all(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    !name.ends_with(".private") && !name.ends_with(".public")
+                }),
+                "{flag} {ceremony}: no key may be written"
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join(".sopsy.yml")).unwrap(),
+                sopsy_before,
+                "{flag} {ceremony}: no recipient may be registered"
+            );
+        }
+    }
 }
 
 #[test]

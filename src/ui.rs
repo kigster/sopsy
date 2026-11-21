@@ -46,6 +46,10 @@ macro_rules! out {
     }};
 }
 
+/// When set, every confirmation sopsy would ask is taken as granted, as if
+/// `--yes` had been passed. Intended for automation and tests.
+pub const ASSUME_YES_ENV: &str = "SOPSY_ASSUME_YES";
+
 /// Presentation handle threaded through commands.
 ///
 /// Construct via [`Ui::new`] (usually from parsed global CLI flags).
@@ -67,6 +71,11 @@ pub struct Ui {
     /// include hard-linked files (the global `--external-symlinks` flag).
     /// Consumed by `LinkPolicy::from_ui` in the recipient discovery module.
     external_symlinks: bool,
+    /// Whether the global `--yes`/`-y` (`--non-interactive`) flag was passed.
+    /// Unlike `interactive`, this is never inferred from a missing TTY. It only
+    /// grants consent to replace files (see [`Ui::consents_to_overwrite`]);
+    /// trust gates ignore it. Set via [`Ui::with_yes_flag`].
+    yes_flag: bool,
     /// Canned prompt answers, replayed in order instead of reading the
     /// terminal. Unit tests only; see [`Ui::scripted`].
     #[cfg(test)]
@@ -125,6 +134,7 @@ impl Ui {
             // nested call starts without staging behavior.
             git: false,
             external_symlinks: false,
+            yes_flag: false,
             #[cfg(test)]
             script: None,
         }
@@ -149,6 +159,32 @@ impl Ui {
         self.external_symlinks
     }
 
+    /// Record that the global `--yes`/`-y` (`--non-interactive`) flag was
+    /// passed. Consuming builder, used once in [`crate::run`].
+    pub fn with_yes_flag(mut self, yes_flag: bool) -> Self {
+        self.yes_flag = yes_flag;
+        self
+    }
+
+    /// Whether automation has opted in, with [`ASSUME_YES_ENV`], to have
+    /// trust gates (vouching for a key, confirming a portable key is stored)
+    /// taken as granted.
+    ///
+    /// The `--yes` / `--non-interactive` flag deliberately does not count: it
+    /// means "fail instead of asking", so a CI job passing it must never vouch
+    /// for a key as a side effect.
+    pub fn assumes_yes(&self) -> bool {
+        std::env::var_os(ASSUME_YES_ENV).is_some()
+    }
+
+    /// Whether the user consented in advance to replacing an existing file:
+    /// the global `--yes`/`-y` flag or the [`ASSUME_YES_ENV`] opt-in. Used
+    /// only by `encrypt`/`decrypt`, where a replaced plaintext file is backed
+    /// up first.
+    pub fn consents_to_overwrite(&self) -> bool {
+        self.yes_flag || self.assumes_yes()
+    }
+
     /// A clone of this handle with `--git` disabled, for nested command calls
     /// that must not emit their own staging advice — e.g. `sopsy init` invoking
     /// the break-glass ceremony, since `init` stages the whole file set once at
@@ -170,6 +206,7 @@ impl Ui {
             interactive: true,
             git: false,
             external_symlinks: false,
+            yes_flag: false,
             script: Some(std::rc::Rc::new(std::cell::RefCell::new(answers.into()))),
         }
     }
@@ -456,10 +493,9 @@ impl Ui {
             out!();
             return Ok(());
         }
-        let mut line = String::new();
-        std::io::stdin().read_line(&mut line)?;
+        let confirmed = confirm_enter(&mut std::io::stdin().lock());
         out!();
-        Ok(())
+        confirmed
     }
 
     /// Show `prompt` and wait for one keypress: ENTER returns `None`, one of
@@ -782,7 +818,21 @@ where
     Error::Other(error.into())
 }
 
-/// The error a canceled checklist (Esc, Ctrl-C) turns into.
+/// Read the line that answers a [`Ui::press_enter`] prompt from `input`.
+///
+/// End of input (a closed stdin, `</dev/null`, Ctrl-D on an empty line) is not
+/// a confirmation: nobody pressed ENTER, so the prompt counts as canceled. The
+/// portable-key ceremony relies on this, because what follows the prompt is the
+/// deletion of the only local copy of a private key.
+fn confirm_enter(input: &mut impl std::io::BufRead) -> Result<()> {
+    let mut line = String::new();
+    if input.read_line(&mut line)? == 0 {
+        return Err(canceled());
+    }
+    Ok(())
+}
+
+/// The error a canceled prompt (Esc, Ctrl-C, end of input) turns into.
 fn canceled() -> Error {
     into_other(std::io::Error::new(
         std::io::ErrorKind::Interrupted,
@@ -815,6 +865,7 @@ mod tests {
             interactive: false,
             git: false,
             external_symlinks: false,
+            yes_flag: false,
             script: None,
         }
     }
@@ -831,6 +882,7 @@ mod tests {
             interactive: true,
             git: false,
             external_symlinks: false,
+            yes_flag: false,
             script: None,
         }
     }
@@ -895,6 +947,27 @@ mod tests {
         // Smoke test for the copy-pasteable command line in both color modes.
         noninteractive_ui().command("git commit -m \"x\"");
         color_ui().command("git push -u origin HEAD");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn yes_flag_consents_to_overwrite_but_never_assumes_yes() {
+        let saved = std::env::var_os(ASSUME_YES_ENV);
+        // SAFETY: serialized with every other test that touches this variable.
+        unsafe { std::env::remove_var(ASSUME_YES_ENV) };
+        let ui = Ui::new(false, false, false).with_yes_flag(true);
+        assert!(ui.consents_to_overwrite());
+        assert!(!ui.assumes_yes(), "--yes must not open trust gates");
+
+        let plain = Ui::new(false, false, false);
+        assert!(!plain.consents_to_overwrite());
+        unsafe { std::env::set_var(ASSUME_YES_ENV, "1") };
+        assert!(plain.assumes_yes());
+        assert!(plain.consents_to_overwrite());
+        match saved {
+            Some(v) => unsafe { std::env::set_var(ASSUME_YES_ENV, v) },
+            None => unsafe { std::env::remove_var(ASSUME_YES_ENV) },
+        }
     }
 
     #[test]
@@ -1113,6 +1186,18 @@ mod tests {
         ui.press_enter("press ENTER").unwrap();
         ui.pause(Duration::from_millis(1));
         assert_eq!(ui.secret("Secret?", "--value").unwrap(), "hidden");
+    }
+
+    #[test]
+    fn enter_confirms_a_press_enter_prompt() {
+        assert!(confirm_enter(&mut "\n".as_bytes()).is_ok());
+        assert!(confirm_enter(&mut "done\n".as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn end_of_input_cancels_a_press_enter_prompt() {
+        let err = confirm_enter(&mut "".as_bytes()).unwrap_err();
+        assert!(err.to_string().contains("prompt canceled"), "{err}");
     }
 
     #[test]
