@@ -62,7 +62,7 @@ pub(super) fn rotate(ui: &Ui, args: &RecipientRotateArgs) -> Result<()> {
         )));
     }
 
-    let snapshot = ConfigSnapshot::capture(&repo, &sops_config);
+    let snapshot = ConfigSnapshot::capture(&repo, &sops_config, LinkPolicy::from_ui(ui));
     if let Some(member) = config.recipients.iter_mut().find(|r| r.name == name) {
         member.public_key = identity.public_key.clone();
         member.store = Some(identity.store);
@@ -157,7 +157,9 @@ fn check_owner(old: &Recipient, me: Option<&str>, skip: bool) -> Result<()> {
 /// Re-encrypt every managed file under a new data key (`sops rotate -i`).
 fn new_data_key(ui: &Ui, repo: &Path) -> Result<()> {
     let globs = load_config(repo)?.encrypted_globs;
-    for file in collect_encrypted_files(repo, &globs)? {
+    let policy = LinkPolicy::from_ui(ui);
+    for file in discover_and_warn(ui, repo, &globs) {
+        verify_before_rewrite(repo, &file, policy)?;
         sops::rotate_in_place(&file, sops::FileType::from_path(&file))?;
         ui.success(format!(
             "new data key for {}",

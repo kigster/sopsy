@@ -48,6 +48,7 @@ pub fn run() -> Result<()> {
         cli.global.resolve_interactive(),
     )
     .with_git(cli.global.git)
+    .with_external_symlinks(cli.global.external_symlinks)
     .with_yes_flag(cli.global.non_interactive);
     dispatch(&ui, cli.command)
 }

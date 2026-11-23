@@ -143,6 +143,7 @@ sequenceDiagram
 
 `sopsy approve <name…>` (pass several names to approve them together with a single re-key; with no names it walks every pending member interactively):
 
+1. **checks the branch** — refuses, with a red alert, when the branch you are on changed any encrypted file since it left `main` (or `master`). A join request only changes `.sopsy.yml` and `.sopsy.sha`; a join branch that also swaps in, say, another repository's ciphertext as `.env.encrypted` would otherwise have you re-key that file for the newcomer;
 1. **checks freshness** — refuses requests older than `join_request_ttl` (default `72h`, editable in `.sopsy.yml`) unless you pass `--force`;
 1. **asks you to vouch** — shows the name + public key so you confirm, out of band, that the key really belongs to that person (the one human trust step no cryptography can remove);
 1. **adds the key to `.sops.yaml`**, flips the member from `pending` to `active`, and records the provenance (`approved_at`, plus `approved_by` as `"Full Name (username)"`);

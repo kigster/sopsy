@@ -1315,6 +1315,142 @@ fn approve_activates_pending_member_and_rekeys() {
     restore_cwd(&original);
 }
 
+/// Run `git <args>` in `dir` with a throwaway identity, asserting success.
+fn git_in(dir: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=Sopsy Test",
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `bob` requests access with key B, as `sopsy join` does on a join branch.
+fn bob_joins(key_b: &KeyPair) {
+    join::run(
+        &test_ui(),
+        &JoinArgs {
+            name: "bob".into(),
+            username: None,
+            sopsy_file: None,
+            public_key: Some(key_b.public.clone()),
+            presence: Default::default(),
+            key: Default::default(),
+            age_args: vec![],
+        },
+    )
+    .expect("join should succeed");
+}
+
+fn approve_bob() -> sopsy::error::Result<()> {
+    approve::run(
+        &test_ui(),
+        &ApproveArgs {
+            names: vec!["bob".into()],
+            force: false,
+            no_updatekeys: false,
+        },
+    )
+}
+
+/// The copy attack: a join branch swaps `.env.encrypted` for another
+/// repository's ciphertext, which the approver can decrypt. Approving must
+/// refuse rather than re-key that copy for the newcomer. Runs real `sops`.
+#[test]
+#[serial]
+fn approve_refuses_a_join_branch_that_changes_an_encrypted_file() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let (repo, key_a, key_b) = setup_repo(dir.path());
+    git_in(&repo, &["checkout", "-q", "-b", "main"]);
+    git_in(&repo, &["add", "-A"]);
+    git_in(&repo, &["commit", "-q", "-m", "initial"]);
+
+    // Bob's join branch: a pending entry, plus another project's secret,
+    // encrypted for A only, copied over this repository's `.env.encrypted`.
+    git_in(&repo, &["checkout", "-q", "-b", "join-bob"]);
+    bob_joins(&key_b);
+    let secret = repo.join(".env.encrypted");
+    std::fs::write(&secret, "PROD_DB_PASSWORD=hunter2\n").unwrap();
+    sops::encrypt_in_place(&secret, FileType::Dotenv).unwrap();
+    git_in(&repo, &["add", "-A"]);
+    git_in(&repo, &["commit", "-q", "-m", "join bob"]);
+    let planted = std::fs::read(&secret).unwrap();
+    let sops_yaml_before = std::fs::read(repo.join(".sops.yaml")).unwrap();
+
+    set_age_key_file(Some(&key_a.file));
+    set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+    let result = approve_bob();
+    set_env("SOPSY_ASSUME_YES", None);
+    set_age_key_file(None);
+    restore_cwd(&original);
+
+    let err = result.expect_err("approve must refuse a branch that changed a secret");
+    assert!(
+        matches!(&err, Error::Validation(m) if m.contains("`.env.encrypted`") && m.contains("main")),
+        "{err}"
+    );
+    assert_eq!(
+        std::fs::read(&secret).unwrap(),
+        planted,
+        "the planted file was re-keyed"
+    );
+    assert_eq!(
+        std::fs::read(repo.join(".sops.yaml")).unwrap(),
+        sops_yaml_before,
+        ".sops.yaml changed although approve refused"
+    );
+    let config = Config::load_from_dir(&repo).unwrap();
+    assert_eq!(config.recipient("bob").unwrap().state, MemberState::Pending);
+}
+
+/// A join branch that changes only the membership files is approved as usual.
+#[test]
+#[serial]
+fn approve_accepts_a_join_branch_that_changes_only_membership_files() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let (repo, key_a, key_b) = setup_repo(dir.path());
+    git_in(&repo, &["checkout", "-q", "-b", "main"]);
+    git_in(&repo, &["add", "-A"]);
+    git_in(&repo, &["commit", "-q", "-m", "initial"]);
+
+    git_in(&repo, &["checkout", "-q", "-b", "join-bob"]);
+    bob_joins(&key_b);
+    git_in(&repo, &["add", "-A"]);
+    git_in(&repo, &["commit", "-q", "-m", "join bob"]);
+
+    set_age_key_file(Some(&key_a.file));
+    set_env("SOPSY_ASSUME_YES", Some(Path::new("1")));
+    let result = approve_bob();
+    set_env("SOPSY_ASSUME_YES", None);
+    set_age_key_file(None);
+    restore_cwd(&original);
+
+    result.expect("a join-only branch should be approved");
+    let config = Config::load_from_dir(&repo).unwrap();
+    assert_eq!(config.recipient("bob").unwrap().state, MemberState::Active);
+    assert!(
+        std::fs::read_to_string(repo.join(".env.encrypted"))
+            .unwrap()
+            .contains(&key_b.public),
+        "the repository's own secret was not re-keyed for bob"
+    );
+}
+
 #[test]
 #[serial]
 fn approve_rejects_stale_request() {
@@ -1752,6 +1888,146 @@ fn staged_files(repo: &Path) -> Vec<String> {
         .lines()
         .map(str::to_string)
         .collect()
+}
+
+/// Issue #39: a symlink in the working tree that matches an encrypted glob must
+/// not carry a membership change onto ciphertext outside the repository. Runs
+/// real `sops` with disposable keys.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn add_does_not_rekey_through_a_symlink_to_ciphertext_outside_the_repo() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let repo_dir = dir.path().join("repo");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let (repo, key_a, key_b) = setup_repo(&repo_dir);
+    set_age_key_file(Some(&key_a.file));
+
+    // Another project's secret, encrypted for A only, living outside the repo.
+    let staging = repo.join("victim.env.encrypted");
+    std::fs::write(&staging, "SECRET=outside\n").unwrap();
+    sops::encrypt_in_place(&staging, FileType::Dotenv).unwrap();
+    let victim = outside.join("victim.env.encrypted");
+    std::fs::rename(&staging, &victim).unwrap();
+    let victim_before = std::fs::read(&victim).unwrap();
+
+    // The planted link keeps the `.env.encrypted` suffix so sops reads it as dotenv.
+    std::os::unix::fs::symlink(&victim, repo.join("planted.env.encrypted")).unwrap();
+
+    let result = recipient::run(
+        &test_ui(),
+        &add_command("extra", &key_b.public, false, false),
+    );
+
+    set_age_key_file(None);
+    restore_cwd(&original);
+
+    result.expect("adding a recipient should still succeed");
+    assert!(
+        std::fs::read(&victim).unwrap() == victim_before,
+        "ciphertext outside the repository was re-keyed through the symlink"
+    );
+    assert!(
+        !String::from_utf8_lossy(&std::fs::read(&victim).unwrap()).contains(&key_b.public),
+        "the new recipient gained a stanza in a file outside the repository"
+    );
+    // The repository's own secret was re-keyed for the new recipient.
+    let own = std::fs::read_to_string(repo.join(".env.encrypted")).unwrap();
+    assert!(
+        own.contains(&key_b.public),
+        "the in-repo secret was not re-keyed"
+    );
+}
+
+/// A symlink to a git-tracked file inside the repository is followed: the
+/// file it points at is re-keyed for the new recipient. Runs real `sops`.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn add_rekeys_a_tracked_file_reached_through_an_in_repo_symlink() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let (repo, key_a, key_b) = setup_repo(dir.path());
+    set_age_key_file(Some(&key_a.file));
+
+    // `shared/` matches no glob; only the link at the top level does.
+    std::fs::create_dir(repo.join("shared")).unwrap();
+    let target = repo.join("shared/app.env.encrypted");
+    std::fs::write(&target, "APP=1\n").unwrap();
+    sops::encrypt_in_place(&target, FileType::Dotenv).unwrap();
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["add", "shared/app.env.encrypted"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    std::os::unix::fs::symlink("shared/app.env.encrypted", repo.join("app.env.encrypted")).unwrap();
+
+    let result = recipient::run(
+        &test_ui(),
+        &add_command("extra", &key_b.public, false, false),
+    );
+
+    set_age_key_file(None);
+    restore_cwd(&original);
+
+    result.expect("adding a recipient should succeed");
+    assert!(
+        std::fs::read_to_string(&target)
+            .unwrap()
+            .contains(&key_b.public),
+        "the tracked file behind the in-repo symlink was not re-keyed"
+    );
+    assert!(
+        std::fs::symlink_metadata(repo.join("app.env.encrypted"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the symlink itself must be left in place"
+    );
+}
+
+/// `--external-symlinks` opts back in to re-keying through a link that
+/// leaves the repository. Runs real `sops`.
+#[cfg(unix)]
+#[test]
+#[serial]
+fn add_with_external_symlinks_rekeys_through_an_outside_link() {
+    let original = std::env::current_dir().unwrap();
+    let dir = TempDir::new().unwrap();
+    let repo_dir = dir.path().join("repo");
+    let outside = dir.path().join("outside");
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let (repo, key_a, key_b) = setup_repo(&repo_dir);
+    set_age_key_file(Some(&key_a.file));
+
+    let staging = repo.join("shared.env.encrypted");
+    std::fs::write(&staging, "SHARED=1\n").unwrap();
+    sops::encrypt_in_place(&staging, FileType::Dotenv).unwrap();
+    let shared = outside.join("shared.env.encrypted");
+    std::fs::rename(&staging, &shared).unwrap();
+    std::os::unix::fs::symlink(&shared, repo.join("shared.env.encrypted")).unwrap();
+
+    let result = recipient::run(
+        &test_ui().with_external_symlinks(true),
+        &add_command("extra", &key_b.public, false, false),
+    );
+
+    set_age_key_file(None);
+    restore_cwd(&original);
+
+    result.expect("adding a recipient should succeed");
+    assert!(
+        std::fs::read_to_string(&shared)
+            .unwrap()
+            .contains(&key_b.public),
+        "--external-symlinks did not re-key the file outside the repository"
+    );
 }
 
 #[test]

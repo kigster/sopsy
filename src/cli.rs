@@ -73,6 +73,28 @@ pub struct GlobalArgs {
     /// that don't modify committed files.
     #[arg(long, short = 'g', global = true, display_order = 101)]
     pub git: bool,
+
+    /// When re-keying or rotating every encrypted file, also follow symlinks
+    /// that leave the repository or point at files git does not track, and
+    /// include files with several hard links. Off by default: such paths are
+    /// skipped with a warning.
+    #[arg(
+        long,
+        global = true,
+        overrides_with = "no_external_symlinks",
+        display_order = 104
+    )]
+    pub external_symlinks: bool,
+
+    /// Skip symlinks that leave the repository or point at untracked files
+    /// (the default). Undoes an earlier `--external-symlinks`.
+    #[arg(
+        long,
+        global = true,
+        overrides_with = "external_symlinks",
+        display_order = 105
+    )]
+    pub no_external_symlinks: bool,
 }
 
 impl GlobalArgs {
