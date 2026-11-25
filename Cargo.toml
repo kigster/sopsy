@@ -1,6 +1,6 @@
 [package]
 name = "sopsy"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2024"
 description = "Sopsy is a friendlier front end for SOPS. It wraps age, sops and age plugins so each developer encrypts repo secrets with a private key minted in hardware. On Apple Silicon Macs that’s the Secure Enclave or Keychain, and on macOS or Linux it can be a YubiKey, with biometric unlock where supported. Access is explicit. A new teammate pulls the repo, runs `sopsy join <name>`, and can decrypt once someone approves them. When people leave, you remove their key. Only approved people can read the secrets, so committing them to git is safe, and nobody has to Slack a .env file around. Secrets also never sit decrypted on disk. Sopsy decrypts them on the fly and exports them into your shell through eval. It works for API keys, license serials and any other sensitive file your team shares."
 license = "MIT"
